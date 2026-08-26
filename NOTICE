@@ -1,0 +1,44 @@
+Remediation Zero
+Copyright 2026 Daviyon Daniels
+
+This product includes software developed for the All Things Agentic
+Hackathon (Fortified Enterprise Fleet category), sponsored by Google LLC
+and administered by Devpost, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may
+not use this file except in compliance with the License. You may obtain a
+copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------
+
+This project builds on the following, each governed by its own license.
+This list is not a substitute for the license terms of those components.
+
+  Google Agent Development Kit (ADK)
+  Copyright Google LLC
+  Licensed under the Apache License, Version 2.0
+  https://github.com/google/adk-python
+
+  Additional dependencies are declared in requirements.txt. Their
+  licenses are unmodified and are not restated here.
+
+------------------------------------------------------------------------
+Data
+------------------------------------------------------------------------
+
+All vulnerability findings under data/ are synthetic and are dedicated to
+the public domain under CC0 1.0. See data/README.md.
+
+Vulnerability enrichment queries the CISA Known Exploited Vulnerabilities
+catalog, the National Vulnerability Database, and EPSS at runtime. Those
+sources are attributed in the application output and are not redistributed
+in this repository.
+
+------------------------------------------------------------------------
+Trademarks
+------------------------------------------------------------------------
+
+Google, Google Cloud, Gemini, and Gemma are trademarks of Google LLC.
+Their use here is descriptive and does not imply endorsement.
