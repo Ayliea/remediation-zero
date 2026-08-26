@@ -1,0 +1,20 @@
+# Runtime dependencies.
+#
+# Versions are intentionally unpinned here pending a version check against the
+# installed ADK and the 2.0 docs. ADK 2.0 introduced breaking changes to the
+# agent API, event model, and session schema, so pinning from memory is exactly
+# the failure mode this file must not encode. Pin here, then regenerate the
+# matching constraints file.
+#
+# Install with the constraints file matching the local Python version:
+#   pip install -r requirements.txt -c constraints-3.12.txt
+
+google-adk
+google-cloud-firestore
+google-cloud-pubsub
+google-cloud-logging
+google-cloud-trace
+python-dotenv
+
+# --- Development ---
+pytest

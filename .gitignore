@@ -1,0 +1,124 @@
+# ===========================================================================
+# Secrets. Hard constraint 9: these never enter the repo, from the first
+# commit. This repository is PUBLIC, so the blast radius of a miss is total:
+# a committed key is compromised the moment it is pushed, and rewriting
+# history does not un-leak it. These rules are deliberately broader than the
+# files that exist today. When a rule is wrong, add a narrow ! exception
+# rather than loosening the rule.
+# ===========================================================================
+
+# --- Environment files -----------------------------------------------------
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+!.env.sample
+
+# --- Any JSON at the repository root ---------------------------------------
+# The realistic accident is a service-account key downloaded from the Cloud
+# console, named like remediation-zero-1a2b3c4d5e6f.json, dropped in the
+# project root. Nothing at the root legitimately needs to be JSON yet.
+/*.json
+
+# --- Credential material by name, at any depth -----------------------------
+*key*.json
+*secret*.json
+*token*.json
+*credential*.json
+*-sa.json
+sa-*.json
+*-sa-*.json
+*service-account*.json
+*serviceaccount*.json
+client_secret*.json
+application_default_credentials.json
+adc.json
+
+# --- Credential material by extension --------------------------------------
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.asc
+*.gpg
+*.kdbx
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+!*.pub
+
+# --- Directories that hold nothing but secrets -----------------------------
+secrets/
+.secrets/
+private/
+.credentials/
+
+# --- Cloud CLI state -------------------------------------------------------
+.gcloud/
+.config/gcloud/
+.aws/
+.azure/
+kubeconfig
+.kube/
+.netrc
+.npmrc
+.pypirc
+
+# ===========================================================================
+# Terraform. State is not a build artifact: it records resource identities and
+# can contain secrets in plaintext.
+# ===========================================================================
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ===========================================================================
+# Python
+# ===========================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.python-version
+
+# ===========================================================================
+# Local runtime artifacts
+# ===========================================================================
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

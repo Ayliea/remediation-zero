@@ -1,0 +1,7 @@
+# Fully pinned transitive closure for Python 3.12, generated from
+# requirements.txt. Regenerate rather than hand-editing:
+#
+#   pip install -r requirements.txt
+#   pip freeze > constraints-3.12.txt
+#
+# Empty until dependency versions are resolved and verified.
