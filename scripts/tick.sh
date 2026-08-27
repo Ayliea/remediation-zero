@@ -13,8 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Run one remediation cycle.
-set -euo pipefail
+# Run one remediation cycle. Safe to repeat: decisions are keyed on the
+# finding, the action and the cycle number, so re-running a cycle produces the
+# same decisions rather than a second copy of each.
+#
+#   ./scripts/tick.sh --cycle 1 --limit 5
 
-echo "tick.sh: not implemented yet." >&2
-exit 1
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec .venv/bin/python scripts/cycle.py "$@"
