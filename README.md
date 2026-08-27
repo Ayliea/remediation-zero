@@ -6,6 +6,50 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+**[Open the console](https://remediation-zero-console-978104855285.us-central1.run.app)** ·
+**[Talk to the deployed agent](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero)** ·
+[Architecture](docs/architecture.png) · [Demo runbook](docs/DEMO.md)
+
+---
+
+## What's unusual here
+
+Four claims. Each one is checkable by someone who did not write this, and the
+command that checks it is given, because a claim a reader has to take on faith
+is worth less than one they can break.
+
+- **The reporting agent is structurally unable to write a ticket — and the
+  proof performs the forbidden action rather than describing it.** A Cloud Run
+  job whose service account *is* that identity attempts the write and reports
+  the denial. Two of the four checks expect ALLOWED: an identity that can write
+  nothing proves only that it is broken, so the control is that the boundary
+  falls in a specific place. → `./scripts/verify-controls.sh`
+
+- **Every decision is challenged by a reviewer on a different model family, and
+  it disagrees.** 70 rejections across 100 verdicts; 48% of findings ratified;
+  37 of 63 needed a second proposal. The rate is reported rather than tuned
+  away, because a reviewer that ratifies everything is indistinguishable from
+  having no reviewer. → `./scripts/tick.sh --cycle 1 --limit 3`
+
+- **The elapsed time is real and cannot be manufactured.** One orchestrator
+  session created `2026-08-27T01:04:38Z` and still running. Every record carries
+  both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which
+  is scenario. `advance()` raises in real mode and there is no API that sets
+  `real_ts`. → the two clocks at the top of the console
+
+- **The deployed agent answers, and tells you what it cannot do.** It reads a
+  finding, delegates to Gemini for a proposal and Gemma to adjudicate, and
+  recalls cycles it never ran from Memory Bank — cycles filed by scheduled
+  workers whose processes have long since exited. It holds no credential that
+  can write, and says so when asked. → the playground link above
+
+Where a control could not be built as designed, the limit is named in place
+rather than left for a reader to discover. Firestore IAM is database-scoped,
+not collection-scoped, and Security Rules are bypassed by server SDKs; the
+boundary was moved to where IAM can actually enforce it, and the five agents
+that fall outside it are described as application-level separation rather than
+blurred into the same sentence.
+
 ---
 
 ## The friction
@@ -112,7 +156,10 @@ Two copies rather than one because the tick fans out to two subscriptions and ea
 |---|---|
 | Console | https://remediation-zero-console-978104855285.us-central1.run.app |
 | Agent Engine | `projects/remediation-zero/locations/us-central1/reasoningEngines/3119663582942330880` |
+| Playground | Vertex AI → Agent Engines → that id → Playground. Ask it to assess `RZ-0101`. |
+| Agent Registry | `agents/agentregistry-…-e711-bcba413ef0cb`, three skills, versioned by commit |
 | Orchestrator session | `5107592082113953792`, created 2026-08-27T01:04:38Z UTC |
+| Scheduled workers | `rz-worker-chase`, `rz-worker-exception`, daily at 09:00 UTC via Pub/Sub |
 
 The console is read-only and scales to zero. It runs under a service account holding `roles/datastore.viewer` and nothing else, and its container ships no agent framework, no model clients and no write path: the interface a stranger can reach is structurally unable to change the record it displays.
 
