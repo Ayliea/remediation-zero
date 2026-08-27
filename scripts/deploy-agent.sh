@@ -84,10 +84,14 @@ MSG
   echo "Creating the first Agent Engine instance (--create was passed)."
   # adk deploy prints "Deploy failed: ..." and still exits 0, so its exit code
   # cannot be trusted. Capture the output and inspect it.
+  # Same staging on the create path. An engine created without it imports
+  # cleanly on this machine and fails on its first query in the cloud.
   if ! out=$(.venv/bin/adk deploy agent_engine \
       --project="${GOOGLE_CLOUD_PROJECT}" \
       --region="${AGENT_ENGINE_LOCATION}" \
       --display_name="remediation-zero-orchestrator" \
+      --extra_packages=tools \
+      --extra_packages=prompts \
       agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
     echo "$out"
     echo >&2
@@ -139,6 +143,8 @@ if ! out=$(.venv/bin/adk deploy agent_engine \
     --region="${AGENT_ENGINE_LOCATION}" \
     --agent_engine_id="${AGENT_ENGINE_ID}" \
     --display_name="remediation-zero-orchestrator" \
+    --extra_packages=tools \
+    --extra_packages=prompts \
     agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
   echo "$out"
   echo >&2

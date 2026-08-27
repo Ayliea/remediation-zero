@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Orchestrator package."""
+"""Orchestrator package.
 
-from agents.orchestrator.agent import root_agent
+The import is relative because this package is loaded under two different
+names. Locally it is `agents.orchestrator`; in Agent Engine the agent is staged
+at /app/agents/orchestrator and loaded as `orchestrator`, with no
+/app/agents/__init__.py to make the absolute form resolve. An absolute import
+therefore works in every local test and fails in the deployed image, where it
+surfaces as a 400 from stream_query with the cause buried in the engine's logs.
+"""
+
+from .agent import root_agent
 
 __all__ = ["root_agent"]

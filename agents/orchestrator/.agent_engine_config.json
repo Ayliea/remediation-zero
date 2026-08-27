@@ -1,0 +1,8 @@
+{
+  "env_vars": {
+    "GOOGLE_CLOUD_LOCATION": "global",
+    "GOOGLE_GENAI_USE_VERTEXAI": "true",
+    "REASONING_MODEL": "gemini-3.5-flash",
+    "SIM_CLOCK_MODE": "real"
+  }
+}
