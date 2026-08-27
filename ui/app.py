@@ -130,6 +130,7 @@ def snapshot() -> dict:
     tickets = rows("tickets")
     exceptions = rows("exceptions")
     cycles = rows("cycles")
+    reports = sorted(rows("reports"), key=lambda r: r.get("real_ts", 0), reverse=True)
 
     # Scenario time is the furthest point the simulation has reached, taken
     # from the record rather than from this process's clock. The console never
@@ -154,6 +155,7 @@ def snapshot() -> dict:
         "tickets": tickets,
         "exceptions": exceptions,
         "cycles": cycles,
+        "reports": reports,
         "counts": counts,
         "sim_now": sim_now,
     }
@@ -252,6 +254,19 @@ tr:last-child td{border-bottom:0}
 .verdict--ratify .verdict-k{color:var(--ok)}
 .verdict p{margin:0;font-size:13px;color:var(--ink-2)}
 
+.report{display:grid;grid-template-columns:1.7fr 1fr;gap:36px;padding-top:6px}
+.report-prose p{margin:0 0 13px;max-width:62ch;font-size:14.5px}
+.report-prose p:first-child{font-size:16px;color:var(--ink)}
+.report-figures{display:flex;flex-direction:column;gap:18px;
+  border-left:1px solid var(--rule);padding-left:24px}
+.fig{display:flex;flex-direction:column;gap:2px}
+.fig-k{font-family:"IBM Plex Mono",monospace;font-size:10px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--ink-3)}
+.fig-v{font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:26px;
+  line-height:1.1;color:var(--ink)}
+.fig-n{font-size:12px;color:var(--ink-2)}
+@media(max-width:760px){.report{grid-template-columns:1fr}
+  .report-figures{border-left:0;border-top:1px solid var(--rule);padding-left:0;padding-top:18px}}
 .empty{color:var(--ink-3);font-size:13.5px;padding:20px 0;border-bottom:1px solid var(--rule-2)}
 .foot{margin-top:56px;padding-top:16px;border-top:1px solid var(--rule);
   color:var(--ink-3);font-size:12px;display:flex;gap:22px;flex-wrap:wrap}
@@ -352,6 +367,39 @@ def render(data: dict) -> str:
               <span class="t t--sim">{sim_span:.0f} days simulated</span></td>
         </tr>""")
 
+    # --- the week, in prose --------------------------------------------
+    latest = data["reports"][0] if data["reports"] else None
+    if latest:
+        m = latest.get("metrics", {})
+        paragraphs = "".join(
+            f"<p>{esc(par.strip())}</p>"
+            for par in (latest.get("summary") or "").split("\n")
+            if par.strip()
+        )
+        report_block = f"""<section class="sec">
+          <div class="sec-h"><h2 class="sec-t">This period</h2>
+            <span class="sec-c">{esc(latest.get('report_id',''))}</span></div>
+          <p class="sec-d">Written by the reporting agent from figures it was given and did
+          not compute. The counts below are the ones it was handed, kept beside the prose so
+          the narrative can be checked against them.</p>
+          <div class="report">
+            <div class="report-prose">{paragraphs}</div>
+            <div class="report-figures">
+              <div class="fig"><span class="fig-k">reviewer disagreement</span>
+                <span class="fig-v">{m.get('disagreement_rate', 0) * 100:.0f}%</span>
+                <span class="fig-n">{m.get('rejections', 0)} rejections of {m.get('verdicts_total', 0)} verdicts</span></div>
+              <div class="fig"><span class="fig-k">ratified</span>
+                <span class="fig-v">{m.get('ratification_rate', 0) * 100:.0f}%</span>
+                <span class="fig-n">{m.get('ratified', 0)} of {m.get('decisions_total', 0)} decisions</span></div>
+              <div class="fig"><span class="fig-k">needing a person</span>
+                <span class="fig-v">{m.get('human_queue_total', 0)}</span>
+                <span class="fig-n">{m.get('sla_breached', 0)} SLA breached</span></div>
+            </div>
+          </div>
+        </section>"""
+    else:
+        report_block = ""
+
     def section(title, count, description, headers, rows, empty):
         head = "".join(f"<th>{h}</th>" for h in headers)
         body = "".join(rows) if rows else ""
@@ -404,6 +452,8 @@ def render(data: dict) -> str:
 </div>
 
 <div class="counts">{count_items}</div>
+
+{report_block}
 
 {section("Human queue", f"{len(data['human_queue'])} waiting",
   "The terminal state for anything the fleet could not resolve safely. No agent reads from here; "
