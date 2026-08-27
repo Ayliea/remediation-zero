@@ -29,6 +29,7 @@ in real mode there is no supported way to move time at all.
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,8 @@ from scripts import quiet_sdk_logging
 from tools.chase import ChaseAction, ChaseState, next_action, unchaseable_reason
 from tools.clock import SimClock
 from tools.store import FirestoreIdempotencyStore
+from tools.delivery import GitHubDelivery
+from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.tickets import TicketWriter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -78,9 +81,28 @@ def run_chase(
 
     client = firestore.Client()
     store = FirestoreIdempotencyStore(client=client, clock=clock)
-    writer = TicketWriter(store=store, client=client, clock=clock)
-
     cycle_id = f"cycle-{cycle:03d}"
+
+    # Delivery is optional and its absence is stated rather than silent. The
+    # fleet's decisions are identical either way — what changes is whether the
+    # accountable person ever sees them.
+    delivery = None
+    repo = os.environ.get("GITHUB_TICKET_REPO", "").strip()
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if repo and token:
+        try:
+            delivery = GitHubDelivery(
+                GitHubTickets(repo=repo, token=token), client=client)
+            _log("delivery_enabled", cycle_id, "-", tracker=repo)
+        except GitHubUnavailable as exc:
+            _log("delivery_unavailable", cycle_id, "-", reason=str(exc)[:160])
+    else:
+        _log("delivery_disabled", cycle_id, "-",
+             reason="GITHUB_TICKET_REPO and GITHUB_TOKEN are not both set")
+
+    writer = TicketWriter(store=store, client=client, clock=clock,
+                          delivery=delivery)
+
     stamp = clock.now()
     _log("chase_started", cycle_id, "-", clock_mode=clock.mode.value,
          advanced_days=advance_days,

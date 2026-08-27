@@ -24,6 +24,8 @@ week three's nudge going out twice because the process restarted between the
 send and the write.
 """
 
+import json
+import logging
 from typing import Any, Optional
 
 from google.cloud import firestore
@@ -31,6 +33,8 @@ from google.cloud import firestore
 from tools.chase import ChaseAction, ChaseState
 from tools.clock import SimClock
 from tools.idempotency import IdempotencyGuard
+
+logger = logging.getLogger("remediation_zero.tickets")
 
 COLLECTION = "tickets"
 SLA_COLLECTION = "sla_clocks"
@@ -45,10 +49,38 @@ class TicketWriter:
         store,
         client: Optional[firestore.Client] = None,
         clock: Optional[SimClock] = None,
+        delivery: Optional[Any] = None,
     ) -> None:
         self._client = client or firestore.Client()
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
+        #: Where the ticket is delivered so a person sees it. Optional: the
+        #: fleet runs without it and the record is unchanged either way.
+        self._delivery = delivery
+
+    def _deliver(self, event: str, finding_id: str, ticket_ref, **fields) -> None:
+        """Deliver one chase action to the tracker.
+
+        Never raises. Firestore is the record and the tracker is a delivery of
+        it: a cycle whose deadline, nudge count and escalation were written
+        correctly has done its work, and an unreachable tracker is a delivery
+        to retry rather than a cycle to fail. The inverse would be worse —
+        refusing to record that a nudge was due because a network call failed
+        loses the fact itself.
+        """
+        if self._delivery is None:
+            return
+        try:
+            number = self._delivery.deliver(
+                event=event, finding_id=finding_id, **fields)
+            if number is not None:
+                ticket_ref.update({"github_issue": number})
+        except Exception as exc:  # noqa: BLE001 - deliberately broad
+            logger.warning(json.dumps({
+                "event": "delivery_failed", "finding_id": finding_id,
+                "cycle_id": "-", "action": event,
+                "error": type(exc).__name__, "detail": str(exc)[:200],
+            }, sort_keys=True))
 
     def act(
         self,
@@ -86,6 +118,9 @@ class TicketWriter:
                         ],
                     }
                 )
+                self._deliver("open_ticket", finding_id, ticket_ref,
+                              owner=owner, cycle=cycle, now_sim_ts=now_sim_ts,
+                              state=state)
                 return f"ticket:{finding_id}"
 
             entry = {"action": action.value, "cycle": cycle,
@@ -99,6 +134,8 @@ class TicketWriter:
                         "history": firestore.ArrayUnion([entry]),
                     }
                 )
+                self._deliver("nudge", finding_id, ticket_ref, owner=owner,
+                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
                 return f"nudge:{finding_id}:c{cycle}"
 
             if action is ChaseAction.ESCALATE:
@@ -114,6 +151,8 @@ class TicketWriter:
                 self._client.collection(SLA_COLLECTION).document(finding_id).update(
                     {"status": "breached"}
                 )
+                self._deliver("escalate", finding_id, ticket_ref, owner=owner,
+                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
                 return f"escalate:{finding_id}"
 
             if action is ChaseAction.HUMAN_QUEUE:
@@ -137,6 +176,8 @@ class TicketWriter:
                 )
                 ticket_ref.update({"status": "with_human",
                                    "history": firestore.ArrayUnion([entry])})
+                self._deliver("human_queue", finding_id, ticket_ref, owner=owner,
+                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
                 return f"human_queue:{finding_id}"
 
             return "noop"

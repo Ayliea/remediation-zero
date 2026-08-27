@@ -37,6 +37,11 @@ is worth less than one they can break.
   is scenario. `advance()` raises in real mode and there is no API that sets
   `real_ts`. → the two clocks at the top of the console
 
+- **It files real tickets in a real tracker.** Chase opens a GitHub issue
+  carrying the ratified severity, the deadline, the specific remediation and
+  the reviewer's own reason for accepting it, then comments as it nudges and
+  escalates. → [the issues it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues)
+
 - **The deployed agent answers, and tells you what it cannot do.** It reads a
   finding, delegates to Gemini for a proposal and Gemma to adjudicate, and
   recalls cycles it never ran from Memory Bank — cycles filed by scheduled
@@ -71,12 +76,18 @@ A finding lands. From there no human is involved until a decision genuinely need
 5. **Exception and Expiry** records risk acceptances with a TTL and re-opens the finding automatically when one lapses.
 6. **Reporting** produces the weekly metrics the analyst would otherwise assemble by hand.
 
-A ticket here is a record in Firestore and a nudge increments that record; no
-ticketing system is contacted and no message is sent to anybody. The lifecycle,
-the deadlines and the escalation logic are real and are what the fleet is built
-to carry — the connectors that would deliver them are named in the roadmap and
-are not built. Saying so matters more than usual in a project whose argument is
-that every claim it makes can be checked.
+Firestore is the record and the tracker is a delivery of it. When
+`GITHUB_TICKET_REPO` and `GITHUB_TOKEN` are set, chase files a real GitHub issue
+carrying the ratified severity, the deadline, the specific remediation, the
+evidence cited, and the reviewer's own reason for accepting it — then comments
+on that issue as it nudges, escalates, and finally hands the finding to a
+person. [See the tickets it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues).
+
+That direction is one-way on purpose. Reading replies back would be untrusted
+ingress and would have to pass Model Armor first, which is a second feature and
+is not built. Email and chat are not wired either. Delivery is also optional and
+its absence is logged rather than silent: with no tracker configured the fleet
+reaches exactly the same decisions and simply has nowhere to put them.
 
 ## Architecture
 
@@ -306,6 +317,12 @@ Discoverable by search, not merely published.
 for d in 2 4 6 8 10; do
   SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((2+d)) --advance-days $d
 done
+
+# Chase files real GitHub issues when both of these are set, and comments on
+# them as it nudges and escalates. Unset, the fleet decides identically and
+# logs that it had nowhere to deliver.
+export GITHUB_TICKET_REPO="you/your-ticket-repo"
+export GITHUB_TOKEN="$(gh auth token)"     # never committed; .env is gitignored
 SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle 2 --sweep
 ./scripts/report.sh --cycle 2
 ```
@@ -427,7 +444,9 @@ Minimum instances are zero and maximum instances are capped, so idle cost is neg
 Out of scope for the hackathon build, kept here so the boundary is explicit:
 
 - Real scanner integrations rather than a synthetic corpus
-- Ticketing system connectors
+- Ticket replies read back into the fleet, which is untrusted ingress and needs
+  Model Armor in front of it before it can be trusted at all
+- Email and chat delivery alongside the tracker
 - Human approval workflow for escalations above a severity threshold
 - Multi-tenant isolation
 
