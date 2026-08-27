@@ -41,9 +41,27 @@ gcloud builds submit \
   --substitutions="_IMAGE=${IMAGE}" \
   --quiet
 
+# Only chase delivers to the tracker, so only chase is given the token. The
+# grant is on the secret rather than the project, so rz-exception is not merely
+# un-configured — it cannot read the credential at all. An exception sweep that
+# could file a ticket would be a capability nobody asked it to have.
+GITHUB_REPO="${GITHUB_TICKET_REPO:-}"
+
 for agent in chase exception; do
   SERVICE="rz-worker-${agent}"
   SA="rz-${agent}@${PROJECT}.iam.gserviceaccount.com"
+
+  EXTRA_ENV=""
+  SECRETS=()
+  if [[ "${agent}" == "chase" && -n "${GITHUB_REPO}" ]]; then
+    EXTRA_ENV=",GITHUB_TICKET_REPO=${GITHUB_REPO}"
+    SECRETS=(--set-secrets="GITHUB_TOKEN=rz-github-token:latest")
+    echo
+    echo "  ${SERVICE} will deliver to ${GITHUB_REPO}"
+    echo "  token comes from Secret Manager at request time; it is never in the"
+    echo "  image, never in the deploy command, and never in an env var this"
+    echo "  script can print."
+  fi
 
   echo
   echo "Deploying ${SERVICE} as ${SA}..."
@@ -58,7 +76,8 @@ for agent in chase exception; do
     --cpu=1 \
     --memory=512Mi \
     --timeout=300 \
-    --set-env-vars="WORKER_AGENT=${agent},SIM_CLOCK_MODE=${SIM_CLOCK_MODE:-real},GOOGLE_CLOUD_PROJECT=${PROJECT}" \
+    --set-env-vars="WORKER_AGENT=${agent},SIM_CLOCK_MODE=${SIM_CLOCK_MODE:-real},GOOGLE_CLOUD_PROJECT=${PROJECT}${EXTRA_ENV}" \
+    "${SECRETS[@]}" \
     --quiet
 done
 

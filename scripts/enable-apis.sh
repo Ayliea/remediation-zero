@@ -32,6 +32,7 @@ APIS=(
   firestore.googleapis.com           # working state
   pubsub.googleapis.com              # events and dead-letter queue
   cloudscheduler.googleapis.com      # cycle tick
+  secretmanager.googleapis.com       # the tracker token, read at request time
   cloudtrace.googleapis.com          # telemetry
   logging.googleapis.com             # structured logs
   modelarmor.googleapis.com          # guardrails on untrusted ingress

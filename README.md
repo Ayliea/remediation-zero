@@ -118,6 +118,23 @@ expect ALLOWED  | got ALLOWED                     | read a finding
 expect ALLOWED  | got ALLOWED                     | write a report
 ```
 
+The tracker credential is scoped the same way and checked the same way. Only
+`rz-chase` holds `secretmanager.secretAccessor` on it, so the exception sweep
+cannot reach the tracker at all — not by convention, but because the grant is
+on the secret. A second Cloud Run job running *as* `rz-exception` proves it:
+
+```
+expect DENIED   | got DENIED (PermissionError)    | read the tracker token
+expect ALLOWED  | got ALLOWED                     | read a finding
+```
+
+Both probes run as the identity rather than borrowing it, and that distinction
+was earned. The first attempt at the second check used
+`--impersonate-service-account` from a laptop, and both identities returned
+`PERMISSION_DENIED` on `iam.serviceAccounts.getAccessToken` — a refusal to
+impersonate, which says nothing about the secret. Read one way it looked like
+proof of the control; it was proof that the operator cannot impersonate anyone.
+
 The last two matter as much as the first two. An identity that can write nothing proves only that it is broken; the control is that the boundary falls in a specific place.
 
 The remaining five agents hold distinct identities with collection separation enforced in application code. That is a weaker guarantee than IAM enforcement and is named as such here rather than blurred into the same sentence.
@@ -158,6 +175,7 @@ Two copies rather than one because the tick fans out to two subscriptions and ea
 | Discovery | Agent Registry, published with skills and versioned by commit |
 | Telemetry | Cloud Trace, Cloud Logging (OpenTelemetry) |
 | Events | Pub/Sub with dead-letter queue, Cloud Scheduler |
+| Secrets | Secret Manager, read at request time, granted per agent |
 | Interface | Cloud Run |
 | Infrastructure as code | Terraform, in `infra/`, for the event plumbing |
 
@@ -362,8 +380,9 @@ would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
 ### 9. Verify the controls
 
 ```bash
-./scripts/verify-controls.sh                          # all four, 3-4 minutes
+./scripts/verify-controls.sh                          # all five, 5-6 minutes
 ./scripts/verify-controls.sh --only armor,reviewer,resume   # the fast three, under 20s
+./scripts/verify-controls.sh --only secret                   # the token boundary, ~2m
 ```
 
 The probe check executes a Cloud Run job as the reporting identity, which is
@@ -380,6 +399,7 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] Model Armor blocks the planted injection
 [PASS] Reviewer catches it with Model Armor disabled
 [PASS] Reporting identity is denied a ticket write
+[PASS] Exception identity is denied the tracker token
 [PASS] A resumed cycle writes nothing a second time
 ```
 

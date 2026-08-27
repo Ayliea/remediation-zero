@@ -52,6 +52,7 @@ These are not preferences. Violating any of them breaks the submission.
 | Cross-session memory | Agent Platform Memory Bank |
 | Events | Pub/Sub with dead-letter queue, driven by Cloud Scheduler |
 | Guardrails | Model Armor on all untrusted ingress |
+| Secrets | Secret Manager, granted per agent on the secret itself |
 | Telemetry | Cloud Trace, Cloud Logging |
 | Interface | Cloud Run |
 | Infrastructure | Terraform in `infra/` |
@@ -100,7 +101,7 @@ python3 -m venv .venv
 ./scripts/verify-events.sh                    # prove the dead-letter queue
 ./scripts/register-agent.sh --apply           # publish to Agent Registry, then prove discovery
 ./scripts/tick.sh                             # run one cycle
-./scripts/verify-controls.sh                  # prove the four security claims
+./scripts/verify-controls.sh                  # prove the five security claims
 ./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~17s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
 ./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets ONLY

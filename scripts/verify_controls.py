@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prove the four security claims. Every one of them, by doing it.
+"""Prove the five security claims. Every one of them, by doing it.
 
     ./scripts/verify-controls.sh
 
@@ -125,6 +125,41 @@ def check_reviewer_catches_it_independently() -> None:
 
 # --- 3 ----------------------------------------------------------------------
 
+def _run_probe_job(job: str, name: str) -> None:
+    """Execute one probe job and score it from its own output."""
+    execute = subprocess.run(
+        ["gcloud", "run", "jobs", "execute", job,
+         "--project", PROJECT, "--region", "us-central1", "--wait"],
+        capture_output=True, text=True, check=False,
+    )
+    if execute.returncode != 0 and job in execute.stderr:
+        record(name, False,
+               f"INCONCLUSIVE: the {job} job is not deployed. See the README.",
+               inconclusive=True)
+        return
+
+    execution = subprocess.run(
+        ["gcloud", "run", "jobs", "executions", "list", "--job", job,
+         "--project", PROJECT, "--region", "us-central1",
+         "--limit", "1", "--format", "value(name)"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+
+    logs = subprocess.run(
+        ["gcloud", "logging", "read",
+         f'resource.type=cloud_run_job AND labels."run.googleapis.com/execution_name"="{execution}"',
+         "--project", PROJECT, "--limit", "30",
+         "--format", "value(textPayload)", "--order", "asc"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+
+    held = "CONTROL HOLDS" in logs
+    lines = [ln.strip() for ln in logs.splitlines() if "expect" in ln]
+    record(name, held,
+           " | ".join(ln.split("|")[-1].strip() + ": " + ln.split("|")[1].strip()
+                      for ln in lines) or logs.strip()[:200])
+
+
 def check_reporting_cannot_write_tickets() -> None:
     """Run the probe as the reporting identity and read what happened.
 
@@ -174,6 +209,22 @@ def check_reporting_cannot_write_tickets() -> None:
 
 # --- 4 ----------------------------------------------------------------------
 
+def check_exception_cannot_read_the_token() -> None:
+    """Run the probe as the exception identity and read what happened.
+
+    A Cloud Run job whose service account IS rz-exception, attempting to read
+    the credential only rz-chase is granted. Not impersonation: the first
+    attempt at this check ran `--impersonate-service-account` from a laptop and
+    both identities returned PERMISSION_DENIED on getAccessToken — a refusal to
+    impersonate, which says nothing about the secret. It reads as proof of the
+    control and is proof that the operator cannot impersonate anyone.
+    """
+    _run_probe_job(
+        job="exception-secret-probe",
+        name="Exception identity is denied the tracker token",
+    )
+
+
 def check_resume_produces_no_duplicates() -> None:
     """Re-run a cycle that already ran and confirm nothing new is written."""
     client = firestore.Client()
@@ -214,6 +265,8 @@ CHECKS = {
                  lambda: check_reviewer_catches_it_independently()),
     "probe": ("Reporting identity is denied a ticket write",
               lambda: check_reporting_cannot_write_tickets()),
+    "secret": ("Exception identity is denied the tracker token",
+               lambda: check_exception_cannot_read_the_token()),
     "resume": ("A resumed cycle writes nothing a second time",
                lambda: check_resume_produces_no_duplicates()),
 }

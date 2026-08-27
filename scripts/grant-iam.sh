@@ -91,6 +91,20 @@ echo "  and the Cloud Run workers, each as itself. Granting datastore.user here"
 echo "  would make the reporting-denial control untrue of the deployment."
 
 echo
+echo "The tracker credential is granted on the secret, not on the project:"
+gcloud secrets add-iam-policy-binding rz-github-token \
+  --project="${PROJECT}" \
+  --member="$(sa chase)" \
+  --role="roles/secretmanager.secretAccessor" \
+  --quiet > /dev/null 2>&1 || echo "  (create the secret first: see the README)"
+echo "  rz-chase: roles/secretmanager.secretAccessor on rz-github-token only"
+echo
+echo "  Chase delivers to the tracker and the exception sweep does not, so only"
+echo "  chase can read the token. The boundary is on the secret rather than on"
+echo "  the exception agent choosing not to ask, and exception-secret-probe"
+echo "  proves it by running as rz-exception and being refused."
+
+echo
 echo "Allowing the operator to impersonate rz-reporting, so the denial can be"
 echo "demonstrated rather than described..."
 OPERATOR="$(gcloud config get-value account 2>/dev/null)"
