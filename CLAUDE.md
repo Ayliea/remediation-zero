@@ -12,16 +12,28 @@ The system is built to a standard of architectural discipline: decoupled compone
 
 These are not preferences. Violating any of them breaks the submission.
 
-1. **ADK 2.0 only.** ADK 2.0 introduced breaking changes to the agent API, event model, and session schema. Do not write 1.x patterns from memory. Check the installed version and the 2.0 docs before using any ADK API. Use the `Workflow` graph runtime and the `Task` API for delegation.
+1. **ADK 2.x only.** ADK 2.0 introduced breaking changes to the agent API, event model, and session schema. Do not write 1.x patterns from memory. Check the installed version and the docs before using any ADK API.
+   - Installed and pinned: **2.8.0**. Verified against the installed package, not from memory.
+   - `Workflow` is real and top-level, backed by `google.adk.workflow` (`Node`, `Edge`, `START`, `DEFAULT_ROUTE`, `JoinNode`, `RetryConfig`).
+   - **There is no top-level `Task` API.** Task models live at `google.adk.agents.llm.task`. Delegation in 2.x is expressed through `AgentTool` plus `SequentialAgent` / `ParallelAgent` / `LoopAgent` / `ManagedAgent`.
+   - `Agent` gained `rerun_on_resume` and `retry_config`; both are relevant to resume safety and the circuit breaker.
+   - Session and memory services are **async throughout** (`create_session`, `list_sessions`, `add_memory`).
+   - The agent loader resolves `root_agent` from `agents/<name>/agent.py`.
 2. **No pre-existing code.** Everything in this repo must be written during the submission period. Do not import, adapt, or reconstruct code from any other project.
 3. **Reasoning runs on Gemini via Vertex / Agent Platform.** Not the Gemini Developer API. The deployment must produce Google Cloud traces.
+   - **Model location and engine location are different and must stay separate.** `gemini-3.5-flash` is served from `global` and returns 404 from a named region. Agent Engine deploys into a named region. So `GOOGLE_CLOUD_LOCATION=global` for reasoning, `AGENT_ENGINE_LOCATION=us-central1` for the engine.
+   - Addressing the **engine** with the model's location returns `The ReasoningEngine does not exist`, which reads like the engine was lost. It was not. Check the location before believing that message.
 4. **The reviewer agent runs on a different model family (Gemma).** This is a deliberate architectural decision, not an implementation detail. Do not "simplify" it by moving the reviewer onto Gemini.
 5. **Every side-effecting tool takes an idempotency key.** Derived deterministically from finding ID, action type, and cycle number. A resumed agent must never duplicate a ticket, a nudge, or an escalation. No exceptions, including for tools that seem harmless.
 6. **Every time read goes through `SimClock`.** Never call `datetime.now()`, `time.time()`, or a database server timestamp directly. Every persisted record carries both `real_ts` and `sim_ts`. `real_ts` is wall clock and is never falsified or backdated under any circumstances.
 7. **Each sub-agent has its own service account with IAM scoped to its own Firestore collections.** No shared credential. The reporting agent must be structurally incapable of writing tickets.
 8. **No real data, ever.** No production systems, no employer data, no client data, no real hostnames, IPs, or people. Synthetic corpus only. Real CVE identifiers are fine and expected.
 9. **Secrets never enter the repo.** `.env`, service account JSON, and API keys are gitignored from the first commit.
-10. **The deployed agent resource is never deleted or recreated.** It has a stable, explicit resource name and is always updated in place. A long-running session with days of real elapsed time is tied to it, and that elapsed time is the single strongest proof point in the demo. If it is lost it cannot be regenerated before the deadline. Any script that could delete or recreate it must refuse and report the existing resource instead.
+10. **The deployed agent resource is never deleted or recreated.** The live identifiers, recorded here so they cannot be lost:
+    - Engine: `projects/remediation-zero/locations/us-central1/reasoningEngines/3119663582942330880`
+    - Session: `5107592082113953792`, created `2026-08-27T01:04:38Z` UTC (`real_ts 1787792678.119875`)
+    - `adk deploy agent_engine` **creates a new instance when `--agent_engine_id` is omitted, and does not error.** It also prints `Deploy failed` while exiting 0. `deploy-agent.sh` guards both; do not bypass it.
+ It has a stable, explicit resource name and is always updated in place. A long-running session with days of real elapsed time is tied to it, and that elapsed time is the single strongest proof point in the demo. If it is lost it cannot be regenerated before the deadline. Any script that could delete or recreate it must refuse and report the existing resource instead.
 11. **Enrichment responses are cached to disk.** CISA KEV, NVD, and EPSS are queried once and cached. The live demo must never depend on a third-party API being reachable at that moment.
 12. **Untrusted text passes Model Armor before reaching any reasoning context.** Untrusted means anything that originated outside the system: scanner comment fields, ticket replies, vendor advisory text. Findings metadata generated by the seed script is trusted; free text carried inside it is not.
 
@@ -29,9 +41,9 @@ These are not preferences. Violating any of them breaks the submission.
 
 | Concern | Choice |
 |---|---|
-| Reasoning model | `gemini-3.5-flash` via Vertex / Agent Platform |
+| Reasoning model | `gemini-3.5-flash` via Vertex / Agent Platform, served from `global` |
 | Reviewer model | Gemma (version set in `.env`) |
-| Agent framework | ADK 2.0, pinned with the matching constraints file |
+| Agent framework | ADK 2.8.0, pinned with `constraints-3.12.txt` |
 | Runtime | Agent Runtime, long-running orchestrator session |
 | Working state | Firestore |
 | Cross-session memory | Agent Platform Memory Bank |
@@ -40,7 +52,7 @@ These are not preferences. Violating any of them breaks the submission.
 | Telemetry | Cloud Trace, Cloud Logging |
 | Interface | Cloud Run |
 | Infrastructure | Terraform in `infra/` |
-| Language | Python 3.10+ |
+| Language | Python 3.12.3 locally; ADK requires >=3.10 |
 
 ## The agents
 
@@ -64,22 +76,34 @@ Read-only reference collections, written by the seed script and never by an agen
 
 Keep these current. If you add a script, add it here.
 
+All Python runs through the local virtualenv. The system interpreter is
+PEP 668 externally-managed, so `pip install` outside `.venv` fails.
+
 ```bash
-pip install -r requirements.txt -c constraints-3.12.txt   # match local Python version
-pytest                              # full test suite
-pytest tests/test_idempotency.py    # the two suites that matter most
-pytest tests/test_clock.py
-adk run agents/orchestrator         # local inner loop, against Vertex
-./scripts/deploy-agent.sh           # update deployed agent in place, safe to repeat
-./scripts/deploy-ui.sh              # console to Cloud Run
-./scripts/tick.sh                   # run one cycle
-./scripts/verify-controls.sh        # prove the four security claims
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt -c constraints-3.12.txt
+
+.venv/bin/pytest                              # full test suite
+.venv/bin/pytest tests/test_idempotency.py    # the two suites that matter most
+.venv/bin/pytest tests/test_clock.py
+
+./scripts/enable-apis.sh                      # idempotent, safe to repeat
+.venv/bin/adk run agents/orchestrator         # local inner loop, against Vertex
+./scripts/deploy-agent.sh                     # update in place, safe to repeat
+./scripts/deploy-agent.sh --create            # FIRST ENGINE ONLY. never again.
+.venv/bin/python scripts/session-init.py      # refuses if a session exists
+./scripts/deploy-ui.sh                        # console to Cloud Run
+./scripts/tick.sh                             # run one cycle
+./scripts/verify-controls.sh                  # prove the four security claims
 terraform -chdir=infra apply
 ```
 
 ## Cost and infrastructure
 
-Budget is $150 in credits for the entire build. Terraform and deploy scripts must respect this.
+**There are no credits.** The Google Cloud credit form closed before this
+project applied, so every dollar spent is out of pocket. Terraform and deploy
+scripts must respect that, and the cost guidance below is a hard requirement
+rather than good practice.
 
 - Minimum instances 0 everywhere. Maximum instances explicitly capped.
 - No always-on endpoints. If Gemma requires a dedicated endpoint, it is created and destroyed around use, never left running.
