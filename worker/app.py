@@ -68,9 +68,24 @@ RUNNERS = {"chase": run_chase, "exception": run_sweep}
 app = FastAPI(title="Remediation Zero worker")
 
 
-def _log(event: str, **fields) -> None:
+def _log(event: str, cycle: int | None = None, **fields) -> None:
+    """Emit one structured line in the same shape as every other agent's.
+
+    cycle_id and finding_id are always present, because the convention is that
+    a single finding's journey is greppable end to end. A scheduled run that
+    logged its own dialect would break that trail at exactly the point where
+    nobody was watching it happen.
+    """
     logger.info(json.dumps(
-        {"event": event, "agent": AGENT, **fields}, sort_keys=True, default=str))
+        {
+            "event": event,
+            "agent": AGENT,
+            "cycle_id": f"cycle-{cycle:03d}" if cycle is not None else "-",
+            "finding_id": "-",  # the worker acts on the fleet, not one finding
+            **({"cycle": cycle} if cycle is not None else {}),
+            **fields,
+        },
+        sort_keys=True, default=str))
 
 
 @app.get("/healthz")

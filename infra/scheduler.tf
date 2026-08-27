@@ -26,9 +26,14 @@ resource "google_cloud_scheduler_job" "tick" {
   schedule    = var.tick_schedule
   time_zone   = "Etc/UTC"
 
-  # A tick that has not been delivered within the hour is stale: the next one
-  # is already close, and it will do the same work from newer state.
-  attempt_deadline = "320s"
+  # No attempt_deadline here. Cloud Scheduler only honours it for HTTP targets,
+  # so on a Pub/Sub target the API accepts the field, discards it, and every
+  # subsequent plan reports the same one-line change forever. A configuration
+  # that never converges is worse than a missing setting: it teaches whoever
+  # runs plan next to skim past a diff instead of reading it.
+  #
+  # Delivery timing is the subscription's job anyway — ack_deadline_seconds and
+  # the retry policy in events.tf are where it actually takes effect.
 
   retry_config {
     retry_count = 3

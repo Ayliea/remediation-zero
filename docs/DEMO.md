@@ -215,9 +215,19 @@ that the boundary falls in a specific place.
 ### 9. It runs itself — 30s
 
 ```bash
-# Exactly what Cloud Scheduler publishes at 09:00 UTC every day.
-gcloud pubsub topics publish remediation-tick --message='{"advance_days":0}'
+# Fresh work. An explicit cycle overrides the one derived from the day.
+gcloud pubsub topics publish remediation-tick --message='{"cycle":9001}'
+
+# Then the guard: publish the same thing again.
+gcloud pubsub topics publish remediation-tick --message='{"cycle":9001}'
 ```
+
+**Name a cycle explicitly rather than publishing the scheduler's own payload.**
+The empty payload is what Cloud Scheduler sends, and it is the honest thing to
+show — but the cycle it derives is the *day*, so if the schedule has already
+fired at 09:00 UTC, or you rehearsed earlier, both workers answer
+`tick_already_ran` and nothing visible happens. That is the guard working
+correctly and it is a terrible opening shot. Rehearsal hit exactly this.
 
 Then show the logs. One publish, two workers, each under its own identity:
 
@@ -226,7 +236,7 @@ tick_started  → tick_finished  cycle=30692  rz-worker-chase      {'wait': 6}
 tick_started  → tick_finished  cycle=30692  rz-worker-exception  {'none': 1}
 ```
 
-Publish it a second time and both answer `tick_already_ran`. The cycle is
+The second publish gets `tick_already_ran` from both. The cycle is
 derived from the day rather than carried in the payload, because Cloud
 Scheduler cannot template a date and keeps no counter — a literal cycle would
 have been the same integer every day, and the idempotency guard would then have
@@ -259,6 +269,7 @@ Ending on a named limit is stronger than ending on a claim.
 | Symptom | What it is | Do this |
 |---|---|---|
 | Console blank or slow | Cold start, 18s | Keep talking. It arrives. |
+| Tick says `tick_already_ran` | Today's cycle already ran; the cycle is derived from the day | Publish with an explicit `"cycle"` |
 | Cloud Trace empty | Indexing lag, one to two minutes | Move on, return later |
 | `429 RESOURCE_EXHAUSTED` | Gemma MaaS capacity | It retries with backoff. Let it. A failed finding routes to the human queue rather than dropping. |
 | `advance() is not available in real mode` | Missing `SIM_CLOCK_MODE=sim` | This is the guard working. Say so, prefix, re-run. |
