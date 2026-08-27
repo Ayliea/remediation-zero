@@ -53,7 +53,7 @@ Those run once and have already run.
 
 ## The path, in order
 
-Total command runtime is 1m57s. Narration is what fills the rest.
+Total command runtime is about 2m30s. Narration is what fills the rest.
 
 ### 1. The ledger — 20s of talking, no commands
 
@@ -124,39 +124,58 @@ remediation.finding
 Traces take a minute or two to index. If it is not there, this is indexing lag,
 not a failure — move on and come back. Do not debug it on camera.
 
-### 6. Six weeks in eight seconds — 10s
+### 6. The weeks after the scan, stepped — 40s
 
 ```bash
-SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $C --advance-days 8
+for d in 2 4 6 8 10; do
+  SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((C+d)) --advance-days $d
+done
 SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle $C --sweep
 ```
 
-**Use 8 days, not 42.** This is the correction the dry run earned. A 42-day
-advance jumps past every intermediate state at once: each clock lands far
-beyond its deadline, so chase escalates nearly all of them and the screen fills
-with `human_queue`. At 8 days the same command shows the whole range —
-`wait`, `open_ticket`, `escalate`, `human_queue`, and a reasoned
-`skipped_not_chaseable` — which is the lifecycle the agent exists to
-demonstrate. Repeat the command with a larger advance to walk it forward.
+Measured, on clocks with a 7-day SLA:
 
-Chase runs over every SLA clock, so what it prints depends on accumulated
-state rather than on this cycle alone. Check the mix before recording:
+```
++2d    open_ticket: 6
++4d    nudge: 3, wait: 3
++6d    nudge: 6
++8d    escalate: 3, wait: 3
++10d   human_queue: 3, nudge: 3
+```
+
+**Size the advance to the nudge interval, not to the calendar.** This is the
+correction the dry run earned, and it was earned twice. The runbook first said
+42 days, on the reasoning that the story is "six weeks in eight seconds": every
+clock lands past its deadline at once, chase escalates all of them, and the
+screen fills with `human_queue`. Reducing it to 8 was still wrong for the same
+reason in miniature — the SLA on these findings is 7 days, so an 8-day jump is
+still one step from `open_ticket` to `escalate` with the nudging never shown.
+
+The interval that matters is the SLA window divided by `MAX_NUDGES + 1`, which
+is 1.75 days here. Stepping at roughly that size is what makes the lifecycle
+legible: the ticket opens, the owner is nudged while there is still time,
+escalation happens once when the deadline passes, and only then does it reach
+a person. That is the behaviour the agent exists to demonstrate, and a single
+large advance hides all of it.
+
+Check the window before choosing the step:
 
 ```bash
 .venv/bin/python -c "
 from google.cloud import firestore
-from collections import Counter
-print(Counter(d.to_dict().get('status')
-      for d in firestore.Client().collection('sla_clocks').stream()))"
+for d in firestore.Client().collection('sla_clocks').stream():
+    n = d.to_dict().get('sla_days')
+    print(d.id, 'sla', n, 'days · nudge interval', round(n/4, 2) if n else None)"
 ```
-
-If almost everything reads `breached`, rehearsal has aged the corpus past the
-interesting part and this step will not show the range no matter what advance
-is used.
 
 `SIM_CLOCK_MODE=sim` is required and worth showing. Without it `advance()`
 raises rather than fabricating elapsed time — the clock refuses to lie about
 the one number the demo is staking its credibility on.
+
+If the mix reads mostly `breached` before you start, rehearsal has aged the
+corpus past the interesting part. `./scripts/reset-derived.sh` clears
+`sla_clocks` and `tickets` and nothing else; run a fresh cycle on untouched
+findings afterwards to rebuild them.
 
 ### 7. Reporting — 15s
 
@@ -214,10 +233,11 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `tick.sh --limit 3` | 49.4s |
 | `tick.sh` re-run, same cycle | 5.5s (1.2s of work) |
 | `graph.sh`, one finding | 20.4s |
-| `chase.sh --advance-days 42` | 7.7s |
+| `chase.sh --advance-days N` | 6.8–7.7s each |
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 14.9s |
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh`, all four | 3m23s–3m58s |
-| `pytest`, 173 tests | 18.7s |
+| `pytest`, 180 tests | 19.0s |
+| `reset-derived.sh --confirm`, 29 docs | under 5s |

@@ -210,11 +210,15 @@ Two things worth knowing before running these.
 ./scripts/graph.sh --cycle 1 --finding RZ-0101
 
 # Accelerated: replay the weeks after the scan. Simulated time only —
-# advance() raises in real mode, so this needs SIM_CLOCK_MODE=sim. Advance in
-# steps rather than one jump: a single 42-day advance lands every clock past
-# its deadline at once, so chase escalates everything and the intermediate
-# nudging is never shown.
-SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle 2 --advance-days 8
+# advance() raises in real mode, so this needs SIM_CLOCK_MODE=sim.
+#
+# Step the advance at roughly the nudge interval, which is the SLA window
+# divided by MAX_NUDGES + 1. One large jump lands every clock past its deadline
+# at once, so chase escalates everything and never shows the nudging in
+# between. On a 7-day SLA that interval is 1.75 days:
+for d in 2 4 6 8 10; do
+  SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((2+d)) --advance-days $d
+done
 SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle 2 --sweep
 ./scripts/report.sh --cycle 2
 ```
@@ -250,7 +254,29 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] A resumed cycle writes nothing a second time
 ```
 
-### 8. Tear down
+### 8. Reset the demo state
+
+Rehearsing advances simulated time, and every advance ages the SLA clocks.
+After enough rehearsals almost every clock reads `breached`, so chase escalates
+nearly everything and stops showing the lifecycle it exists to demonstrate.
+
+```bash
+./scripts/reset-derived.sh              # dry run: prints what would go
+./scripts/reset-derived.sh --confirm    # clears sla_clocks and tickets
+```
+
+Both collections are derived: chase rebuilds them from the decisions that
+produced them, so clearing them costs nothing that cannot be recomputed. The
+allowlist is closed and everything else is refused by default, including any
+collection added to the schema later. `decisions` and `human_queue` are the
+adjudication record, `idempotency` is what the resume control checks itself
+against, and the Agent Engine and its session are not reachable from the script
+at all — the tests assert its source does not name them.
+
+Winding simulated time backwards would have been the other way to do this, and
+it is the wrong one. `real_ts` is wall clock and this script never writes one.
+
+### 9. Tear down
 
 ```bash
 # Cloud Run scales to zero, so idle cost is already nil. To remove everything:

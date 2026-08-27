@@ -98,6 +98,9 @@ python3 -m venv .venv
 ./scripts/deploy-ui.sh                        # console to Cloud Run
 ./scripts/tick.sh                             # run one cycle
 ./scripts/verify-controls.sh                  # prove the four security claims
+./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~17s
+./scripts/reset-derived.sh                    # dry run: what a reset would clear
+./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets ONLY
 terraform -chdir=infra apply
 ```
 
