@@ -39,6 +39,7 @@ import os
 from typing import Any, Optional
 
 from tools.enrichment import EnrichmentCache
+from tools.model_armor import ModelArmor, apply_verdict
 from tools.review_models import render_finding
 
 #: Seeded reference data, written by the seed script and never by an agent.
@@ -46,6 +47,15 @@ FINDINGS = "findings"
 ASSETS = "assets"
 
 _cache: Optional[EnrichmentCache] = None
+_armor: Optional[ModelArmor] = None
+
+
+#: Returned when screening could not even be attempted. Distinct wording from
+#: Model Armor's own notice so the record can tell the two apart.
+WITHHELD_ON_ERROR = (
+    "[untrusted scanner text withheld: the screener could not be reached, so "
+    "this text was never checked and is not shown]"
+)
 
 
 class FindingNotFound(LookupError):
@@ -62,6 +72,52 @@ def _enrichment_cache() -> EnrichmentCache:
     if _cache is None:
         _cache = EnrichmentCache()
     return _cache
+
+
+def _armor_token() -> str:
+    """An access token from the ambient service account.
+
+    Not a subprocess call to gcloud, which is how the command-line drivers get
+    theirs. There is no gcloud binary inside Agent Engine, and a screener that
+    cannot authenticate returns unreachable — which fails closed and withholds
+    every scanner comment, turning a missing binary into a silent loss of the
+    only untrusted field the agents reason over.
+    """
+    import google.auth
+    import google.auth.transport.requests
+
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    credentials.refresh(google.auth.transport.requests.Request())
+    return credentials.token
+
+
+def _screen_comment(text: str) -> str:
+    """Screen the one untrusted field, and return what a model may see.
+
+    Constraint 12: untrusted text passes Model Armor before reaching any
+    reasoning context. The command-line paths did this and the deployed path
+    did not, which meant the boundary was missing on exactly the surface a
+    visitor exercises. The reviewer still caught the planted injection, but the
+    reviewer is the second layer; this is the first.
+
+    Fails closed by construction: `screen` returns blocked on an unreachable
+    service and `parse_sanitize_response` returns blocked on a response it
+    cannot read, so `apply_verdict` withholds in both cases without this
+    function needing to decide anything.
+    """
+    global _armor
+    if not text or not text.strip():
+        return text
+    if _armor is None:
+        _armor = ModelArmor()
+    try:
+        verdict = _armor.screen(text, _armor_token())
+    except Exception:  # noqa: BLE001 - deliberately broad
+        # Could not even attempt it. Withhold rather than pass through: an
+        # unscreened prompt on a bad minute is the failure this exists to stop.
+        return WITHHELD_ON_ERROR
+    return apply_verdict(text, verdict)
 
 
 def _client() -> Any:
@@ -115,6 +171,12 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
         str(finding.get("asset_id", ""))
     ).get()
     asset = (asset_snapshot.to_dict() or {}) if asset_snapshot.exists else {}
+
+    # The scanner comment is the only field here that came from outside this
+    # system. It is screened before the rendering that a model will read.
+    finding = dict(finding)
+    finding["scanner_comment"] = _screen_comment(
+        finding.get("scanner_comment") or "")
 
     enrichment = _enrichment_cache().enrich(finding.get("cve_id", ""))
     return render_finding(finding, asset, enrichment)

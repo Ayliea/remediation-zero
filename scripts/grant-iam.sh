@@ -83,6 +83,16 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --role="roles/datastore.viewer" \
   --condition=None --quiet > /dev/null
 echo "  reasoning engine agent: roles/datastore.viewer   (read only, never datastore.user)"
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+  --role="roles/modelarmor.user" \
+  --condition=None --quiet > /dev/null
+echo "  reasoning engine agent: roles/modelarmor.user   (screen untrusted text)"
+echo
+echo "  The deployed agent reads a finding, and the scanner comment on that"
+echo "  finding came from outside the system. Constraint 12 says it passes"
+echo "  Model Armor before any reasoning context sees it, so the identity that"
+echo "  does the reading must be able to screen."
 echo
 echo "  An Agent Engine runs as one service account, so everything attached to"
 echo "  the deployed orchestrator shares this identity. It is therefore given"
