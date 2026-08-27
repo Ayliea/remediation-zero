@@ -23,3 +23,23 @@ the public domain under [CC0 1.0](https://creativecommons.org/publicdomain/zero/
 Cached enrichment responses are not covered by that dedication. They are
 third-party data, retained here only as a local cache, attributed in the
 application output, and not redistributed as an independent work.
+
+## Test metadata
+
+`injection_planted` on a finding is **test metadata, not scanner data**. It
+marks the one finding carrying the planted prompt-injection payload so that
+`verify-controls.sh` knows what to assert on.
+
+It must never reach an agent's reasoning context. An agent that can see the
+flag is not detecting the injection, it is reading a label, and the two-layer
+defence claim would be worthless. Strip the field at ingest and keep it only in
+the verification path.
+
+## Regenerating
+
+```bash
+.venv/bin/python -m scripts.seed
+```
+
+The seed is fixed at `SEED = 20260827`. Regenerating produces no diff, so any
+change to these files in a diff is a real change, not churn.

@@ -1,0 +1,98 @@
+[
+  {
+    "display_name": "Ada Dunne",
+    "email": "ada.dunne@example.invalid",
+    "owner_id": "own-001",
+    "responds_best_on": "tuesday",
+    "team": "platform",
+    "timezone": "Europe/Berlin"
+  },
+  {
+    "display_name": "Bo Imri",
+    "email": "bo.imri@example.invalid",
+    "owner_id": "own-002",
+    "responds_best_on": "friday",
+    "team": "endpoint",
+    "timezone": "Europe/Berlin"
+  },
+  {
+    "display_name": "Cass Brix",
+    "email": "cass.brix@example.invalid",
+    "owner_id": "own-003",
+    "responds_best_on": "thursday",
+    "team": "network",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Dev Garrow",
+    "email": "dev.garrow@example.invalid",
+    "owner_id": "own-004",
+    "responds_best_on": "friday",
+    "team": "appsec",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Emi Lund",
+    "email": "emi.lund@example.invalid",
+    "owner_id": "own-005",
+    "responds_best_on": "thursday",
+    "team": "data",
+    "timezone": "Europe/Berlin"
+  },
+  {
+    "display_name": "Fen Esker",
+    "email": "fen.esker@example.invalid",
+    "owner_id": "own-006",
+    "responds_best_on": "thursday",
+    "team": "corp-it",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Gil Jessup",
+    "email": "gil.jessup@example.invalid",
+    "owner_id": "own-007",
+    "responds_best_on": "wednesday",
+    "team": "platform",
+    "timezone": "Europe/Berlin"
+  },
+  {
+    "display_name": "Hana Calder",
+    "email": "hana.calder@example.invalid",
+    "owner_id": "own-008",
+    "responds_best_on": "tuesday",
+    "team": "endpoint",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Ines Holt",
+    "email": "ines.holt@example.invalid",
+    "owner_id": "own-009",
+    "responds_best_on": "monday",
+    "team": "network",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Jo Abara",
+    "email": "jo.abara@example.invalid",
+    "owner_id": "own-010",
+    "responds_best_on": "tuesday",
+    "team": "appsec",
+    "timezone": "Europe/Berlin"
+  },
+  {
+    "display_name": "Kai Faro",
+    "email": "kai.faro@example.invalid",
+    "owner_id": "own-011",
+    "responds_best_on": "friday",
+    "team": "data",
+    "timezone": "UTC"
+  },
+  {
+    "display_name": "Lux Kestrel",
+    "email": "lux.kestrel@example.invalid",
+    "owner_id": "own-012",
+    "responds_best_on": "thursday",
+    "team": "corp-it",
+    "timezone": "UTC"
+  }
+]
