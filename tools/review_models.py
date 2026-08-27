@@ -28,7 +28,9 @@ parsed leniently, rather than JSON that it would sometimes wrap in prose.
 
 import json
 import os
+import random
 import re
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -66,6 +68,38 @@ def _is_capacity(exc: Exception) -> bool:
     """
     text = str(exc)
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "queue is full" in text
+
+
+#: Both models are capacity-constrained under load, and neither returns a
+#: verdict when it is. Retries are bounded so a stuck model cannot stall a
+#: cycle indefinitely.
+MAX_MODEL_ATTEMPTS = 4
+BASE_BACKOFF_SECONDS = 2.0
+
+
+def _with_backoff(call, *, what: str):
+    """Retry a model call through transient capacity pressure.
+
+    Raises:
+        CapacityError: when the model is still unreachable after the last
+            attempt. The caller decides what that means; this function never
+            decides it means the model disagreed.
+    """
+    last: Exception | None = None
+    for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
+        try:
+            return call()
+        except Exception as exc:
+            if not _is_capacity(exc):
+                raise
+            last = exc
+            if attempt == MAX_MODEL_ATTEMPTS:
+                break
+            # Exponential, with jitter so concurrent findings do not retry in
+            # lockstep and reproduce the pressure they are backing off from.
+            delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            time.sleep(delay + random.uniform(0, delay * 0.3))
+    raise CapacityError(f"{what} unavailable after {MAX_MODEL_ATTEMPTS} attempts: {last}")
 
 
 def render_finding(
@@ -112,14 +146,17 @@ def render_finding(
 
 def propose(prompt_text: str, model: str, client: genai.Client) -> Proposal:
     """Ask Gemini for a triage proposal."""
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt_text,
-        config=types.GenerateContentConfig(
-            system_instruction=_load("triage.md"),
-            temperature=0.2,
-            response_mime_type="application/json",
+    response = _with_backoff(
+        lambda: client.models.generate_content(
+            model=model,
+            contents=prompt_text,
+            config=types.GenerateContentConfig(
+                system_instruction=_load("triage.md"),
+                temperature=0.2,
+                response_mime_type="application/json",
+            ),
         ),
+        what="triage model",
     )
     payload = json.loads(response.text)
     return Proposal(
@@ -145,6 +182,7 @@ def _strip_fences(text: str) -> str:
 
 
 VERDICT_PATTERN = re.compile(r"VERDICT:\s*(RATIFY|REJECT)", re.IGNORECASE)
+INJECTION_PATTERN = re.compile(r"INJECTION:\s*(.+)", re.IGNORECASE)
 REASON_PATTERN = re.compile(r"REASON:\s*(.+)", re.IGNORECASE | re.DOTALL)
 
 
@@ -155,18 +193,16 @@ def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
         CapacityError: when the model is unreachable because of load. Kept
             distinct so the loop can never record it as a rejection.
     """
-    try:
-        response = client.models.generate_content(
+    response = _with_backoff(
+        lambda: client.models.generate_content(
             model=model,
             # Gemma MaaS has no system-role parameter, so the instruction is
             # prepended to the turn rather than passed as a system instruction.
             contents=f"{_load('reviewer.md')}\n\n---\n\n{prompt_text}",
             config=types.GenerateContentConfig(temperature=0.1),
-        )
-    except Exception as exc:
-        if _is_capacity(exc):
-            raise CapacityError(str(exc)) from exc
-        raise
+        ),
+        what="reviewer model",
+    )
 
     text = _strip_fences((response.text or "").strip())
     matched = VERDICT_PATTERN.search(text)
@@ -183,7 +219,17 @@ def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
             reason=f"Reviewer response could not be parsed as a verdict: {text[:300]}",
         )
 
+    # The injection assessment is folded into the reason so it survives into
+    # the decision record. It is reported on every finding, so its absence in
+    # the record means the reviewer did not answer, not that it found nothing.
+    injection = INJECTION_PATTERN.search(text)
+    finding_note = ""
+    if injection:
+        stated = _strip_fences(injection.group(1).strip().splitlines()[0])
+        if stated.lower() not in ("none", "none.", "no", "n/a"):
+            finding_note = f"[untrusted text: {stated[:180]}] "
+
     return Verdict(
         ratified=matched.group(1).upper() == "RATIFY",
-        reason=reason or "no reason given",
+        reason=(finding_note + reason) or "no reason given",
     )

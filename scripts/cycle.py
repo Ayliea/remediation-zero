@@ -41,6 +41,7 @@ from tools.assignments import AssignmentWriter
 from tools.decisions import DecisionWriter
 from tools.enrichment import EnrichmentCache
 from tools.idempotency import derive_key
+from tools.model_armor import ModelArmor, apply_verdict
 from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
 
@@ -84,6 +85,12 @@ def main() -> int:
     reasoning_model = os.environ["REASONING_MODEL"]
     reviewer_model = os.environ["REVIEWER_MODEL"]
 
+    armor = ModelArmor()
+    import subprocess
+    armor_token = subprocess.run(
+        ["gcloud", "auth", "application-default", "print-access-token"],
+        capture_output=True, text=True, check=False).stdout.strip()
+
     store = FirestoreIdempotencyStore(client=client, clock=clock)
     writer = DecisionWriter(store=store, client=client, clock=clock)
     assigner = AssignmentWriter(store=store, client=client, clock=clock)
@@ -124,21 +131,50 @@ def main() -> int:
         finding = snapshot.to_dict()
         asset = assets.get(finding["asset_id"], {})
         enrichment = cache.enrich(finding["cve_id"])
+
+        # The untrusted-content boundary. The scanner comment is the only field
+        # here that originated outside this system, and it is screened before
+        # either model sees it. Everything else is trusted metadata written by
+        # the seed script.
+        raw_comment = finding.get("scanner_comment") or ""
+        verdict = armor.screen(raw_comment, armor_token)
+        finding = dict(finding)
+        finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
+        if verdict.blocked or not verdict.screened:
+            _log("untrusted_text_screened", cycle_id, finding_id,
+                 blocked=verdict.blocked, screened=verdict.screened,
+                 confidence=verdict.confidence, reasons=list(verdict.reasons))
+
         rendered = rm.render_finding(finding, asset, enrichment)
 
         _log("triage_started", cycle_id, finding_id, cve_id=finding["cve_id"],
              in_kev=enrichment.in_kev, epss=enrichment.epss_score)
 
-        adjudication = adjudicate(
-            finding,
-            triage=lambda _f: rm.propose(rendered, reasoning_model, genai_client),
-            review=lambda _f, p: rm.review(
-                rendered + "\n\nPROPOSAL\n" + json.dumps(
-                    {"severity": p.severity, "sla_days": p.sla_days,
-                     "remediation": p.remediation, "evidence": list(p.evidence),
-                     "rationale": p.rationale}, indent=2),
-                reviewer_model, genai_client),
-        )
+        try:
+            adjudication = adjudicate(
+                finding,
+                triage=lambda _f: rm.propose(rendered, reasoning_model, genai_client),
+                review=lambda _f, p: rm.review(
+                    rendered + "\n\nPROPOSAL\n" + json.dumps(
+                        {"severity": p.severity, "sla_days": p.sla_days,
+                         "remediation": p.remediation, "evidence": list(p.evidence),
+                         "rationale": p.rationale}, indent=2),
+                    reviewer_model, genai_client),
+            )
+        except Exception as exc:
+            # One finding failing must not take the cycle down, and it must not
+            # vanish either. It goes to a person with what is known about why.
+            _log("finding_failed", cycle_id, finding_id,
+                 error=f"{type(exc).__name__}: {exc}"[:300])
+            client.collection("human_queue").document(
+                f"failed-{finding_id}-c{args.cycle:03d}").set({
+                    "finding_id": finding_id, "cycle": args.cycle,
+                    "kind": "cycle_failure",
+                    "reason": f"Adjudication did not complete: "
+                              f"{type(exc).__name__}: {exc}"[:400],
+                    "real_ts": clock.now().real_ts, "sim_ts": clock.now().sim_ts})
+            outcomes["failed"] = outcomes.get("failed", 0) + 1
+            continue
 
         document_id = writer.record(adjudication, cycle=args.cycle)
         outcomes[adjudication.outcome.value] = outcomes.get(

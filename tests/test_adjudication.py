@@ -163,3 +163,36 @@ def test_an_unparseable_reviewer_response_is_not_a_ratification():
     from tools.review_models import VERDICT_PATTERN
 
     assert VERDICT_PATTERN.search("I think this looks fine to me") is None
+
+
+def test_capacity_backoff_is_bounded():
+    """A stuck model must not stall a cycle indefinitely. Retries are capped
+    and the last failure is reported as unavailability, never as a verdict."""
+    from tools.review_models import MAX_MODEL_ATTEMPTS, _with_backoff
+
+    calls = []
+
+    def always_429():
+        calls.append(1)
+        raise RuntimeError("429 RESOURCE_EXHAUSTED")
+
+    with pytest.raises(CapacityError, match="unavailable after"):
+        _with_backoff(always_429, what="test model")
+
+    assert len(calls) == MAX_MODEL_ATTEMPTS
+
+
+def test_a_non_capacity_error_is_not_retried():
+    """Backing off from a bug wastes time and hides it."""
+    from tools.review_models import _with_backoff
+
+    calls = []
+
+    def bad_request():
+        calls.append(1)
+        raise ValueError("malformed prompt")
+
+    with pytest.raises(ValueError):
+        _with_backoff(bad_request, what="test model")
+
+    assert len(calls) == 1
