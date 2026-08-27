@@ -58,8 +58,10 @@ withheld everywhere else until real findings justify it:
             cycles, which would each produce a valid-looking key from a bug
 """
 
+import functools
 import hashlib
 from dataclasses import dataclass
+from typing import Any, Callable, Optional, Protocol
 
 #: Identifies the derivation scheme. Change this whenever the material fed to
 #: the hash changes, including the normalisation policy, so that keys minted
@@ -174,3 +176,107 @@ def derive_record(finding_id: str, action: str, cycle: int) -> IdempotencyRecord
         cycle=normalized_cycle,
         scheme=KEY_SCHEME,
     )
+
+
+# ---------------------------------------------------------------------------
+# Suppression
+# ---------------------------------------------------------------------------
+
+
+class IdempotencyStore(Protocol):
+    """Where executed keys are remembered.
+
+    Firestore backs this in the deployed system. The protocol exists so the
+    suppression logic can be tested without standing up a database, not so
+    that the deployed system can be tested against a fake: a tool that only
+    works against the in-memory store does not work.
+    """
+
+    def get(self, key: str) -> Optional["CompletedCall"]:
+        """Return the completed call for `key`, or None if it never ran."""
+
+    def put(self, completed: "CompletedCall") -> None:
+        """Record a completed call. Called only after the effect succeeded."""
+
+
+@dataclass(frozen=True)
+class CompletedCall:
+    """The record of an effect that already happened, and what it returned."""
+
+    record: IdempotencyRecord
+    result: Any
+
+    @property
+    def key(self) -> str:
+        return self.record.key
+
+    @property
+    def finding_id(self) -> str:
+        return self.record.finding_id
+
+    @property
+    def action(self) -> str:
+        return self.record.action
+
+    @property
+    def cycle(self) -> int:
+        return self.record.cycle
+
+
+class InMemoryIdempotencyStore:
+    """A dict-backed store, for tests and local runs."""
+
+    def __init__(self) -> None:
+        self._calls: dict[str, CompletedCall] = {}
+
+    def get(self, key: str) -> Optional[CompletedCall]:
+        return self._calls.get(key)
+
+    def put(self, completed: CompletedCall) -> None:
+        self._calls[completed.key] = completed
+
+
+class IdempotencyGuard:
+    """Wraps side-effecting callables so a repeat call has no second effect.
+
+    The decorated function must take `finding_id` and `cycle` as keyword
+    arguments; the key is derived from those plus the action name. Keyword-only
+    is deliberate, because positional arguments would make the key depend on
+    call-site argument order.
+    """
+
+    def __init__(self, store: IdempotencyStore) -> None:
+        self._store = store
+
+    def protects(self, action: str) -> Callable:
+        """Decorator factory naming the action this callable performs."""
+
+        def decorate(fn: Callable) -> Callable:
+            @functools.wraps(fn)
+            def wrapper(*args: Any, finding_id: str, cycle: int, **kwargs: Any) -> Any:
+                record = derive_record(
+                    finding_id=finding_id, action=action, cycle=cycle
+                )
+
+                existing = self._store.get(record.key)
+                if existing is not None:
+                    # Already happened. Return what it returned the first time,
+                    # so the caller cannot tell it was suppressed.
+                    return existing.result
+
+                result = fn(
+                    *args,
+                    finding_id=record.finding_id,
+                    cycle=record.cycle,
+                    **kwargs,
+                )
+
+                # Recorded only after the effect succeeded. Recording on entry
+                # would let one transient failure permanently suppress an
+                # action that never actually happened.
+                self._store.put(CompletedCall(record=record, result=result))
+                return result
+
+            return wrapper
+
+        return decorate

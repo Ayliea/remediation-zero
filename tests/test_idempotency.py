@@ -20,7 +20,13 @@ It is demonstrated on camera, so it cannot be discovered broken late.
 
 import pytest
 
-from tools.idempotency import KEY_SCHEME, derive_key, derive_record
+from tools.idempotency import (
+    KEY_SCHEME,
+    IdempotencyGuard,
+    InMemoryIdempotencyStore,
+    derive_key,
+    derive_record,
+)
 
 
 def test_same_inputs_always_derive_the_same_key():
@@ -167,3 +173,94 @@ def test_record_stores_the_normalised_components_not_the_raw_ones():
     assert record.finding_id == "CVE-2024-1234"
     assert record.action == "ticket"
     assert record.key == derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=7)
+
+
+# --- the guard that actually suppresses the second effect -------------------
+
+def test_a_repeated_call_produces_no_second_effect():
+    """The whole point. A resumed agent recomputes the same key and the ticket
+    is opened once, not twice."""
+    guard = IdempotencyGuard(InMemoryIdempotencyStore())
+    opened = []
+
+    @guard.protects(action="ticket")
+    def open_ticket(*, finding_id, cycle):
+        opened.append((finding_id, cycle))
+        return f"TICKET-{len(opened)}"
+
+    open_ticket(finding_id="CVE-2024-1234", cycle=7)
+    open_ticket(finding_id="CVE-2024-1234", cycle=7)
+
+    assert opened == [("CVE-2024-1234", 7)]
+
+
+def test_a_repeated_call_returns_the_first_result():
+    """The caller cannot tell it was suppressed, which is what makes resume
+    transparent to everything upstream."""
+    guard = IdempotencyGuard(InMemoryIdempotencyStore())
+    counter = []
+
+    @guard.protects(action="ticket")
+    def open_ticket(*, finding_id, cycle):
+        counter.append(1)
+        return f"TICKET-{len(counter)}"
+
+    first = open_ticket(finding_id="CVE-2024-1234", cycle=7)
+    second = open_ticket(finding_id="CVE-2024-1234", cycle=7)
+
+    assert first == second == "TICKET-1"
+
+
+def test_a_later_cycle_is_a_new_effect():
+    """Suppression is scoped to the cycle. Week three's nudge is not week
+    two's nudge, and must still send."""
+    guard = IdempotencyGuard(InMemoryIdempotencyStore())
+    sent = []
+
+    @guard.protects(action="nudge")
+    def nudge(*, finding_id, cycle):
+        sent.append(cycle)
+
+    nudge(finding_id="CVE-2024-1234", cycle=2)
+    nudge(finding_id="CVE-2024-1234", cycle=2)
+    nudge(finding_id="CVE-2024-1234", cycle=3)
+
+    assert sent == [2, 3]
+
+
+def test_a_failed_call_is_not_recorded_and_can_be_retried():
+    """A transient failure must not permanently suppress the action. Recording
+    on entry rather than on success would make one network blip mean a nudge
+    that can never be sent again."""
+    guard = IdempotencyGuard(InMemoryIdempotencyStore())
+    attempts = []
+
+    @guard.protects(action="escalate")
+    def escalate(*, finding_id, cycle):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise ConnectionError("ticketing system unreachable")
+        return "ESCALATED"
+
+    with pytest.raises(ConnectionError):
+        escalate(finding_id="CVE-2024-1234", cycle=1)
+
+    assert escalate(finding_id="CVE-2024-1234", cycle=1) == "ESCALATED"
+    assert len(attempts) == 2
+
+
+def test_the_store_keeps_the_record_not_just_the_key():
+    """So the suppression itself is explicable after the fact."""
+    store = InMemoryIdempotencyStore()
+    guard = IdempotencyGuard(store)
+
+    @guard.protects(action="ticket")
+    def open_ticket(*, finding_id, cycle):
+        return "TICKET-1"
+
+    open_ticket(finding_id="cve-2024-1234", cycle=7)
+
+    record = store.get(derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=7))
+    assert record.finding_id == "CVE-2024-1234"
+    assert record.action == "ticket"
+    assert record.cycle == 7
