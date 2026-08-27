@@ -209,15 +209,22 @@ Two things worth knowing before running these.
 # topology before walking it. This is the run that produces a Cloud Trace.
 ./scripts/graph.sh --cycle 1 --finding RZ-0101
 
-# Accelerated: replay the six weeks after the scan. Simulated time only —
-# advance() raises in real mode, so this needs SIM_CLOCK_MODE=sim.
-SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle 2 --advance-days 42
+# Accelerated: replay the weeks after the scan. Simulated time only —
+# advance() raises in real mode, so this needs SIM_CLOCK_MODE=sim. Advance in
+# steps rather than one jump: a single 42-day advance lands every clock past
+# its deadline at once, so chase escalates everything and the intermediate
+# nudging is never shown.
+SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle 2 --advance-days 8
 SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle 2 --sweep
 ./scripts/report.sh --cycle 2
 ```
 
 Every one of these is safe to repeat. `--cycle` and the finding id form the
 idempotency key, so a second run of the same cycle skips rather than duplicates.
+
+[`docs/DEMO.md`](docs/DEMO.md) is the same path as a runbook, with every step
+timed against the live deployment and a table of what to do when one of them
+misbehaves on camera.
 
 ### 7. Verify the controls
 
