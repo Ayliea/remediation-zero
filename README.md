@@ -29,7 +29,7 @@ A finding lands. From there no human is involved until a decision genuinely need
 
 ## Architecture
 
-![Architecture](docs/architecture.png)
+*(Architecture diagram: `docs/architecture.png`. Not yet committed.)*
 
 The design decisions worth defending:
 
@@ -39,9 +39,26 @@ The design decisions worth defending:
 
 **Injectable clock.** All time reads pass through a `SimClock` service. Every document carries both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which is simulation. This makes a six-week remediation cycle demonstrable in three minutes without fabricating evidence of elapsed time.
 
-**Least privilege per agent.** Each sub-agent runs under its own Agent Identity with IAM scoped to its own Firestore collections. The reporting agent is structurally unable to write tickets. This is enforced rather than documented.
+**Least privilege per agent, and an honest account of its limit.** Each sub-agent runs under its own service account. There is no shared credential.
 
-**Two-layer injection defense.** Untrusted text, meaning scanner comment fields, ticket replies, and vendor advisories, passes Model Armor before reaching any reasoning context. The reviewer agent independently catches instruction-shaped content that gets through. One layer is a hope, not a control.
+Firestore cannot enforce collection-level access control for server-side clients, and the design says so rather than implying otherwise. `roles/datastore.user` resolves to `datastore.entities.create/update/delete`, which are database-scoped, and Security Rules — which *are* collection-aware — are bypassed entirely by server SDKs authenticating as a service account.
+
+So the boundary was put where IAM can actually enforce it. Reports live in their own Firestore database. The reporting identity holds `roles/datastore.viewer` on the operational database and `roles/datastore.user` conditioned to the reports database, which leaves it structurally unable to write a ticket. `scripts/verify-controls.sh` proves this by running a Cloud Run job whose service account *is* the reporting identity and attempting the write:
+
+```
+expect DENIED   | got DENIED (PermissionDenied)   | write a ticket
+expect DENIED   | got DENIED (PermissionDenied)   | write to the human queue
+expect ALLOWED  | got ALLOWED                     | read a finding
+expect ALLOWED  | got ALLOWED                     | write a report
+```
+
+The last two matter as much as the first two. An identity that can write nothing proves only that it is broken; the control is that the boundary falls in a specific place.
+
+The remaining five agents hold distinct identities with collection separation enforced in application code. That is a weaker guarantee than IAM enforcement and is named as such here rather than blurred into the same sentence.
+
+**Two-layer injection defense, measured rather than assumed.** Untrusted text — scanner comment fields, ticket replies, vendor advisories — passes Model Armor before reaching any reasoning context. Against the planted payload it returns `MATCH_FOUND` on the prompt-injection filter at `MEDIUM_AND_ABOVE`; against a benign scanner comment it returns `NO_MATCH_FOUND`. The boundary fails closed on an unreachable screener, a filter that did not execute, and an unparseable response, because passing unscreened text into a reasoning context on a bad minute is exactly the failure it exists to prevent.
+
+The reviewer is the second layer, and measuring it corrected an overclaim. With Model Armor disabled the reviewer rejected the planted finding every time, but named the injection in only one run out of five: it was finding a sufficient reason to reject on severity grounds and stopping. The injection never succeeded, but "the reviewer independently catches it" was not true as written. The reviewer now assesses the untrusted text first, before the proposal at all, and reports the result on every finding whether or not it is the reason for rejecting. Detection went from one in five to six in six.
 
 **Failure containment.** Pub/Sub carries a dead-letter queue, tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
 
@@ -49,9 +66,9 @@ The design decisions worth defending:
 
 | Layer | Service |
 |---|---|
-| Reasoning model | Gemini 3.5 Flash via Gemini Enterprise Agent Platform |
-| Reviewer model | Gemma, deliberately a different model family |
-| Agent framework | Google Agent Development Kit (ADK) 2.0 |
+| Reasoning model | `gemini-3.5-flash` via Vertex / Agent Platform, served from the `global` endpoint |
+| Reviewer model | `gemma-4-26b-a4b-it-maas`, deliberately a different model family, pay-per-token, no dedicated endpoint |
+| Agent framework | Google Agent Development Kit (ADK) 2.8.0 |
 | Runtime | Agent Runtime, long-running orchestrator session |
 | Working state | Firestore, Agent Platform Sessions |
 | Long-term memory | Agent Platform Memory Bank |
@@ -59,7 +76,17 @@ The design decisions worth defending:
 | Telemetry | Cloud Trace, Cloud Logging (OpenTelemetry) |
 | Events | Pub/Sub with dead-letter queue, Cloud Scheduler |
 | Interface | Cloud Run |
-| Infrastructure as code | Terraform |
+| Infrastructure as code | Terraform, in `infra/`. Not yet written; setup is currently the two scripts below |
+
+## Running deployment
+
+| | |
+|---|---|
+| Console | https://remediation-zero-console-978104855285.us-central1.run.app |
+| Agent Engine | `projects/remediation-zero/locations/us-central1/reasoningEngines/3119663582942330880` |
+| Orchestrator session | `5107592082113953792`, created 2026-08-27T01:04:38Z UTC |
+
+The console is read-only and scales to zero. It runs under a service account holding `roles/datastore.viewer` and nothing else, and its container ships no agent framework, no model clients and no write path: the interface a stranger can reach is structurally unable to change the record it displays.
 
 ## Data sources
 
@@ -75,15 +102,19 @@ The synthetic corpus in `data/` is dedicated to the public domain under CC0 1.0.
 
 ### Prerequisites
 
-- A Google Cloud project with billing enabled
-- `gcloud` CLI, authenticated
-- Python 3.10 or later (ADK 2.0 requirement)
-- Terraform 1.6 or later. Manual `gcloud` equivalents are in `docs/manual-setup.md`
+- A Google Cloud project with billing enabled, and a budget alert set before deploying anything
+- `gcloud` CLI, authenticated for both the CLI and application default credentials:
+  ```bash
+  gcloud auth login
+  gcloud auth application-default login
+  ```
+  These are separate credentials. The CLI uses the first; the Vertex SDK and ADK use the second.
+- Python 3.10 or later (ADK requirement). Built and tested on 3.12.3.
 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/<handle>/remediation-zero.git
+git clone https://github.com/Ayliea/remediation-zero.git
 cd remediation-zero
 cp .env.example .env
 ```
@@ -92,53 +123,72 @@ Set the following in `.env`:
 
 ```
 GOOGLE_CLOUD_PROJECT=your-project-id
-GOOGLE_CLOUD_LOCATION=us-central1
+
+# Model serving location and Agent Engine location are different, and must
+# stay different. gemini-3.5-flash and the Gemma MaaS model are served from
+# `global` and return 404 from a named region. Agent Engine deploys into a
+# named region. Addressing the engine with the model's location produces
+# "The ReasoningEngine does not exist", which reads like the engine was lost.
+GOOGLE_CLOUD_LOCATION=global
+AGENT_ENGINE_LOCATION=us-central1
+GOOGLE_GENAI_USE_VERTEXAI=true
+
 REASONING_MODEL=gemini-3.5-flash
-REVIEWER_MODEL=gemma-<version>
+REVIEWER_MODEL=gemma-4-26b-a4b-it-maas
+
 SIM_CLOCK_MODE=real          # "sim" for the accelerated demo
+MODEL_ARMOR_ENABLED=true
 ```
 
 ### 2. Enable APIs and provision infrastructure
 
 ```bash
-./scripts/enable-apis.sh
-terraform -chdir=infra init
-terraform -chdir=infra apply
+./scripts/enable-apis.sh          # idempotent, safe to re-run
+./scripts/grant-iam.sh            # read this before running it; it modifies project IAM
 ```
 
-This provisions Firestore, the Pub/Sub topics and dead-letter queue, Cloud Scheduler, one service account per sub-agent with scoped IAM, and the Model Armor template.
+`enable-apis.sh` turns on Agent Platform, Cloud Run, Firestore, Pub/Sub, Scheduler, Trace, Logging, Model Armor and the build services. `grant-iam.sh` creates the per-agent least-privilege bindings described above, and grants the operator permission to run the control probe.
 
-Expect roughly four minutes. Set a billing budget alert before running it.
+Set a billing budget alert before running either.
 
 ### 3. Seed the synthetic corpus
 
 ```bash
-python -m scripts.seed --findings 400 --assets 60 --owners 12
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt -c constraints-3.12.txt
+
+.venv/bin/python -m scripts.seed        # regenerates data/, produces no diff
+.venv/bin/python scripts/ingest.py      # loads it into Firestore
 ```
 
-The seed includes one finding carrying a planted prompt-injection payload in its comment field, used to exercise both the Model Armor boundary and the reviewer agent.
+The corpus is committed and deterministic: `SEED = 20260827`, so regenerating produces no diff and a change to the data is visible in review rather than buried in churn. 400 findings across 60 assets and 12 owners. Everything is synthetic except the CVE identifiers, which are drawn from the cached CISA KEV catalogue so that enrichment returns genuine data. Addresses use the RFC 5737 documentation ranges and hostnames the reserved `.invalid` TLD, both asserted by tests, because the repository is public and "contains nothing real" has to hold on every regeneration.
+
+One finding carries a planted prompt-injection payload in its comment field. The field marking it is stripped at ingest and never reaches Firestore: an agent that can see a label saying "this one is planted" is reading a label, not detecting an attack.
 
 ### 4. Run locally
 
 ```bash
-pip install -r requirements.txt
-adk run agents/orchestrator
+.venv/bin/adk run agents/orchestrator     # local inner loop, against Vertex
+.venv/bin/uvicorn ui.app:app --port 8080  # console at http://localhost:8080
 ```
-
-The console UI serves at `http://localhost:8080`.
 
 ### 5. Deploy
 
 ```bash
-./scripts/deploy-agent.sh    # orchestrator and sub-agents to Agent Runtime
-./scripts/deploy-ui.sh       # console to Cloud Run
+./scripts/deploy-agent.sh --create   # FIRST ENGINE ONLY. Record the printed
+                                     # id in .env as AGENT_ENGINE_ID.
+./scripts/deploy-agent.sh            # every deploy after that: updates in place
+./scripts/deploy-ui.sh               # console to Cloud Run
+.venv/bin/python scripts/session-init.py   # creates the long-running session
 ```
 
-Agents deployed to Agent Runtime register automatically in Agent Registry. Verify with:
+Two things worth knowing before running these.
 
-```bash
-gcloud alpha agent-registry agents list
-```
+`adk deploy agent_engine` creates a **new** Agent Engine instance when `--agent_engine_id` is omitted, and does not error. It also prints `Deploy failed` while exiting 0. `deploy-agent.sh` guards both: the id is mandatory, a non-existent id is treated as a typo rather than a request to create, output is inspected instead of the exit code, and the resource is re-read afterwards to confirm the in-place claim. Nothing in it deletes.
+
+`session-init.py` refuses to run if a session already exists, printing that session's id and age instead. The elapsed time on that session is the demo's strongest proof point and cannot be regenerated, so the script will not create a second one alongside it.
+
+**Agent Registry does not register the agent automatically.** Deployment prints a link to a separate Gemini Enterprise registration flow. This is noted here rather than claimed otherwise.
 
 ### 6. Run a cycle
 
@@ -156,13 +206,25 @@ SIM_CLOCK_MODE=sim ./scripts/tick.sh --advance-weeks 6
 ./scripts/verify-controls.sh
 ```
 
-Confirms that Model Armor blocks the planted payload, that the reviewer agent independently flags it with Model Armor disabled, that the reporting agent's service account is denied a ticket write, and that a resumed cycle produces no duplicate tickets.
+Every check performs the action the control is meant to stop and reports what actually happened. There are three outcomes, not two: a check that could not run is reported as inconclusive and exits non-zero, because collapsing "could not run" into "passed" is how a control gets believed on the strength of a test that never exercised it.
+
+```
+[PASS] Model Armor blocks the planted injection
+[PASS] Reviewer catches it with Model Armor disabled
+[PASS] Reporting identity is denied a ticket write
+[PASS] A resumed cycle writes nothing a second time
+```
 
 ### 8. Tear down
 
 ```bash
-terraform -chdir=infra destroy
+# Cloud Run scales to zero, so idle cost is already nil. To remove everything:
+gcloud run services delete remediation-zero-console --region=us-central1
+gcloud run jobs delete reporting-write-probe --region=us-central1
+gcloud firestore databases delete --database=reports
 ```
+
+Deliberately absent: any command that deletes the Agent Engine or its session. That resource is updated in place for the life of the build and `deploy-agent.sh` refuses to recreate it. Delete it by hand only after the submission is judged.
 
 ### Cost notes
 
@@ -172,7 +234,17 @@ Minimum instances are zero and maximum instances are capped, so idle cost is neg
 
 ## Findings and learnings
 
-*(To be completed before submission. Cover: what the reviewer agent caught that triage got wrong and how often; where the idempotency design was actually load-bearing; where Memory Bank earned its place and where session state would have been enough; what the injectable clock could not simulate honestly.)*
+**The reviewer disagrees often, and on substance.** Across the decisions recorded so far it rejected roughly six in ten proposals. The two recurring objections are remediation text that names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and proposed SLAs that exceed the CISA KEV due date for the same CVE. The second is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
+
+**A high disagreement rate is a health metric, not a defect.** A reviewer that ratifies everything is indistinguishable from having no reviewer, so the rate is reported as a headline figure rather than buried.
+
+**One rejection class turned out to be an evidence gap, not a reasoning failure.** Early cycles rejected almost everything for vague remediation. Re-running the same findings after the NVD cache finished populating changed the outcome from 1 ratified of 3 to 2 of 3, and the surviving rejection was the KEV due-date conflict. Had the triage prompt been "fixed" while the cache was half full, the fix would have compensated for a transient condition and looked like it worked.
+
+**Idempotency was load-bearing in a way the design note did not anticipate.** The obvious argument is that a resumed agent must not open two tickets. The stronger one showed up in testing: the models are not deterministic, so the same cycle run twice produces *different decisions* for the same finding. One finding was ratified on the first run and rejected twice on the second. Without the guard the second run would not merely have duplicated work, it would have silently overwritten a decision a human may already have acted on, with a contradictory one.
+
+**Correctness guards and cost guards are not the same guard.** The idempotency guard originally wrapped the write, which made the state correct but only fired after triage and review had already run and been billed. Re-running a cycle burned about forty model calls to change nothing. Checking the completed-call record before the model calls took a re-run from 89.9 seconds to 1.5, and that distinction only became visible by running the thing twice and watching the clock.
+
+**The clock cannot simulate the thing it exists to prove.** `sim_ts` can move a six-week SLA into a three-minute demonstration, but the value of a long-lived session is precisely that it was not simulated. `real_ts` is read from wall clock on every write in both modes and there is deliberately no API that sets it; `advance()` raises in real mode. The two figures sit next to each other on every record so the gap is legible rather than narrated.
 
 ## Roadmap
 
@@ -191,7 +263,7 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet category.
 - GitHub: `daviyondaniels` (personal account)
 - Google Cloud project: `remediation-zero`, under a separate business Google account
 
-The deployment shown in the demo video runs in that Google Cloud project. The GitHub account and the Google Cloud account belong to the same author. Commits are signed. For verification, contact `<email>`.
+The deployment shown in the demo video runs in that Google Cloud project. The GitHub account and the Google Cloud account belong to the same author. Commits are signed with an SSH key registered to the GitHub account; every commit in the history verifies.
 
 ## Disclosure
 
