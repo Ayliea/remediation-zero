@@ -57,3 +57,59 @@ resource "google_cloud_scheduler_job" "tick" {
     }))
   }
 }
+
+
+# Keeping the console warm.
+#
+# The console starts in about 1.5 seconds. It answers in about 15 on a cold
+# Cloud Run instance, and the difference is image pull and sandbox
+# provisioning, not anything the application does — so there is no code change
+# that fixes it. The two real options are an always-on instance or traffic.
+#
+# min-instances stays 0, because there are no credits and an always-on instance
+# is real money. This is the other option: CPU is billed only while a request
+# is being served, and /healthz is a few milliseconds, so twelve pings an hour
+# is on the order of a second of CPU per day. What it buys is that a judge
+# opening the link from the submission at an arbitrary moment gets a page
+# rather than eighteen seconds of white screen.
+#
+# This is a demonstration convenience and it is named as one. Pause the job and
+# the service returns to genuine scale-to-zero:
+#
+#     gcloud scheduler jobs pause console-warm --location=us-central1
+resource "google_cloud_scheduler_job" "console_warm" {
+  name        = "console-warm"
+  project     = var.project_id
+  region      = var.region
+  description = "Ping the console so a visitor never pays for a cold start."
+  schedule    = var.console_warm_schedule
+  time_zone   = "Etc/UTC"
+
+  # A ping that has not landed in half a minute has been overtaken by the next
+  # one. Retrying it would only queue warm-ups behind each other.
+  attempt_deadline = "30s"
+
+  retry_config {
+    retry_count = 1
+  }
+
+  http_target {
+    http_method = "GET"
+
+    # Not "/", because the console reads eleven collections to render its page
+    # and warming an instance does not require paying for that twelve times an
+    # hour. The point is that the container is alive, not that the page is
+    # pre-rendered.
+    #
+    # And not "/healthz", which the console does define. Requests to that path
+    # never arrive: they come back 404 without the `server: Google Frontend`
+    # header that every real Cloud Run response carries, and no matching entry
+    # appears in the service's request log — from Cloud Scheduler or from a
+    # browser. Something ahead of the service answers for that path. Rather
+    # than argue with it, the ping uses a route observed to arrive.
+    #
+    # favicon.svg is the cheapest such route: a static string, no Firestore
+    # read, no I/O of any kind.
+    uri = "${var.console_url}/favicon.svg"
+  }
+}

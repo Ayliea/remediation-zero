@@ -57,3 +57,19 @@ variable "max_delivery_attempts" {
   type        = number
   default     = 5
 }
+
+variable "console_url" {
+  description = "The read-only console. Kept warm so a cold start never greets a visitor."
+  type        = string
+  default     = "https://remediation-zero-console-978104855285.us-central1.run.app"
+}
+
+variable "console_warm_schedule" {
+  description = <<-EOT
+    How often to ping the console so Cloud Run keeps an instance alive. Five
+    minutes is chosen against Cloud Run's idle-instance retention rather than
+    against a cost ceiling: the ping itself is free in every practical sense.
+  EOT
+  type        = string
+  default     = "*/5 * * * *"
+}
