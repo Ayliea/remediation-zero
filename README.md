@@ -29,7 +29,11 @@ A finding lands. From there no human is involved until a decision genuinely need
 
 ## Architecture
 
-*(Architecture diagram: `docs/architecture.png`. Not yet committed.)*
+![Architecture](docs/architecture.png)
+
+*One finding's path through the fleet. Source: [`docs/architecture.svg`](docs/architecture.svg).
+Every record written anywhere on this path carries both `real_ts` and `sim_ts`; the deadlines
+in Chase run on the second while the first stays wall clock.*
 
 The design decisions worth defending:
 

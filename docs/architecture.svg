@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 820" role="img"
+     aria-label="One finding's path through Remediation Zero: the scanner's free text crosses a Model Armor boundary before any model sees it, triage on Gemini proposes a decision, a reviewer on Gemma from a different model family ratifies or rejects it with one retry only, and anything unresolved goes to a human queue. The reporting agent can read every collection but is denied write access to tickets by IAM.">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#16181D"/>
+    </marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#A33A2A"/>
+    </marker>
+    <marker id="ai" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3B5BDB"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="820" fill="#F7F8F9"/>
+
+  <!-- ============ inputs ============ -->
+  <text x="40" y="52" font-family="IBM Plex Mono, monospace" font-size="13" fill="#767D87" letter-spacing="1.6">INPUTS</text>
+
+  <rect x="40" y="70" width="212" height="62" rx="2" fill="#fff" stroke="#A33A2A" stroke-width="2"/>
+  <text x="56" y="96" font-family="IBM Plex Mono, monospace" font-size="15" fill="#A33A2A">scanner comment</text>
+  <text x="56" y="117" font-family="Source Sans 3, sans-serif" font-size="14" fill="#A33A2A">free text · untrusted</text>
+
+  <rect x="40" y="152" width="212" height="62" rx="2" fill="#fff" stroke="#C7CBD1" stroke-width="1.5"/>
+  <text x="56" y="178" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">finding + asset</text>
+  <text x="56" y="199" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">seeded metadata · trusted</text>
+
+  <rect x="40" y="234" width="212" height="76" rx="2" fill="#fff" stroke="#C7CBD1" stroke-width="1.5"/>
+  <text x="56" y="260" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">KEV · NVD · EPSS</text>
+  <text x="56" y="281" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">cached to disk; the demo</text>
+  <text x="56" y="299" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">never calls them live</text>
+
+  <!-- ============ the boundary ============ -->
+  <line x1="330" y1="40" x2="330" y2="360" stroke="#A33A2A" stroke-width="1.5" stroke-dasharray="7 6"/>
+  <text x="340" y="52" font-family="IBM Plex Mono, monospace" font-size="13" fill="#A33A2A" letter-spacing="1.6">BOUNDARY</text>
+
+  <rect x="286" y="70" width="90" height="62" rx="2" fill="#A33A2A"/>
+  <text x="331" y="95" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="14" fill="#fff">Model</text>
+  <text x="331" y="114" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="14" fill="#fff">Armor</text>
+
+  <line x1="252" y1="101" x2="282" y2="101" stroke="#A33A2A" stroke-width="2" marker-end="url(#ar)"/>
+  <path d="M376,101 L572,101 L572,148" fill="none" stroke="#A33A2A" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="392" y="76" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#A33A2A">passed, or withheld</text>
+  <text x="392" y="92" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#A33A2A">never truncated or quoted</text>
+
+  <path d="M252,183 L496,183" fill="none" stroke="#16181D" stroke-width="1.6" marker-end="url(#a)"/>
+  <path d="M252,272 L432,272 L432,212 L496,212" fill="none" stroke="#16181D" stroke-width="1.6" marker-end="url(#a)"/>
+  <text x="268" y="176" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">no boundary needed</text>
+  <text x="268" y="265" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">cited as evidence</text>
+
+  <!-- ============ adversarial pair ============ -->
+  <text x="500" y="52" font-family="IBM Plex Mono, monospace" font-size="13" fill="#767D87" letter-spacing="1.6">ADVERSARIAL ADJUDICATION</text>
+
+  <rect x="500" y="152" width="216" height="86" rx="2" fill="#fff" stroke="#16181D" stroke-width="2"/>
+  <text x="518" y="182" font-family="IBM Plex Mono, monospace" font-size="17" fill="#16181D">Triage</text>
+  <text x="518" y="203" font-family="IBM Plex Mono, monospace" font-size="13" fill="#4A5058">gemini-3.5-flash</text>
+  <text x="518" y="224" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">severity · SLA · remediation</text>
+
+  <rect x="820" y="152" width="216" height="86" rx="2" fill="#fff" stroke="#3B5BDB" stroke-width="2.5"/>
+  <text x="838" y="182" font-family="IBM Plex Mono, monospace" font-size="17" fill="#3B5BDB">Reviewer</text>
+  <text x="838" y="203" font-family="IBM Plex Mono, monospace" font-size="13" fill="#3B5BDB">gemma-4-26b-a4b-it-maas</text>
+  <text x="838" y="224" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#3B5BDB">ratify, or reject with a reason</text>
+
+  <line x1="716" y1="184" x2="816" y2="184" stroke="#16181D" stroke-width="1.8" marker-end="url(#a)"/>
+  <text x="722" y="176" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">proposal</text>
+
+  <path d="M928,148 C928,104 716,104 660,104 L610,104 L610,148" fill="none" stroke="#3B5BDB" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#ai)"/>
+  <text x="790" y="96" text-anchor="middle" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#3B5BDB">reject · re-proposed once, never twice</text>
+
+  <text x="1056" y="166" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">a different model</text>
+  <text x="1056" y="184" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">family on purpose:</text>
+  <text x="1056" y="202" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">a model auditing its</text>
+  <text x="1056" y="220" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">own reasoning shares</text>
+  <text x="1056" y="238" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">its own blind spots</text>
+
+  <!-- ============ outcomes ============ -->
+  <path d="M900,238 L900,300" fill="none" stroke="#16181D" stroke-width="1.8" marker-end="url(#a)"/>
+  <text x="912" y="276" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#16181D">ratified</text>
+
+  <path d="M1010,238 L1010,268 L1150,268 L1150,300" fill="none" stroke="#A33A2A" stroke-width="1.8" marker-end="url(#ar)"/>
+  <text x="1022" y="262" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#A33A2A">rejected twice</text>
+
+  <rect x="790" y="300" width="220" height="58" rx="2" fill="#fff" stroke="#16181D" stroke-width="1.5"/>
+  <text x="808" y="326" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">decisions</text>
+  <text x="808" y="346" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">proposal + every verdict kept</text>
+
+  <rect x="1058" y="300" width="184" height="58" rx="2" fill="#fff" stroke="#A33A2A" stroke-width="2"/>
+  <text x="1076" y="326" font-family="IBM Plex Mono, monospace" font-size="15" fill="#A33A2A">human_queue</text>
+  <text x="1076" y="346" font-family="Source Sans 3, sans-serif" font-size="13" fill="#A33A2A">a person decides</text>
+
+  <path d="M900,358 L900,404" fill="none" stroke="#16181D" stroke-width="1.8" marker-end="url(#a)"/>
+  <rect x="790" y="404" width="220" height="58" rx="2" fill="#fff" stroke="#16181D" stroke-width="1.5"/>
+  <text x="808" y="430" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">Ownership</text>
+  <text x="808" y="450" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">asset → accountable human</text>
+
+  <path d="M900,462 L900,508" fill="none" stroke="#16181D" stroke-width="1.8" marker-end="url(#a)"/>
+  <rect x="790" y="508" width="220" height="76" rx="2" fill="#fff" stroke="#16181D" stroke-width="1.5"/>
+  <text x="808" y="534" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">Chase</text>
+  <text x="808" y="554" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">ticket → 3 nudges → escalate</text>
+  <text x="808" y="572" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">paced by simulated time</text>
+
+  <path d="M1010,546 L1150,546 L1150,364" fill="none" stroke="#A33A2A" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#ar)"/>
+  <text x="1022" y="538" font-family="Source Sans 3, sans-serif" font-size="13" fill="#A33A2A">still unresolved</text>
+
+  <rect x="500" y="508" width="216" height="76" rx="2" fill="#fff" stroke="#16181D" stroke-width="1.5"/>
+  <text x="518" y="534" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">Exception</text>
+  <text x="518" y="554" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">bounded TTL; reopens</text>
+  <text x="518" y="572" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">itself at expiry</text>
+  <line x1="716" y1="546" x2="786" y2="546" stroke="#16181D" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a)"/>
+  <text x="700" y="600" text-anchor="middle" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">suspends chase while active</text>
+
+  <!-- ============ the arrow that does not exist ============ -->
+  <line x1="40" y1="654" x2="1242" y2="654" stroke="#C7CBD1" stroke-width="1"/>
+  <text x="40" y="688" font-family="IBM Plex Mono, monospace" font-size="13" fill="#767D87" letter-spacing="1.6">LEAST PRIVILEGE, ENFORCED</text>
+
+  <rect x="40" y="706" width="216" height="72" rx="2" fill="#fff" stroke="#0B7A6B" stroke-width="2"/>
+  <text x="58" y="732" font-family="IBM Plex Mono, monospace" font-size="15" fill="#0B7A6B">Reporting</text>
+  <text x="58" y="752" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">counts in code; a model</text>
+  <text x="58" y="770" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">narrates, never computes</text>
+
+  <line x1="256" y1="726" x2="470" y2="726" stroke="#0B7A6B" stroke-width="1.8" marker-end="url(#a)"/>
+  <text x="286" y="718" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#0B7A6B">reads every collection</text>
+  <rect x="474" y="702" width="180" height="48" rx="2" fill="#fff" stroke="#0B7A6B" stroke-width="1.5"/>
+  <text x="492" y="732" font-family="IBM Plex Mono, monospace" font-size="15" fill="#0B7A6B">reports db</text>
+
+  <line x1="256" y1="772" x2="392" y2="772" stroke="#A33A2A" stroke-width="1.8" stroke-dasharray="6 5"/>
+  <line x1="307" y1="758" x2="341" y2="786" stroke="#A33A2A" stroke-width="3"/>
+  <line x1="341" y1="758" x2="307" y2="786" stroke="#A33A2A" stroke-width="3"/>
+  <text x="408" y="767" font-family="IBM Plex Mono, monospace" font-size="14" fill="#A33A2A">tickets · PermissionDenied</text>
+  <text x="408" y="786" font-family="Source Sans 3, sans-serif" font-size="13" fill="#A33A2A">not asserted — verify-controls.sh attempts the write and reports the denial</text>
+</svg>
