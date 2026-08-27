@@ -65,7 +65,7 @@ Read-only reference collections, written by the seed script and never by an agen
 Keep these current. If you add a script, add it here.
 
 ```bash
-pip install -r requirements.txt -c constraints-3.11.txt   # match local Python version
+pip install -r requirements.txt -c constraints-3.12.txt   # match local Python version
 pytest                              # full test suite
 pytest tests/test_idempotency.py    # the two suites that matter most
 pytest tests/test_clock.py
