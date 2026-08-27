@@ -48,6 +48,7 @@ from google.adk.tools.agent_tool import AgentTool
 
 from tools.clock import SimClock
 from tools.finding_lookup import lookup_finding
+from tools.recall import recall_fleet_history
 
 # The sub-agents are imported under two different layouts. In the repository
 # they are agents/triage and agents/reviewer. Agent Engine stages each
@@ -127,13 +128,15 @@ def _model() -> str:
 
 #: The orchestrator's whole capability surface: one reader and two sub-agents.
 #:
-#: lookup_finding is the only tool that touches a database, and it can only
-#: read. The two AgentTools carry no tools of their own, so neither the
+#: Both readers, and neither writes. lookup_finding reads one finding;
+#: recall_fleet_history reads Memory Bank, which is how this agent knows about
+#: cycles that ran on a schedule in a process that has long since exited. The two AgentTools carry no tools of their own, so neither the
 #: proposal nor the verdict can reach storage. Nothing on this path can write,
 #: which is what makes it safe to run all three under one service account.
 def _tools() -> list:
     return [
         FunctionTool(lookup_finding),
+        FunctionTool(recall_fleet_history),
         AgentTool(build_triage()),
         AgentTool(build_reviewer()),
     ]

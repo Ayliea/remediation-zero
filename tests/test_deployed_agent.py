@@ -73,7 +73,7 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
         "a = orchestrator.root_agent; "
         "assert a is not None; "
         "names = sorted(getattr(t, 'name', '') for t in a.tools); "
-        "assert names == ['lookup_finding', 'reviewer', 'triage'], names; "
+        "assert names == ['lookup_finding', 'recall_fleet_history', 'reviewer', 'triage'], names; "
         "print('ok')"
     )
     result = subprocess.run([sys.executable, "-c", script],

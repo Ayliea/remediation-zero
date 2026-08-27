@@ -37,6 +37,7 @@ from scripts import quiet_sdk_logging
 from tools import review_models as rm
 from tools.adjudication import adjudicate
 from tools.clock import SimClock
+from tools.fleet_memory import FleetMemory
 from tools.cycles import merge_cycle_record
 from tools.assignments import AssignmentWriter
 from tools.decisions import DecisionWriter
@@ -223,6 +224,21 @@ def main() -> int:
     if prior:
         _log("cycle_rerun", cycle_id, "-", outcomes=outcomes,
              preserved_outcomes=prior.get("outcomes"))
+
+    # File the cycle into Memory Bank before reporting it finished. This is
+    # the fleet's cross-session recollection: the process that ran this cycle
+    # exits, and Firestore keeps the rows, but the rows are not context. A
+    # failure here is logged and does not fail the cycle — memory is context
+    # and Firestore is the record.
+    # Not on a re-run. A second recollection of a cycle that adjudicated
+    # nothing would sit alongside the first and describe the same cycle as
+    # having done nothing, which is the kind of memory that is worse than none.
+    if not prior:
+        filed = FleetMemory().remember_cycle(
+            cycle_id=cycle_id, counts=dict(outcomes),
+            real_ts=finished.real_ts, sim_ts=finished.sim_ts,
+        )
+        _log("cycle_remembered", cycle_id, "-", filed=filed)
 
     _log("cycle_finished", cycle_id, "-", outcomes=outcomes,
          elapsed_real_s=round(finished.real_ts - started.real_ts, 1))

@@ -5,6 +5,8 @@
     "REASONING_MODEL": "gemini-3.5-flash",
     "SIM_CLOCK_MODE": "real",
     "REVIEWER_MODEL": "gemma-4-26b-a4b-it-maas",
-    "RZ_FIRESTORE_PROJECT": "remediation-zero"
+    "RZ_FIRESTORE_PROJECT": "remediation-zero",
+    "RZ_AGENT_ENGINE_ID": "3119663582942330880",
+    "RZ_AGENT_ENGINE_LOCATION": "us-central1"
   }
 }
