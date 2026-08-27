@@ -39,10 +39,13 @@ curl -s -o /dev/null -w '%{time_total}s\n' \
 #    reach it rather than being waited for on camera.
 ./scripts/verify-controls.sh --only probe
 
-# 3. Confirm the suite is green and the drivers parse.
+# 3. The dead-letter check takes about two minutes. Start it here too.
+./scripts/verify-events.sh
+
+# 4. Confirm the suite is green and the drivers parse.
 .venv/bin/pytest -q
 
-# 4. Pick a cycle number nothing has used. Cycles 1-65 are consumed.
+# 5. Pick a cycle number nothing has used. Cycles 1-65 are consumed.
 #    Re-using one makes the fleet skip everything, which is correct behaviour
 #    and a terrible opening shot.
 export C=70
@@ -53,7 +56,7 @@ Those run once and have already run.
 
 ## The path, in order
 
-Total command runtime is about 2m30s. Narration is what fills the rest.
+Total command runtime is about 2m35s, plus the dead-letter check running in another terminal. Narration is what fills the rest.
 
 ### 1. The ledger — 20s of talking, no commands
 
@@ -209,7 +212,40 @@ Say the part that is easy to skip: two of those four checks expect ALLOWED. An
 identity that can write nothing proves only that it is broken. The control is
 that the boundary falls in a specific place.
 
-### 9. The honest limit — 15s, no commands
+### 9. It runs itself — 30s
+
+```bash
+# Exactly what Cloud Scheduler publishes at 09:00 UTC every day.
+gcloud pubsub topics publish remediation-tick --message='{"advance_days":0}'
+```
+
+Then show the logs. One publish, two workers, each under its own identity:
+
+```
+tick_started  → tick_finished  cycle=30692  rz-worker-chase      {'wait': 6}
+tick_started  → tick_finished  cycle=30692  rz-worker-exception  {'none': 1}
+```
+
+Publish it a second time and both answer `tick_already_ran`. The cycle is
+derived from the day rather than carried in the payload, because Cloud
+Scheduler cannot template a date and keeps no counter — a literal cycle would
+have been the same integer every day, and the idempotency guard would then have
+correctly skipped every tick after the first. The schedule would have reported
+success while doing nothing.
+
+**The dead-letter queue is the part worth showing, and it takes two minutes.**
+Start it before this section, not during:
+
+```bash
+./scripts/verify-events.sh     # about 2 minutes
+```
+
+It publishes a message the worker genuinely cannot process, waits for the five
+delivery attempts to be exhausted, and reads it back out of the queue. Measured
+at `2 of 2 expected copies, first after ~99s` — two because the tick fans out
+to two subscriptions and each dead-letters independently.
+
+### 10. The honest limit — 15s, no commands
 
 Firestore IAM is database-scoped, not collection-scoped, and Security Rules are
 bypassed by server SDKs. So the boundary was put where IAM can actually enforce
@@ -246,5 +282,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh`, all four | 3m23s–3m58s |
-| `pytest`, 180 tests | 19.0s |
+| `pytest`, 221 tests | 19.1s |
+| `gcloud pubsub topics publish` → both workers | ~4s |
+| `verify-events.sh` (dead-letter round trip) | ~115s |
 | `reset-derived.sh --confirm`, 29 docs | under 5s |

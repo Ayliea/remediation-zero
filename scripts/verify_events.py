@@ -48,6 +48,16 @@ PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 TOPIC = "remediation-tick"
 DEAD_LETTER_SUB = "remediation-tick-dead-hold"
 
+#: One tick fans out to one subscription per agent, and each dead-letters
+#: independently, so a single published message becomes this many entries in
+#: the queue. They do not arrive together: the two subscriptions exhaust their
+#: delivery attempts seconds apart, so a check that stops at the first copy
+#: leaves the second behind and slowly fills the queue it is verifying.
+EXPECTED_COPIES = 2
+
+#: How long to keep draining after the first copy shows up.
+DRAIN_GRACE_SECONDS = 120
+
 GREEN, RED, AMBER, DIM, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m")
 
@@ -55,6 +65,41 @@ GREEN, RED, AMBER, DIM, RESET = (
 def gcloud(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["gcloud", *args, "--project", PROJECT],
                           capture_output=True, text=True, check=False)
+
+
+def _drain_remaining_copies(marker: str, already: int) -> int:
+    """Acknowledge this run's other dead-letter copies as they arrive.
+
+    Without this the check leaves its own test message in the queue every time
+    it runs, which is a slow way to make a dead-letter queue meaningless: the
+    next person to look at it finds it full of poison this script published.
+    """
+    drained = 0
+    deadline = time.time() + DRAIN_GRACE_SECONDS
+
+    while drained + already < EXPECTED_COPIES and time.time() < deadline:
+        time.sleep(10)
+        pulled = gcloud("pubsub", "subscriptions", "pull", DEAD_LETTER_SUB,
+                        "--limit", "20", "--format", "json")
+        if pulled.returncode != 0:
+            break
+
+        ack_ids = []
+        for entry in json.loads(pulled.stdout or "[]"):
+            encoded = entry.get("message", {}).get("data", "") or ""
+            try:
+                body = base64.b64decode(encoded).decode("utf-8", "replace")
+            except (ValueError, TypeError):
+                continue
+            if marker in body and entry.get("ackId"):
+                ack_ids.append(entry["ackId"])
+
+        if ack_ids:
+            gcloud("pubsub", "subscriptions", "ack", DEAD_LETTER_SUB,
+                   "--ack-ids", ",".join(ack_ids))
+            drained += len(ack_ids)
+
+    return drained
 
 
 def main() -> int:
@@ -99,26 +144,43 @@ def main() -> int:
             print(f"         {DIM}{pulled.stderr.strip()[:200]}{RESET}")
             return 1
 
+        # Every copy, not the first one. The tick fans out to two
+        # subscriptions and each dead-letters independently, so one published
+        # message becomes two entries here. An earlier version acknowledged
+        # only the first match and left the other behind, so every run of this
+        # check quietly added a message to the queue it was verifying.
+        mine = []
         for entry in json.loads(pulled.stdout or "[]"):
             encoded = entry.get("message", {}).get("data", "") or ""
             try:
                 body = base64.b64decode(encoded).decode("utf-8", "replace")
             except (ValueError, TypeError):
                 body = str(encoded)
-            if args.marker in body:
-                # Acknowledge only this run's own poison. Anything else in here
-                # is a real failure a person still needs to find.
-                ack_id = entry.get("ackId")
-                if ack_id:
-                    gcloud("pubsub", "subscriptions", "ack", DEAD_LETTER_SUB,
-                           "--ack-ids", ack_id)
-                waited = int(args.timeout - (deadline - time.time()))
-                print(f"  [{GREEN}PASS{RESET}] The dead-letter queue caught it")
-                print(f"         {DIM}arrived after ~{waited}s and "
-                      f"{attempt} poll(s), in {DEAD_LETTER_SUB}{RESET}")
-                print(f"\n{GREEN}The queue holds what the fleet could not "
-                      f"process.{RESET}")
-                return 0
+            if args.marker in body and entry.get("ackId"):
+                mine.append(entry["ackId"])
+
+        if mine:
+            # Acknowledge only this run's own poison. Anything else in here is
+            # a real failure a person still needs to find.
+            gcloud("pubsub", "subscriptions", "ack", DEAD_LETTER_SUB,
+                   "--ack-ids", ",".join(mine))
+            waited = int(args.timeout - (deadline - time.time()))
+            found = len(mine) + _drain_remaining_copies(args.marker, len(mine))
+
+            print(f"  [{GREEN}PASS{RESET}] The dead-letter queue caught it")
+            print(f"         {DIM}{found} of {EXPECTED_COPIES} expected copies, "
+                  f"first after ~{waited}s and {attempt} poll(s), in "
+                  f"{DEAD_LETTER_SUB}. One per subscription: each "
+                  f"dead-letters independently.{RESET}")
+            if found < EXPECTED_COPIES:
+                # Not a failure of the control, but say it rather than leaving
+                # the reader to assume the queue is empty afterwards.
+                print(f"         {AMBER}{EXPECTED_COPIES - found} copy/copies "
+                      f"had not arrived within {DRAIN_GRACE_SECONDS}s and "
+                      f"remain in the queue.{RESET}")
+            print(f"\n{GREEN}The queue holds what the fleet could not "
+                  f"process.{RESET}")
+            return 0
 
         remaining = int(deadline - time.time())
         print(f"  {DIM}not yet — {remaining}s left{RESET}", flush=True)

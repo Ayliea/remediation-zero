@@ -70,7 +70,17 @@ The scheduled work is deliberately the chase and the exception sweep rather than
 
 Cloud Scheduler cannot template a date into its payload and keeps no counter, so the tick carries no cycle number and the worker derives one from the day. That gives the idempotency key the two properties it needs: stable within a day, so a Pub/Sub redelivery is absorbed; distinct across days, so tomorrow is new work. A literal cycle in the payload would have been the same integer every day, and the guard would then have correctly skipped every tick after the first — the schedule would have quietly stopped doing anything on day two while still reporting success.
 
-**Failure containment.** A worker never returns success for a message it did not process. Malformed ticks answer 400 and failed ones answer 500; both leave the message unacknowledged, so Pub/Sub redelivers and the dead-letter policy catches it after five attempts. Nothing drains that queue on a schedule, because the point is that a person finds it. Tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
+**Failure containment.** A worker never returns success for a message it did not process. Malformed ticks answer 400 and failed ones answer 500; both leave the message unacknowledged, so Pub/Sub redelivers and the dead-letter policy catches it after five attempts. Nothing drains that queue on a schedule, because the point is that a person finds it. `scripts/verify-events.sh` proves this the way `verify-controls.sh` proves the rest — by publishing a message the worker genuinely cannot process and reading it back out of the queue:
+
+```
+published a message the worker cannot process
+{"cycle": "poison-20260827165607"}
+[PASS] The dead-letter queue caught it
+       2 of 2 expected copies, first after ~99s, in remediation-tick-dead-hold.
+       One per subscription: each dead-letters independently.
+```
+
+Two copies rather than one because the tick fans out to two subscriptions and each exhausts its delivery attempts separately. A dead-letter queue nobody has watched catch anything is a configuration line, not a control, and its two common failure modes are both silent: without publisher access for the Pub/Sub service agent the subscription simply retries forever, and an empty queue looks the same whether nothing failed or nothing could ever arrive. Tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
 
 ## Tech stack
 
