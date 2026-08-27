@@ -41,6 +41,7 @@ from google.genai import types
 from agents.orchestrator.graph import (
     HUMAN_QUEUE, RATIFIED, UNAVAILABLE, CycleState, build_graph, describe,
 )
+from scripts import quiet_sdk_logging
 from tools import review_models as rm
 from tools.adjudication import (
     AdjudicationOutcome, CapacityError, Proposal, Verdict, adjudicate,
@@ -241,8 +242,7 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-    for noisy in ("httpx", "google_genai", "google.auth", "urllib3", "google.adk"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    quiet_sdk_logging("google.adk")
 
     return asyncio.run(run(args.finding, args.cycle))
 

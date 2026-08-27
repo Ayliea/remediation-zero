@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from scripts import quiet_sdk_logging
 from tools import review_models as rm
 from tools.adjudication import adjudicate
 from tools.clock import SimClock
@@ -70,10 +71,7 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-    # The SDKs log every request at INFO, which buries the structured cycle
-    # log that is the actual observability surface.
-    for noisy in ("httpx", "google_genai", "google.auth", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    quiet_sdk_logging()
     load_dotenv(REPO_ROOT / ".env")
 
     import os

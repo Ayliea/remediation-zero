@@ -37,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
-from tools.chase import ChaseAction, ChaseState, next_action
+from scripts import quiet_sdk_logging
+from tools.chase import ChaseAction, ChaseState, next_action, unchaseable_reason
 from tools.clock import SimClock
 from tools.store import FirestoreIdempotencyStore
 from tools.tickets import TicketWriter
@@ -60,8 +61,7 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-    for noisy in ("httpx", "google_genai", "google.auth", "urllib3"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    quiet_sdk_logging()
     load_dotenv(REPO_ROOT / ".env")
 
     clock = SimClock.from_env()
@@ -103,6 +103,13 @@ def main() -> int:
                  reason="risk acceptance is active")
             taken["skipped_accepted"] = taken.get("skipped_accepted", 0) + 1
             continue
+
+        blocked = unchaseable_reason(sla)
+        if blocked:
+            _log("skipped_not_chaseable", cycle_id, finding_id, reason=blocked)
+            taken["skipped_not_chaseable"] = taken.get("skipped_not_chaseable", 0) + 1
+            continue
+
         ticket = tickets.get(finding_id, {})
 
         state = ChaseState(

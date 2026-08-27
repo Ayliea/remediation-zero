@@ -42,7 +42,7 @@ The rules, in priority order:
 
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Optional
+from typing import Mapping, Optional
 
 DAY_SECONDS = 86400
 
@@ -143,3 +143,34 @@ def next_action(state: ChaseState, now_sim_ts: float) -> ChaseAction:
         return ChaseAction.ESCALATE
 
     return ChaseAction.NUDGE
+
+
+def unchaseable_reason(sla: "Mapping[str, object]") -> Optional[str]:
+    """Say why this SLA clock cannot be chased yet, or None if it can.
+
+    Chase runs over every document in `sla_clocks`, but not every document
+    there describes a running clock. The exception agent reopens a lapsed
+    acceptance by merging a status onto the finding's clock, and a merge
+    creates the document when no clock existed. The result is a record that
+    carries a status and nothing to measure against.
+
+    Reading a missing start time as zero would be worse than crashing: an
+    epoch start makes every reopened finding look decades overdue, so the
+    fleet would escalate it to a person on the strength of a field that was
+    never set. Skipping is the honest answer, and the status on that stub
+    already gives the reason — a finding waiting to be re-triaged has no
+    agreed deadline yet.
+
+    A reason rather than a boolean, because the caller logs why it skipped the
+    same way it does for an active risk acceptance. A skip nobody can see is
+    how a finding goes quiet without anyone deciding that it should.
+    """
+    status = sla.get("status")
+    if status == "reopened_pending_triage":
+        return "reopened by an expired acceptance and awaiting re-triage"
+
+    missing = [f for f in ("started_sim_ts", "due_sim_ts") if sla.get(f) is None]
+    if missing:
+        return f"the clock has not started: no {' or '.join(missing)}"
+
+    return None

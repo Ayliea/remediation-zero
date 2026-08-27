@@ -21,6 +21,7 @@ supposed to stop and reports what actually happened, so a reader who did not
 write this system can watch it fail in the right way.
 """
 
+import argparse
 import json
 import subprocess
 import sys
@@ -199,14 +200,52 @@ def check_resume_produces_no_duplicates() -> None:
     )
 
 
+#: The checks, in the order they run. The probe is named separately because it
+#: costs a Cloud Run job execution and roughly three and a half minutes, while
+#: the other three together take under twenty seconds. A demonstration that has
+#: to run all four in sequence spends its whole budget waiting for one of them,
+#: so the set is selectable. The default is still all four: a partial run has
+#: to be asked for explicitly, because a control suite that quietly skips the
+#: slow check is how the slow check stops being run at all.
+CHECKS = {
+    "armor": ("Model Armor blocks the planted injection",
+              lambda: check_model_armor_blocks_the_payload()),
+    "reviewer": ("Reviewer catches it with Model Armor disabled",
+                 lambda: check_reviewer_catches_it_independently()),
+    "probe": ("Reporting identity is denied a ticket write",
+              lambda: check_reporting_cannot_write_tickets()),
+    "resume": ("A resumed cycle writes nothing a second time",
+               lambda: check_resume_produces_no_duplicates()),
+}
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--only", default="", metavar="NAME[,NAME...]",
+        help=("run a subset: " + ", ".join(CHECKS) +
+              ". 'probe' executes a Cloud Run job and takes about 3m30s; the "
+              "other three together take under 20s."),
+    )
+    args = parser.parse_args()
+
+    selected = [n.strip() for n in args.only.split(",") if n.strip()] or list(CHECKS)
+    unknown = [n for n in selected if n not in CHECKS]
+    if unknown:
+        parser.error(f"unknown check(s): {', '.join(unknown)}. "
+                     f"Choose from: {', '.join(CHECKS)}")
+
     print("\nRemediation Zero — control verification")
     print("Each check performs the action the control is meant to stop.\n")
+    if len(selected) < len(CHECKS):
+        skipped = [CHECKS[n][0] for n in CHECKS if n not in selected]
+        print(f"{AMBER}Partial run. Not exercised in this run:{RESET}")
+        for name in skipped:
+            print(f"  - {name}")
+        print()
 
-    check_model_armor_blocks_the_payload()
-    check_reviewer_catches_it_independently()
-    check_reporting_cannot_write_tickets()
-    check_resume_produces_no_duplicates()
+    for name in selected:
+        CHECKS[name][1]()
 
     failed = [n for n, ok, _ in results if not ok and n not in inconclusive_checks]
     print()

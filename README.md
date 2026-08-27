@@ -197,18 +197,42 @@ Two things worth knowing before running these.
 ### 6. Run a cycle
 
 ```bash
-# Real time
-./scripts/tick.sh
+# Triage and adjudicate. --cycle is required: it is half the idempotency key,
+# so there is no default that could quietly overwrite another cycle's record.
+./scripts/tick.sh --cycle 1 --limit 3
 
-# Accelerated: replay a six-week remediation lifecycle
-SIM_CLOCK_MODE=sim ./scripts/tick.sh --advance-weeks 6
+# Run the same cycle again. Nothing is written a second time, and the
+# decisions from the first run are preserved rather than recomputed.
+./scripts/tick.sh --cycle 1 --limit 3
+
+# One finding through the ADK Workflow delegation graph, which prints its own
+# topology before walking it. This is the run that produces a Cloud Trace.
+./scripts/graph.sh --cycle 1 --finding RZ-0101
+
+# Accelerated: replay the six weeks after the scan. Simulated time only —
+# advance() raises in real mode, so this needs SIM_CLOCK_MODE=sim.
+SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle 2 --advance-days 42
+SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle 2 --sweep
+./scripts/report.sh --cycle 2
 ```
+
+Every one of these is safe to repeat. `--cycle` and the finding id form the
+idempotency key, so a second run of the same cycle skips rather than duplicates.
 
 ### 7. Verify the controls
 
 ```bash
-./scripts/verify-controls.sh
+./scripts/verify-controls.sh                          # all four, 3-4 minutes
+./scripts/verify-controls.sh --only armor,reviewer,resume   # the fast three, under 20s
 ```
+
+The probe check executes a Cloud Run job as the reporting identity, which is
+what makes it real and also what makes it slow. Timed individually it is 218
+seconds; the other three together are 19.5. `--only` exists so a demonstration
+is not forced to choose between running the controls live and running them at
+all. A partial run prints the checks it did not exercise before printing any
+result, because a control suite that quietly skips its slowest check is how
+that check stops being run.
 
 Every check performs the action the control is meant to stop and reports what actually happened. There are three outcomes, not two: a check that could not run is reported as inconclusive and exits non-zero, because collapsing "could not run" into "passed" is how a control gets believed on the strength of a test that never exercised it.
 

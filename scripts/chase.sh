@@ -15,10 +15,12 @@
 
 # Run the chase agent over every open SLA clock.
 #
-#   ./scripts/chase.sh --cycle 4 --advance-days 8
+#   SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle 4 --advance-days 8
 #
 # --advance-days moves simulated time only. real_ts is wall clock on every
-# write and is never adjusted to match.
+# write and is never adjusted to match. SIM_CLOCK_MODE=sim is required for it:
+# advance() refuses in real mode rather than fabricating elapsed time, so the
+# command above fails without it. That refusal is the point, not an obstacle.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
