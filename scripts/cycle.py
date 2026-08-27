@@ -36,9 +36,12 @@ from google.cloud import firestore
 from tools import review_models as rm
 from tools.adjudication import adjudicate
 from tools.clock import SimClock
+from tools.cycles import merge_cycle_record
+from tools.assignments import AssignmentWriter
 from tools.decisions import DecisionWriter
 from tools.enrichment import EnrichmentCache
 from tools.idempotency import derive_key
+from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,6 +86,7 @@ def main() -> int:
 
     store = FirestoreIdempotencyStore(client=client, clock=clock)
     writer = DecisionWriter(store=store, client=client, clock=clock)
+    assigner = AssignmentWriter(store=store, client=client, clock=clock)
 
     cycle_id = f"cycle-{args.cycle:03d}"
     started = clock.now()
@@ -92,6 +96,8 @@ def main() -> int:
     finding_ids = [f"RZ-{i:04d}" for i in range(args.start, args.start + args.limit)]
     assets = {a["asset_id"]: a for a in
               (d.to_dict() for d in client.collection("assets").stream())}
+    owners = {o["owner_id"]: o for o in
+              (d.to_dict() for d in client.collection("owners").stream())}
 
     outcomes: dict[str, int] = {}
 
@@ -138,6 +144,19 @@ def main() -> int:
         outcomes[adjudication.outcome.value] = outcomes.get(
             adjudication.outcome.value, 0) + 1
 
+        # Only a ratified decision proceeds to ownership. A finding in the
+        # human queue is waiting on a person, and assigning it would start an
+        # SLA clock against a decision nobody has made yet.
+        if adjudication.outcome.value == "ratified":
+            assignment = resolve_owner(finding, assets, owners)
+            assignment_id = assigner.record(
+                assignment, cycle=args.cycle,
+                sla_days=adjudication.proposal.sla_days if adjudication.proposal else None)
+            _log("assigned", cycle_id, finding_id,
+                 owner_id=assignment.owner_id, team=assignment.team,
+                 needs_human=assignment.needs_human,
+                 assignment_id=assignment_id, reason=assignment.reason[:120])
+
         _log("adjudicated", cycle_id, finding_id,
              outcome=adjudication.outcome.value,
              attempts=adjudication.attempts,
@@ -146,7 +165,16 @@ def main() -> int:
              rejections=[v.reason[:120] for v in adjudication.verdicts if not v.ratified])
 
     finished = clock.now()
-    client.collection("cycles").document(cycle_id).set({
+
+    # The cycle record is the one write that is not keyed on a finding, so it
+    # needs its own protection. A re-run adjudicates nothing and would
+    # otherwise overwrite the original outcomes with {"skipped": n}, destroying
+    # the record of what the cycle actually did. First run wins; later runs
+    # append their timestamps and leave the outcomes alone.
+    cycle_ref = client.collection("cycles").document(cycle_id)
+    existing = cycle_ref.get()
+    prior = existing.to_dict() if existing.exists else None
+    fresh = {
         "cycle_id": cycle_id,
         "cycle": args.cycle,
         "finding_ids": finding_ids,
@@ -156,7 +184,11 @@ def main() -> int:
         "started_sim_ts": started.sim_ts,
         "finished_real_ts": finished.real_ts,
         "finished_sim_ts": finished.sim_ts,
-    })
+    }
+    cycle_ref.set(merge_cycle_record(prior, fresh))
+    if prior:
+        _log("cycle_rerun", cycle_id, "-", outcomes=outcomes,
+             preserved_outcomes=prior.get("outcomes"))
 
     _log("cycle_finished", cycle_id, "-", outcomes=outcomes,
          elapsed_real_s=round(finished.real_ts - started.real_ts, 1))
