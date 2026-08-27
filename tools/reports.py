@@ -36,6 +36,16 @@ from tools.review_models import _load
 
 COLLECTION = "reports"
 
+#: Reports live in their own Firestore database, not a collection of the main
+#: one. That is not a stylistic choice. Firestore IAM grants
+#: datastore.entities.* at the database level and has no collection-scoped
+#: permission, and Security Rules, which are collection-aware, are bypassed
+#: entirely by server SDKs using service accounts. A separate database is
+#: therefore the only boundary IAM can actually enforce here, and enforcing it
+#: is what lets "the reporting agent cannot write tickets" be demonstrated with
+#: a real permission denial rather than asserted.
+REPORTS_DATABASE = "reports"
+
 
 def _presentable(metrics: dict[str, Any]) -> dict[str, Any]:
     """Round rates before the model sees them.
@@ -85,7 +95,10 @@ class ReportWriter:
         client: Optional[firestore.Client] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        # Defaults to the reports database. The reporting agent's service
+        # account holds write access there and read-only access everywhere
+        # else, so this client physically cannot reach tickets.
+        self._client = client or firestore.Client(database=REPORTS_DATABASE)
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
 

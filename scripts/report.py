@@ -35,7 +35,7 @@ from google.cloud import firestore
 from tools import review_models as rm
 from tools.clock import SimClock
 from tools.metrics import compute_metrics
-from tools.reports import ReportWriter, write_summary
+from tools.reports import REPORTS_DATABASE, ReportWriter, write_summary
 from tools.store import FirestoreIdempotencyStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -53,7 +53,10 @@ def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
 
     clock = SimClock.from_env()
+    # Two clients on purpose: reads come from the operational database, the
+    # report is written to the one the reporting identity can write.
     client = firestore.Client()
+    reports_client = firestore.Client(database=REPORTS_DATABASE)
 
     def rows(name):
         return [d.to_dict() for d in client.collection(name).stream()]
@@ -70,8 +73,10 @@ def main() -> int:
 
     summary = write_summary(metrics, os.environ["REASONING_MODEL"], rm._client())
 
-    store = FirestoreIdempotencyStore(client=client, clock=clock)
-    document_id = ReportWriter(store=store, client=client, clock=clock).record(
+    store = FirestoreIdempotencyStore(client=reports_client, clock=clock)
+    document_id = ReportWriter(
+        store=store, client=reports_client, clock=clock
+    ).record(
         metrics=metrics, summary=summary, cycle=args.cycle
     )
 

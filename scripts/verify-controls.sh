@@ -13,8 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Prove the four security claims: Model Armor blocks the planted payload; the reviewer independently flags it with Model Armor disabled; the reporting service account is denied a ticket write; a resumed cycle produces no duplicate tickets.
+# Prove the four security claims by performing the actions they prevent.
 set -euo pipefail
-
-echo "verify-controls.sh: not implemented yet." >&2
-exit 1
+cd "$(dirname "$0")/.."
+exec .venv/bin/python scripts/verify_controls.py "$@"

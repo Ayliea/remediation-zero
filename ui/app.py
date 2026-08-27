@@ -48,6 +48,10 @@ SESSION_CREATED = float(os.environ.get("SESSION_CREATED_REAL_TS", "0") or 0)
 SESSION_ID = os.environ.get("ORCHESTRATOR_SESSION_ID", "unknown")
 
 _client: firestore.Client | None = None
+_reports_client: firestore.Client | None = None
+
+#: Reports live in their own database. See tools/reports.py for why.
+REPORTS_DATABASE = "reports"
 
 
 def db() -> firestore.Client:
@@ -55,6 +59,13 @@ def db() -> firestore.Client:
     if _client is None:
         _client = firestore.Client()
     return _client
+
+
+def reports_db() -> firestore.Client:
+    global _reports_client
+    if _reports_client is None:
+        _reports_client = firestore.Client(database=REPORTS_DATABASE)
+    return _reports_client
 
 
 # --- formatting -------------------------------------------------------------
@@ -130,7 +141,11 @@ def snapshot() -> dict:
     tickets = rows("tickets")
     exceptions = rows("exceptions")
     cycles = rows("cycles")
-    reports = sorted(rows("reports"), key=lambda r: r.get("real_ts", 0), reverse=True)
+    reports = sorted(
+        (d.to_dict() for d in reports_db().collection("reports").limit(10).stream()),
+        key=lambda r: r.get("real_ts", 0),
+        reverse=True,
+    )
 
     # Scenario time is the furthest point the simulation has reached, taken
     # from the record rather than from this process's clock. The console never
