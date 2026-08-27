@@ -42,10 +42,24 @@ curl -s -o /dev/null -w '%{time_total}s\n' \
 # 3. The dead-letter check takes about two minutes. Start it here too.
 ./scripts/verify-events.sh
 
-# 4. Confirm the suite is green and the drivers parse.
+# 4. Confirm the console is serving its newest revision. A pinned service
+#    accepts deploys and serves none of them: it stays up, answering with old
+#    code, so every check of it passes. This happened, and it went unnoticed
+#    for six hours.
+gcloud run services describe remediation-zero-console --region=us-central1 \
+  --format='value(status.traffic[0].revisionName,status.latestReadyRevisionName)'
+#    The two must match. If they do not:
+#    gcloud run services update-traffic remediation-zero-console \
+#      --region=us-central1 --to-latest
+
+# 5. Export the tracker so chase files real issues on camera.
+export GITHUB_TICKET_REPO="Ayliea/remediation-zero-tickets"
+export GITHUB_TOKEN="$(gh auth token)"
+
+# 6. Confirm the suite is green and the drivers parse.
 .venv/bin/pytest -q
 
-# 5. Pick a cycle number nothing has used. Cycles 1-65 are consumed.
+# 7. Pick a cycle number nothing has used. Cycles 1-65 are consumed.
 #    Re-using one makes the fleet skip everything, which is correct behaviour
 #    and a terrible opening shot.
 export C=70
@@ -180,7 +194,48 @@ corpus past the interesting part. `./scripts/reset-derived.sh` clears
 `sla_clocks` and `tickets` and nothing else; run a fresh cycle on untouched
 findings afterwards to rebuild them.
 
-### 7. Reporting — 15s
+**Then show where it landed.** With the tracker exported, each opened ticket is
+a real GitHub issue carrying the ratified severity, the deadline, the specific
+fix, the evidence cited and the reviewer's own reason for accepting it — and
+each nudge and escalation arrives as a comment on it.
+
+```bash
+open https://github.com/Ayliea/remediation-zero-tickets/issues
+```
+
+The console links to them too: a finding id in the ticket table is an anchor to
+its issue. That is the shortest path from "the fleet decided something" to "a
+person can act on it", and it is worth clicking on camera rather than
+describing.
+
+### 7. It remembers cycles it never ran — 20s
+
+In the same playground session, after the assessment:
+
+```
+What has this fleet been doing in past cycles?
+```
+
+```
+Cycle-300: 3 decisions were adjudicated, resulting in 2 ratifications.
+Cycle-301: 2 findings were ratified, and 1 was routed to the human queue.
+```
+
+Those cycles ran on a daily schedule, in worker processes that exited hours
+ago. **This agent never saw them.** It is reading Agent Platform Memory Bank,
+where every completed cycle files one recollection carrying both clocks —
+because a memory read weeks later is useless if it cannot say which time it
+means, and dangerous if the reader assumes the wrong one.
+
+This is the track's "context across weeks of asynchronous operations", and it
+is the hardest thing in the demo to fake.
+
+If it answers that recollection is unavailable, say so and move on: that is the
+tool refusing to report an empty history it did not actually look for. An
+unreachable memory and a fleet that has done nothing are different claims, and
+only one of them is ever true.
+
+### 8. Reporting — 15s
 
 ```bash
 ./scripts/report.sh --cycle $C
@@ -198,21 +253,35 @@ write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
 them.
 
-### 8. The controls — 18s
+### 9. The controls — 25s
 
 ```bash
-./scripts/verify-controls.sh --only armor,reviewer,resume
+./scripts/verify-controls.sh --only armor,reviewer,resume,secret
 ```
 
 Then switch to the terminal where `--only probe` has been running since
-pre-flight and show its result: a Cloud Run job whose service account **is**
-the reporting identity, attempting to write a ticket and being denied.
+pre-flight and show its result. Two of the five checks are Cloud Run jobs, each
+running **as** the identity being tested rather than borrowing it:
 
-Say the part that is easy to skip: two of those four checks expect ALLOWED. An
-identity that can write nothing proves only that it is broken. The control is
-that the boundary falls in a specific place.
+```
+expect DENIED   | got DENIED (PermissionDenied)   | write a ticket        (as rz-reporting)
+expect ALLOWED  | got ALLOWED                     | write a report        (as rz-reporting)
+expect DENIED   | got DENIED (PermissionError)    | read the tracker token (as rz-exception)
+expect ALLOWED  | got ALLOWED                     | read a finding        (as rz-exception)
+```
 
-### 9. It runs itself — 30s
+Say the part that is easy to skip: half of these checks expect ALLOWED. An
+identity that can do nothing proves only that it is broken. The control is that
+the boundary falls in a specific place.
+
+Say the second part too, because it is the stronger claim: **running as the
+identity rather than impersonating it is the whole point.** The first attempt at
+the token check used `--impersonate-service-account` from a laptop and both
+identities returned `PERMISSION_DENIED` on `iam.serviceAccounts.getAccessToken`
+— a refusal to impersonate, which says nothing about the secret. It read as
+proof of the control. It was proof that the operator cannot impersonate anyone.
+
+### 10. It runs itself — 30s
 
 ```bash
 # Fresh work. An explicit cycle overrides the one derived from the day.
@@ -255,7 +324,24 @@ delivery attempts to be exhausted, and reads it back out of the queue. Measured
 at `2 of 2 expected copies, first after ~99s` — two because the tick fans out
 to two subscriptions and each dead-letters independently.
 
-### 10. The honest limit — 15s, no commands
+### 11. Another department can find it — 20s
+
+```bash
+./scripts/register-agent.sh --apply
+```
+
+```
+Discoverable by search, not merely published.
+  query   : vulnerability remediation
+  skills  : assess_finding,recall_fleet_history,lookup_finding
+```
+
+The fleet is published to Agent Registry as an A2A agent card, versioned by the
+commit the engine was built from. The script does not stop at publishing: it
+searches the catalogue the way a team who did not build this would, and fails
+if it cannot find itself. Published and discoverable are different claims.
+
+### 12. The honest limit — 15s, no commands
 
 Firestore IAM is database-scoped, not collection-scoped, and Security Rules are
 bypassed by server SDKs. So the boundary was put where IAM can actually enforce
@@ -274,6 +360,9 @@ Ending on a named limit is stronger than ending on a claim.
 | `429 RESOURCE_EXHAUSTED` | Gemma MaaS capacity | It retries with backoff. Let it. A failed finding routes to the human queue rather than dropping. |
 | `advance() is not available in real mode` | Missing `SIM_CLOCK_MODE=sim` | This is the guard working. Say so, prefix, re-run. |
 | Everything says `skipped` | `$C` already used | Pick a higher number |
+| Console looks like old code | Traffic pinned to an earlier revision | `gcloud run services update-traffic … --to-latest`. The deploy scripts now refuse rather than let this pass. |
+| No GitHub issues appear | `GITHUB_TICKET_REPO` or `GITHUB_TOKEN` unset | The log says `delivery_disabled` and names which. The fleet decides identically without it. |
+| Registry search finds nothing | The catalogue lags the create operation | The script already waits and retries; give it a minute |
 
 The 429 is worth keeping if it happens. It is a real capacity failure being
 absorbed by a real retry path, which is harder to stage than to encounter.
@@ -291,9 +380,12 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 14.9s |
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
+| `verify-controls.sh --only armor,reviewer,resume,secret` | 2m23s |
 | `verify-controls.sh --only probe` | 218s |
-| `verify-controls.sh`, all four | 3m23s–3m58s |
-| `pytest`, 221 tests | 19.1s |
+| `verify-controls.sh --only secret` | ~2m |
+| `verify-controls.sh`, all five | 5–6 min |
+| `register-agent.sh --apply`, including the search | ~40s |
+| `pytest`, 283 tests | 20.6s |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s |
 | `reset-derived.sh --confirm`, 29 docs | under 5s |
