@@ -183,6 +183,13 @@ findings afterwards to rebuild them.
 ./scripts/report.sh --cycle $C
 ```
 
+**Run this last, after every other state change.** A report is a snapshot of
+the figures it was handed, so one generated before the chase steps describes a
+fleet that no longer exists. The console prints the report prose directly above
+the live counters, which means a stale report contradicts the numbers beside it
+inside a single screenshot — that is how the dry run noticed, with a report
+saying "14 total tickets" sitting above a counter reading 6.
+
 The reporting agent has no model client that can compute and no access to
 write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
