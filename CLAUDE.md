@@ -24,6 +24,9 @@ These are not preferences. Violating any of them breaks the submission.
    - **Model location and engine location are different and must stay separate.** `gemini-3.5-flash` is served from `global` and returns 404 from a named region. Agent Engine deploys into a named region. So `GOOGLE_CLOUD_LOCATION=global` for reasoning, `AGENT_ENGINE_LOCATION=us-central1` for the engine.
    - Addressing the **engine** with the model's location returns `The ReasoningEngine does not exist`, which reads like the engine was lost. It was not. Check the location before believing that message.
 4. **The reviewer agent runs on a different model family (Gemma).** This is a deliberate architectural decision, not an implementation detail. Do not "simplify" it by moving the reviewer onto Gemini.
+   - Serving question resolved 2026-08-27: **`gemma-4-26b-a4b-it-maas`, pay-per-token, via the `global` endpoint.** Model-as-a-Service, so **no dedicated endpoint and nothing always-on**. The Gemini fallback in the plan is not needed and should not be taken.
+   - `us-central1` returns `only available via global endpoint`. Same split as the reasoning model.
+   - **Gemma MaaS returns 429 `The request queue is full` under load.** It succeeded on retry. The reviewer must therefore have retry with exponential backoff, and a 429 must never be read as a rejection: silently treating capacity pressure as "reviewer rejected" would corrupt the adjudication record.
 5. **Every side-effecting tool takes an idempotency key.** Derived deterministically from finding ID, action type, and cycle number. A resumed agent must never duplicate a ticket, a nudge, or an escalation. No exceptions, including for tools that seem harmless.
 6. **Every time read goes through `SimClock`.** Never call `datetime.now()`, `time.time()`, or a database server timestamp directly. Every persisted record carries both `real_ts` and `sim_ts`. `real_ts` is wall clock and is never falsified or backdated under any circumstances.
 7. **Each sub-agent has its own service account with IAM scoped to its own Firestore collections.** No shared credential. The reporting agent must be structurally incapable of writing tickets.
@@ -42,7 +45,7 @@ These are not preferences. Violating any of them breaks the submission.
 | Concern | Choice |
 |---|---|
 | Reasoning model | `gemini-3.5-flash` via Vertex / Agent Platform, served from `global` |
-| Reviewer model | Gemma (version set in `.env`) |
+| Reviewer model | `gemma-4-26b-a4b-it-maas`, pay-per-token, served from `global` |
 | Agent framework | ADK 2.8.0, pinned with `constraints-3.12.txt` |
 | Runtime | Agent Runtime, long-running orchestrator session |
 | Working state | Firestore |
@@ -106,7 +109,7 @@ scripts must respect that, and the cost guidance below is a hard requirement
 rather than good practice.
 
 - Minimum instances 0 everywhere. Maximum instances explicitly capped.
-- No always-on endpoints. If Gemma requires a dedicated endpoint, it is created and destroyed around use, never left running.
+- No always-on endpoints. Gemma is pay-per-token MaaS, so no dedicated endpoint is needed and none should ever be created.
 - Provision minimal CPU and RAM. Scale up only if something actually fails.
 - No dedicated vector database or always-on cluster.
 
