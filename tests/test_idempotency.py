@@ -18,6 +18,8 @@ a second ticket, sending a fourth nudge as its first, or escalating twice.
 It is demonstrated on camera, so it cannot be discovered broken late.
 """
 
+import pytest
+
 from tools.idempotency import KEY_SCHEME, derive_key, derive_record
 
 
@@ -78,3 +80,90 @@ def test_record_names_the_scheme_that_produced_the_key():
     record = derive_record(finding_id="CVE-2024-1234", action="ticket", cycle=7)
 
     assert record.scheme == KEY_SCHEME
+
+
+# --- normalisation: what is deliberately folded -----------------------------
+
+def test_finding_id_case_does_not_split_the_key():
+    """CVE identifiers are conventionally uppercase and a lowercase one means
+    the same vulnerability. Splitting on case opens two tickets for one CVE."""
+    upper = derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=7)
+    lower = derive_key(finding_id="cve-2024-1234", action="ticket", cycle=7)
+
+    assert upper == lower
+
+
+def test_action_case_does_not_split_the_key():
+    """Actions are a vocabulary this system generates, so no action is
+    case-significant. An inconsistent literal at one call site must not mint a
+    second key and send a duplicate."""
+    assert derive_key(finding_id="CVE-2024-1234", action="nudge", cycle=3) == derive_key(
+        finding_id="CVE-2024-1234", action="Nudge", cycle=3
+    )
+
+
+def test_surrounding_whitespace_is_stripped():
+    """Trailing whitespace off a CSV column or a copied identifier is an
+    artefact of transport, not a different finding."""
+    clean = derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=7)
+    padded = derive_key(finding_id="  CVE-2024-1234\n", action=" ticket ", cycle=7)
+
+    assert clean == padded
+
+
+# --- normalisation: what is deliberately NOT folded -------------------------
+
+def test_internal_whitespace_still_separates_keys():
+    """Guard on a decision, not a discovered behaviour. Collapsing internal
+    whitespace is unjustified until real findings show it is needed, and the
+    cost of folding something meaningful is a silently suppressed action."""
+    assert derive_key(finding_id="CVE-2024-1234", action="risk accept", cycle=1) != derive_key(
+        finding_id="CVE-2024-1234", action="riskaccept", cycle=1
+    )
+
+
+def test_unicode_lookalikes_still_separate_keys():
+    """NFKC folding is not applied. finding_id originates in the trusted seed
+    script rather than scanner free text, so there is no homoglyph pressure
+    here, and folding without evidence risks merging distinct identifiers."""
+    ascii_id = derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=1)
+    # Fullwidth C, V, E (U+FF23, U+FF36, U+FF25). NFKC would fold these to
+    # ASCII; we do not apply NFKC, so they must stay distinct.
+    fullwidth = derive_key(
+        finding_id="\uff23\uff36\uff25-2024-1234", action="ticket", cycle=1
+    )
+    assert ascii_id != fullwidth  # sanity: the inputs really do differ
+
+    assert ascii_id != fullwidth
+
+
+# --- normalisation: what is rejected ----------------------------------------
+
+def test_empty_finding_id_is_rejected():
+    """A key derived from nothing is still a valid-looking key. It would
+    deduplicate every finding against every other."""
+    with pytest.raises(ValueError, match="finding_id"):
+        derive_key(finding_id="", action="ticket", cycle=1)
+
+
+def test_whitespace_only_action_is_rejected():
+    """Rejected after stripping, not before: '   ' is empty for this purpose."""
+    with pytest.raises(ValueError, match="action"):
+        derive_key(finding_id="CVE-2024-1234", action="   ", cycle=1)
+
+
+def test_negative_cycle_is_rejected():
+    """Cycle numbers count upward from zero. A negative one is a bug upstream
+    and must not be laundered into a plausible key."""
+    with pytest.raises(ValueError, match="cycle"):
+        derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=-1)
+
+
+def test_record_stores_the_normalised_components_not_the_raw_ones():
+    """The record explains the key. If it stored the raw input, the components
+    would not reproduce the key they are filed under."""
+    record = derive_record(finding_id="  cve-2024-1234 ", action=" Ticket ", cycle=7)
+
+    assert record.finding_id == "CVE-2024-1234"
+    assert record.action == "ticket"
+    assert record.key == derive_key(finding_id="CVE-2024-1234", action="ticket", cycle=7)

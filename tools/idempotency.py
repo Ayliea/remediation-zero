@@ -26,14 +26,45 @@ vulnerability data. The cost of opacity is that a key alone does not say what
 it refers to, so `derive_record` pairs every key with the components that
 produced it. Writers persist the record, not the bare key, which keeps a single
 finding's journey queryable end to end.
+
+Normalisation policy
+--------------------
+The two failure directions are not symmetric, and the policy is tuned to that.
+
+Normalising too little splits one thing into two keys: "CVE-2024-1234" and
+"cve-2024-1234" open two tickets for one vulnerability. That is visible and
+annoying.
+
+Normalising too much merges two things into one key, so the second action is
+recognised as a duplicate and silently never happens: a nudge that never sends,
+an escalation that never fires. That is invisible, and it is the failure this
+system exists to prevent.
+
+So folding is applied only where the input space is known to make it safe, and
+withheld everywhere else until real findings justify it:
+
+  folded    case of finding_id, which is conventionally uppercase and where a
+            lowercase variant means the same CVE
+  folded    case of action, a vocabulary this system generates, where no action
+            is case-significant and an inconsistent literal at one call site
+            would otherwise mint a second key
+  folded    surrounding whitespace, which is an artefact of transport
+  kept      internal whitespace, unjustified to collapse without evidence
+  kept      Unicode form. NFKC would fold fullwidth and other lookalikes into
+            ASCII. finding_id originates in the trusted seed script rather than
+            scanner free text, so there is no homoglyph pressure here, and
+            folding without evidence risks merging distinct identifiers
+  rejected  empty, whitespace-only, and non-string components, and negative
+            cycles, which would each produce a valid-looking key from a bug
 """
 
 import hashlib
 from dataclasses import dataclass
 
 #: Identifies the derivation scheme. Change this whenever the material fed to
-#: the hash changes, so that keys minted under a new scheme are recognisably
-#: different rather than silently colliding with old ones.
+#: the hash changes, including the normalisation policy, so that keys minted
+#: under a new scheme are recognisably different rather than silently colliding
+#: with old ones.
 KEY_SCHEME = "rz-idem-v1"
 
 
@@ -41,7 +72,8 @@ KEY_SCHEME = "rz-idem-v1"
 class IdempotencyRecord:
     """A key together with everything needed to explain it.
 
-    Frozen because a key that can be edited after the fact is not a key.
+    Components are stored normalised, so they reproduce the key they are filed
+    under. Frozen because a key that can be edited after the fact is not a key.
     """
 
     key: str
@@ -49,6 +81,49 @@ class IdempotencyRecord:
     action: str
     cycle: int
     scheme: str
+
+
+def _normalize_text(value: str, *, field: str, case: str) -> str:
+    """Strip surrounding whitespace and fold case. Reject what cannot be a key.
+
+    Rejection is loud on purpose. An empty component still hashes to a
+    perfectly valid-looking key, which would quietly deduplicate unrelated
+    findings against one another.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string, got {type(value).__name__}")
+
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field} must not be empty or whitespace only")
+
+    return normalized.upper() if case == "upper" else normalized.lower()
+
+
+def _normalize_cycle(cycle: int, *, field: str = "cycle") -> int:
+    """Cycle numbers count upward from zero.
+
+    bool is excluded explicitly because it is a subclass of int in Python, and
+    True would otherwise pass as cycle 1.
+    """
+    if isinstance(cycle, bool) or not isinstance(cycle, int):
+        raise ValueError(f"{field} must be an integer, got {type(cycle).__name__}")
+    if cycle < 0:
+        raise ValueError(f"{field} must not be negative, got {cycle}")
+    return cycle
+
+
+def _normalize(finding_id: str, action: str, cycle: int) -> tuple[str, str, int]:
+    """Apply the normalisation policy to all three components.
+
+    Idempotent: normalising an already-normalised triple is a no-op, which is
+    what lets `derive_record` normalise once and still agree with `derive_key`.
+    """
+    return (
+        _normalize_text(finding_id, field="finding_id", case="upper"),
+        _normalize_text(action, field="action", case="lower"),
+        _normalize_cycle(cycle),
+    )
 
 
 def _canonical(*parts: str) -> str:
@@ -65,8 +140,18 @@ def _canonical(*parts: str) -> str:
 
 
 def derive_key(finding_id: str, action: str, cycle: int) -> str:
-    """Derive a stable key for one action on one finding in one cycle."""
-    material = _canonical(KEY_SCHEME, finding_id, action, str(cycle))
+    """Derive a stable key for one action on one finding in one cycle.
+
+    Raises:
+        ValueError: if any component cannot form a key. Never returns a
+            plausible key for implausible input.
+    """
+    normalized_id, normalized_action, normalized_cycle = _normalize(
+        finding_id, action, cycle
+    )
+    material = _canonical(
+        KEY_SCHEME, normalized_id, normalized_action, str(normalized_cycle)
+    )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
@@ -75,10 +160,17 @@ def derive_record(finding_id: str, action: str, cycle: int) -> IdempotencyRecord
 
     Prefer this over `derive_key` at every call site that persists something.
     """
+    normalized_id, normalized_action, normalized_cycle = _normalize(
+        finding_id, action, cycle
+    )
     return IdempotencyRecord(
-        key=derive_key(finding_id=finding_id, action=action, cycle=cycle),
-        finding_id=finding_id,
-        action=action,
-        cycle=cycle,
+        key=derive_key(
+            finding_id=normalized_id,
+            action=normalized_action,
+            cycle=normalized_cycle,
+        ),
+        finding_id=normalized_id,
+        action=normalized_action,
+        cycle=normalized_cycle,
         scheme=KEY_SCHEME,
     )
