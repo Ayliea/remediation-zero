@@ -98,6 +98,7 @@ python3 -m venv .venv
 ./scripts/deploy-ui.sh                        # console to Cloud Run
 ./scripts/deploy-worker.sh                    # the two scheduled workers
 ./scripts/verify-events.sh                    # prove the dead-letter queue
+./scripts/register-agent.sh --apply           # publish to Agent Registry, then prove discovery
 ./scripts/tick.sh                             # run one cycle
 ./scripts/verify-controls.sh                  # prove the four security claims
 ./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~17s

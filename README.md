@@ -23,9 +23,16 @@ A finding lands. From there no human is involved until a decision genuinely need
 1. **Triage and Enrichment** proposes a severity, an SLA, and a remediation path, citing CISA KEV, NVD, and EPSS.
 2. **Adversarial Reviewer** receives the proposal and the raw finding and must either ratify it or reject it with a stated reason. Nothing becomes state without passing this gate.
 3. **Ownership and Routing** maps the affected asset to an accountable human.
-4. **Remediation Chase** opens the ticket and pursues it across weeks, nudging, escalating, and adapting to what has historically worked with that specific owner.
+4. **Remediation Chase** opens the ticket and pursues it across weeks, nudging on a cadence scaled to the SLA window, escalating once when the deadline passes, and handing the finding to a person when chasing has stopped being useful.
 5. **Exception and Expiry** records risk acceptances with a TTL and re-opens the finding automatically when one lapses.
 6. **Reporting** produces the weekly metrics the analyst would otherwise assemble by hand.
+
+A ticket here is a record in Firestore and a nudge increments that record; no
+ticketing system is contacted and no message is sent to anybody. The lifecycle,
+the deadlines and the escalation logic are real and are what the fleet is built
+to carry — the connectors that would deliver them are named in the roadmap and
+are not built. Saying so matters more than usual in a project whose argument is
+that every claim it makes can be checked.
 
 ## Architecture
 
@@ -91,8 +98,9 @@ Two copies rather than one because the tick fans out to two subscriptions and ea
 | Agent framework | Google Agent Development Kit (ADK) 2.8.0 |
 | Runtime | Agent Runtime, long-running orchestrator session |
 | Working state | Firestore, Agent Platform Sessions |
-| Long-term memory | Agent Platform Memory Bank |
+| Long-term memory | Agent Platform Memory Bank, one recollection per completed cycle |
 | Governance | Agent Identity, Agent Registry, Model Armor |
+| Discovery | Agent Registry, published with skills and versioned by commit |
 | Telemetry | Cloud Trace, Cloud Logging (OpenTelemetry) |
 | Events | Pub/Sub with dead-letter queue, Cloud Scheduler |
 | Interface | Cloud Run |
@@ -212,7 +220,19 @@ Two things worth knowing before running these.
 
 `session-init.py` refuses to run if a session already exists, printing that session's id and age instead. The elapsed time on that session is the demo's strongest proof point and cannot be regenerated, so the script will not create a second one alongside it.
 
-**Agent Registry does not register the agent automatically.** Deployment prints a link to a separate Gemini Enterprise registration flow. This is noted here rather than claimed otherwise.
+**Agent Registry does not register the agent automatically.** Deploying prints a link to a separate registration flow, and the platform's own auto-catalogued entry carries no skills or description — enough to prove the runtime exists, not enough for anyone to discover what it does.
+
+`./scripts/register-agent.sh --apply` publishes the catalogue entry: a Service carrying an A2A agent card with the three skills the deployed agent actually exposes, versioned by the commit the engine was built from. `agents` in that API is read-only, so an entry is published by registering the Service that serves it. The script is safe to repeat — an existing entry is updated in place, because a catalogue holding two entries for one agent is worse than no catalogue.
+
+It then proves the result rather than asserting it, by searching the registry the way a department that did not build the agent would:
+
+```
+Discoverable by search, not merely published.
+  query   : vulnerability remediation
+  agent   : projects/remediation-zero/locations/us-central1/agents/agentregistry-…
+  version : 7e5e67b
+  skills  : assess_finding,recall_fleet_history,lookup_finding
+```
 
 ### 6. Run a cycle
 
@@ -250,7 +270,14 @@ idempotency key, so a second run of the same cycle skips rather than duplicates.
 timed against the live deployment and a table of what to do when one of them
 misbehaves on camera.
 
-### 7. Let it run itself
+### 7. Publish it to the catalogue
+
+```bash
+./scripts/register-agent.sh          # show what would be published
+./scripts/register-agent.sh --apply  # publish or update, then prove it is findable
+```
+
+### 8. Let it run itself
 
 ```bash
 # What the scheduler publishes. Identical to waiting for 09:00 UTC.
@@ -268,7 +295,7 @@ session carries days of real elapsed wall-clock time and cannot be regenerated
 before the deadline, and importing it to make the configuration look complete
 would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
 
-### 8. Verify the controls
+### 9. Verify the controls
 
 ```bash
 ./scripts/verify-controls.sh                          # all four, 3-4 minutes
@@ -292,7 +319,7 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] A resumed cycle writes nothing a second time
 ```
 
-### 9. Reset the demo state
+### 10. Reset the demo state
 
 Rehearsing advances simulated time, and every advance ages the SLA clocks.
 After enough rehearsals almost every clock reads `breached`, so chase escalates
@@ -314,7 +341,7 @@ at all — the tests assert its source does not name them.
 Winding simulated time backwards would have been the other way to do this, and
 it is the wrong one. `real_ts` is wall clock and this script never writes one.
 
-### 10. Tear down
+### 11. Tear down
 
 ```bash
 # Cloud Run scales to zero, so idle cost is already nil. To remove everything:
