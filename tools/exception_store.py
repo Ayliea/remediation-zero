@@ -104,8 +104,17 @@ class ExceptionWriter:
             # Chase must not pursue an accepted finding, so the clock is
             # paused rather than left running against an owner who has been
             # told to stand down.
+            # finding_id is written even on a merge. A finding can be accepted
+            # before it was ever assigned, in which case no clock exists yet and
+            # merging would leave a document identified only by its key. That is
+            # unreadable to anything that queries by field rather than by id.
             self._client.collection(SLA_COLLECTION).document(finding_id).set(
-                {"status": "accepted", "paused_sim_ts": stamp.sim_ts}, merge=True
+                {
+                    "finding_id": finding_id,
+                    "status": "accepted",
+                    "paused_sim_ts": stamp.sim_ts,
+                },
+                merge=True,
             )
             return f"accepted:{finding_id}"
 
@@ -133,7 +142,8 @@ class ExceptionWriter:
                 merge=True,
             )
             self._client.collection(SLA_COLLECTION).document(finding_id).set(
-                {"status": "reopened_pending_triage"}, merge=True
+                {"finding_id": finding_id, "status": "reopened_pending_triage"},
+                merge=True,
             )
             self._client.collection(HUMAN_QUEUE).document(
                 f"reopened-{finding_id}"

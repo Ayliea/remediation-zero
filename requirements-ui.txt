@@ -1,0 +1,7 @@
+# Console only. Deliberately narrower than requirements.txt: the container that
+# a stranger can reach does not ship the agent framework, the model clients, or
+# anything that can write.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+google-cloud-firestore==2.29.0
+python-dotenv==1.2.3

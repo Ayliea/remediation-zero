@@ -122,3 +122,7 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Browser automation output from design review.
+.playwright-mcp/
+console-top.png
