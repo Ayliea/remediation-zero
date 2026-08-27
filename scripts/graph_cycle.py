@@ -52,6 +52,7 @@ from tools.enrichment import EnrichmentCache
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
+from tools.telemetry import configure_tracing, finding_span, flush, set_outcome
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger("remediation_zero.graph")
@@ -194,6 +195,9 @@ async def run(finding_id: str, cycle: int) -> int:
         "scratch": {},
     }
 
+    traced = configure_tracing(os.environ.get("GOOGLE_CLOUD_PROJECT"))
+    _log("tracing", clients["cycle_id"], finding_id, enabled=traced)
+
     workflow = build_graph(build_handlers(clients))
     print(describe(workflow))
     print()
@@ -205,16 +209,28 @@ async def run(finding_id: str, cycle: int) -> int:
         auto_create_session=True,
     )
 
-    async for event in runner.run_async(
-        user_id="orchestrator",
-        session_id=f"graph-{cycle}-{finding_id}",
-        state_delta={"finding_id": finding_id, "cycle": cycle, "outcome": ""},
-        new_message=types.Content(role="user", parts=[types.Part(text=finding_id)]),
-    ):
-        if getattr(event, "error_message", None):
-            _log("node_error", clients["cycle_id"], finding_id,
-                 error=str(event.error_message)[:200])
+    # One span for the whole finding. Every span ADK creates for a node, a
+    # model call or a tool call nests inside it, which is what makes a single
+    # finding's journey one readable trace rather than scattered fragments.
+    with finding_span(finding_id, clients["cycle_id"]) as span:
+        async for event in runner.run_async(
+            user_id="orchestrator",
+            session_id=f"graph-{cycle}-{finding_id}",
+            state_delta={"finding_id": finding_id, "cycle": cycle, "outcome": ""},
+            new_message=types.Content(role="user", parts=[types.Part(text=finding_id)]),
+        ):
+            if getattr(event, "error_message", None):
+                _log("node_error", clients["cycle_id"], finding_id,
+                     error=str(event.error_message)[:200])
 
+        adjudication = clients["scratch"].get("adjudication")
+        if adjudication is not None:
+            set_outcome(span, adjudication.outcome.value)
+
+    # Spans are batched, so a short-lived script would otherwise exit with its
+    # trace still in memory. A cycle that ran but produced no trace looks
+    # exactly like a cycle that never ran.
+    flush()
     return 0
 
 
