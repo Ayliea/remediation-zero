@@ -85,12 +85,24 @@ def main() -> int:
               (d.to_dict() for d in client.collection("owners").stream())}
     tickets = {t["finding_id"]: t for t in
                (d.to_dict() for d in client.collection("tickets").stream())}
+    # An accepted risk is not chased. Nudging an owner who has been told to
+    # stand down destroys the credibility of every other nudge.
+    accepted = {
+        e["finding_id"]
+        for e in (d.to_dict() for d in client.collection("exceptions").stream())
+        if e.get("status") == "active" and e.get("expires_sim_ts", 0) > 0
+    }
 
     taken: dict[str, int] = {}
 
     for snapshot in client.collection(SLA := "sla_clocks").stream():
         sla = snapshot.to_dict()
         finding_id = sla["finding_id"]
+        if finding_id in accepted and sla.get("expires_check", True):
+            _log("skipped_accepted", cycle_id, finding_id,
+                 reason="risk acceptance is active")
+            taken["skipped_accepted"] = taken.get("skipped_accepted", 0) + 1
+            continue
         ticket = tickets.get(finding_id, {})
 
         state = ChaseState(
