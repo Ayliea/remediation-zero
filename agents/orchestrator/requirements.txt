@@ -1,0 +1,17 @@
+# Dependencies for the deployed orchestrator.
+#
+# ADK generates a minimal file when this is absent, and that generated file
+# does not include the Firestore client — so the agent deploys cleanly, calls
+# its own tool, and fails with an ImportError only when a person finally asks
+# it a question. Naming the dependencies here is what makes the deployed image
+# match what the tool actually imports.
+#
+# Deliberately short. Nothing on this path reasons about a model other than
+# through ADK, and nothing writes, so there is no reason to ship more.
+#
+# Versions match constraints-3.12.txt. The deployed agent is the agent that was
+# tested, or it is a different agent.
+google-cloud-aiplatform[adk,agent_engines]
+google-adk==2.8.0
+google-cloud-firestore==2.29.0
+python-dotenv==1.2.3

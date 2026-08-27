@@ -3,6 +3,8 @@
     "GOOGLE_CLOUD_LOCATION": "global",
     "GOOGLE_GENAI_USE_VERTEXAI": "true",
     "REASONING_MODEL": "gemini-3.5-flash",
-    "SIM_CLOCK_MODE": "real"
+    "SIM_CLOCK_MODE": "real",
+    "REVIEWER_MODEL": "gemma-4-26b-a4b-it-maas",
+    "RZ_FIRESTORE_PROJECT": "remediation-zero"
   }
 }

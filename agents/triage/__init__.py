@@ -11,3 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""The triage agent package.
+
+Relative import: in Agent Engine this is staged under /app/agents and loaded
+without a top-level `agents` package to resolve against.
+"""
+
+from .agent import build
+
+__all__ = ["build"]

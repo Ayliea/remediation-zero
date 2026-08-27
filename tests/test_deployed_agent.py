@@ -57,6 +57,12 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
     shutil.copytree(AGENT_DIR, app / "agents" / "orchestrator")
     shutil.copytree(REPO_ROOT / "tools", app / "tools")
     shutil.copytree(REPO_ROOT / "prompts", app / "prompts")
+    # --extra_packages stages each entry at /app/<basename>, so the sub-agents
+    # land beside the orchestrator as top-level packages rather than under
+    # agents/. That is why the orchestrator imports them both ways.
+    shutil.copytree(REPO_ROOT / "agents" / "triage", app / "triage")
+    shutil.copytree(REPO_ROOT / "agents" / "reviewer", app / "reviewer")
+    shutil.copytree(REPO_ROOT / "data", app / "data")
     assert not (app / "agents" / "__init__.py").exists()
 
     script = (
@@ -64,12 +70,24 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
         f"sys.path[:] = [{str(app)!r}, {str(app / 'agents')!r}] + "
         "[p for p in sys.path if 'site-packages' in p or 'python3' in p]; "
         "import orchestrator; "
-        "assert orchestrator.root_agent is not None; "
+        "a = orchestrator.root_agent; "
+        "assert a is not None; "
+        "names = sorted(getattr(t, 'name', '') for t in a.tools); "
+        "assert names == ['lookup_finding', 'reviewer', 'triage'], names; "
         "print('ok')"
     )
     result = subprocess.run([sys.executable, "-c", script],
                             capture_output=True, text=True, cwd=str(tmp_path),
-                            env={**os.environ, "PYTHONPATH": ""})
+                            env={
+                                **os.environ,
+                                "PYTHONPATH": "",
+                                # Supplied the way .agent_engine_config.json
+                                # supplies them in the cloud. Both agents raise
+                                # rather than defaulting, so the cross-family
+                                # split cannot be erased by a missing variable.
+                                "REASONING_MODEL": "gemini-3.5-flash",
+                                "REVIEWER_MODEL": "gemma-4-26b-a4b-it-maas",
+                            })
     assert "ok" in result.stdout, (
         "the agent does not import in the deployed layout. This is the failure "
         "that shows up as a 400 from stream_query.\n"

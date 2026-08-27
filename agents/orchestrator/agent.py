@@ -12,10 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Orchestrator shell.
+"""The deployed orchestrator: reasons over a finding, and writes nothing.
 
-Deployed, holding a long-running session, logging a heartbeat. No sub-agents
-are attached yet and no agent logic lives here beyond the shell.
+Delegates to two sub-agents through AgentTool — triage on Gemini, review on
+Gemma — over a finding read by its one tool. Given a finding id it produces the
+same adjudication the fleet produces, and persists none of it.
+
+That boundary is deliberate and it is the reason the writing agents are absent
+here. An Agent Engine runs as a single service account, so every sub-agent
+attached to this one executes under one identity. Attaching ownership, chase,
+exception and reporting would require that identity to hold every collection's
+write access, and the claim this project makes loudest — that the reporting
+agent is structurally incapable of writing a ticket — would stop being true of
+the deployment carrying the project's name.
+
+So the writes live where a per-agent identity is enforceable: the ADK Workflow
+graph in scripts/graph_cycle.py, and the two Cloud Run workers, each running as
+its own service account. This agent is the reasoning surface, read-only for the
+same reason the console is read-only.
 
 `root_agent` is the name ADK's loader looks for when resolving
 `agents/orchestrator`.
@@ -29,8 +43,23 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from google.adk import Agent
+from google.adk.tools import FunctionTool
+from google.adk.tools.agent_tool import AgentTool
 
 from tools.clock import SimClock
+from tools.finding_lookup import lookup_finding
+
+# The sub-agents are imported under two different layouts. In the repository
+# they are agents/triage and agents/reviewer. Agent Engine stages each
+# --extra_packages entry at /app/<basename>, so there they are top-level
+# `triage` and `reviewer` while the orchestrator itself sits at
+# /app/agents/orchestrator. Neither form resolves in the other environment.
+try:  # repository layout
+    from agents.reviewer.agent import build as build_reviewer
+    from agents.triage.agent import build as build_triage
+except ImportError:  # deployed layout
+    from reviewer.agent import build as build_reviewer
+    from triage.agent import build as build_triage
 
 # Load .env before the module-level agent is constructed. ADK's loader imports
 # this module to find root_agent, so configuration has to be present by then.
@@ -96,11 +125,26 @@ def _model() -> str:
     return model
 
 
+#: The orchestrator's whole capability surface: one reader and two sub-agents.
+#:
+#: lookup_finding is the only tool that touches a database, and it can only
+#: read. The two AgentTools carry no tools of their own, so neither the
+#: proposal nor the verdict can reach storage. Nothing on this path can write,
+#: which is what makes it safe to run all three under one service account.
+def _tools() -> list:
+    return [
+        FunctionTool(lookup_finding),
+        AgentTool(build_triage()),
+        AgentTool(build_reviewer()),
+    ]
+
+
 root_agent = Agent(
     name=AGENT_NAME,
     model=_model(),
     description="Owns cycle control and delegation for the remediation fleet.",
     instruction=load_instruction(),
+    tools=_tools(),
 )
 
 

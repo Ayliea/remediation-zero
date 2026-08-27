@@ -92,6 +92,9 @@ MSG
       --display_name="remediation-zero-orchestrator" \
       --extra_packages=tools \
       --extra_packages=prompts \
+      --extra_packages=agents/triage \
+      --extra_packages=agents/reviewer \
+      --extra_packages=data \
       agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
     echo "$out"
     echo >&2
@@ -145,6 +148,9 @@ if ! out=$(.venv/bin/adk deploy agent_engine \
     --display_name="remediation-zero-orchestrator" \
     --extra_packages=tools \
     --extra_packages=prompts \
+    --extra_packages=agents/triage \
+    --extra_packages=agents/reviewer \
+    --extra_packages=data \
     agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
   echo "$out"
   echo >&2

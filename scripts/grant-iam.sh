@@ -40,6 +40,7 @@ cd "$(dirname "$0")/.."
 if [[ -f .env ]]; then set -a; source .env; set +a; fi
 
 PROJECT="${GOOGLE_CLOUD_PROJECT:?set in .env}"
+PROJECT_NUMBER="$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')"
 OPERATIONAL="projects/${PROJECT}/databases/(default)"
 REPORTS="projects/${PROJECT}/databases/reports"
 
@@ -74,6 +75,20 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --condition="expression=resource.name.startsWith('${REPORTS}'),title=reports-database-only,description=Reporting writes only to the reports database" \
   --quiet > /dev/null
 echo "  rz-reporting: roles/datastore.user     (conditioned to the reports database only)"
+
+echo
+echo "The deployed Agent Engine reads findings, and only reads them:"
+gcloud projects add-iam-policy-binding "${PROJECT}" \
+  --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com" \
+  --role="roles/datastore.viewer" \
+  --condition=None --quiet > /dev/null
+echo "  reasoning engine agent: roles/datastore.viewer   (read only, never datastore.user)"
+echo
+echo "  An Agent Engine runs as one service account, so everything attached to"
+echo "  the deployed orchestrator shares this identity. It is therefore given"
+echo "  read and nothing else: the agents that write run in the Workflow graph"
+echo "  and the Cloud Run workers, each as itself. Granting datastore.user here"
+echo "  would make the reporting-denial control untrue of the deployment."
 
 echo
 echo "Allowing the operator to impersonate rz-reporting, so the denial can be"
