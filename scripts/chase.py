@@ -53,31 +53,37 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
         sort_keys=True, default=str))
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cycle", type=int, required=True)
-    parser.add_argument("--advance-days", type=float, default=0.0,
-                        help="move simulated time forward. Requires SIM_CLOCK_MODE=sim.")
-    args = parser.parse_args()
+def run_chase(
+    cycle: int,
+    advance_days: float = 0.0,
+    clock: SimClock | None = None,
+) -> dict[str, int]:
+    """Run the chase agent over every SLA clock once, and report what it did.
 
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
-    quiet_sdk_logging()
-    load_dotenv(REPO_ROOT / ".env")
+    Separated from main() so the scheduled worker can call it. The worker
+    receives a Pub/Sub push rather than a command line, but it must do exactly
+    what the command does — a scheduled path that quietly diverges from the one
+    a person can run is a path nobody has actually tested.
 
-    clock = SimClock.from_env()
-    if args.advance_days:
-        # Raises in real mode. Deliberately: the elapsed-time claim depends on
-        # there being no way to move time when the clock says it is real.
-        clock.advance(seconds=args.advance_days * 86400)
+    Takes the same optional pre-advanced clock as run_sweep, so the worker can
+    hold both runners behind one signature rather than special-casing which
+    agent it is about to call.
+    """
+    if clock is None:
+        clock = SimClock.from_env()
+        if advance_days:
+            # Raises in real mode. Deliberately: the elapsed-time claim depends
+            # on there being no way to move time when the clock says it is real.
+            clock.advance(seconds=advance_days * 86400)
 
     client = firestore.Client()
     store = FirestoreIdempotencyStore(client=client, clock=clock)
     writer = TicketWriter(store=store, client=client, clock=clock)
 
-    cycle_id = f"cycle-{args.cycle:03d}"
+    cycle_id = f"cycle-{cycle:03d}"
     stamp = clock.now()
     _log("chase_started", cycle_id, "-", clock_mode=clock.mode.value,
-         advanced_days=args.advance_days,
+         advanced_days=advance_days,
          real_ts=stamp.real_ts, sim_ts=stamp.sim_ts,
          sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
 
@@ -125,7 +131,7 @@ def main() -> int:
 
         action = next_action(state, now_sim_ts=stamp.sim_ts)
         owner = owners.get(sla.get("owner_id"), {})
-        result = writer.act(action, state, cycle=args.cycle, owner=owner,
+        result = writer.act(action, state, cycle=cycle, owner=owner,
                             now_sim_ts=stamp.sim_ts)
 
         taken[action.value] = taken.get(action.value, 0) + 1
@@ -135,7 +141,23 @@ def main() -> int:
              owner_id=sla.get("owner_id"), result=result)
 
     _log("chase_finished", cycle_id, "-", actions=taken)
-    print(json.dumps({"cycle": cycle_id, "actions": taken}, sort_keys=True))
+    return taken
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cycle", type=int, required=True)
+    parser.add_argument("--advance-days", type=float, default=0.0,
+                        help="move simulated time forward. Requires SIM_CLOCK_MODE=sim.")
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(message)s")
+    quiet_sdk_logging()
+    load_dotenv(REPO_ROOT / ".env")
+
+    taken = run_chase(cycle=args.cycle, advance_days=args.advance_days)
+    print(json.dumps({"cycle": f"cycle-{args.cycle:03d}", "actions": taken},
+                     sort_keys=True))
     return 0
 
 

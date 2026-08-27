@@ -50,6 +50,60 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
         sort_keys=True, default=str))
 
 
+def run_sweep(
+    cycle: int,
+    advance_days: float = 0.0,
+    clock: SimClock | None = None,
+) -> dict[str, int]:
+    """Reopen every risk acceptance whose TTL has lapsed, and report what it did.
+
+    Separated from main() so the scheduled worker can call it. An acceptance
+    that expires while nobody is looking is the failure this agent exists to
+    prevent, which makes it exactly the work that should run on a schedule
+    rather than when someone remembers.
+
+    An already-advanced clock can be passed in. Two independently constructed
+    clocks advanced by the same number of days do agree, so building a second
+    one here would not corrupt anything today — but it would leave the caller
+    and this function each holding a clock and no statement of which one is
+    authoritative. Passing it makes the answer explicit.
+    """
+    if clock is None:
+        clock = SimClock.from_env()
+        if advance_days:
+            clock.advance(seconds=advance_days * 86400)
+
+    client = firestore.Client()
+    store = FirestoreIdempotencyStore(client=client, clock=clock)
+    writer = ExceptionWriter(store=store, client=client, clock=clock)
+
+    cycle_id = f"cycle-{cycle:03d}"
+    stamp = clock.now()
+
+    _log("sweep_started", cycle_id, "-", sim_ts=stamp.sim_ts,
+         sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
+    actions: dict[str, int] = {}
+    for snapshot in client.collection("exceptions").stream():
+        data = snapshot.to_dict()
+        exception = Exception_(
+            finding_id=data["finding_id"],
+            accepted_by=data.get("accepted_by", "unknown"),
+            reason=data.get("reason", ""),
+            accepted_sim_ts=data["accepted_sim_ts"],
+            ttl_days=int(data["ttl_days"]),
+            reopened=bool(data.get("reopened", False)),
+        )
+        action = next_action(exception, stamp.sim_ts)
+        actions[action.value] = actions.get(action.value, 0) + 1
+        if action is ExceptionAction.REOPEN:
+            result = writer.reopen(exception, cycle=cycle, now_sim_ts=stamp.sim_ts)
+            _log("acceptance_expired", cycle_id, exception.finding_id,
+                 ttl_days=exception.ttl_days,
+                 accepted_by=exception.accepted_by, result=result)
+    _log("sweep_finished", cycle_id, "-", actions=actions)
+    return actions
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cycle", type=int, required=True)
@@ -101,28 +155,7 @@ def main() -> int:
             return 2
 
     if args.sweep:
-        _log("sweep_started", cycle_id, "-", sim_ts=stamp.sim_ts,
-             sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
-        actions = {}
-        for snapshot in client.collection("exceptions").stream():
-            data = snapshot.to_dict()
-            exception = Exception_(
-                finding_id=data["finding_id"],
-                accepted_by=data.get("accepted_by", "unknown"),
-                reason=data.get("reason", ""),
-                accepted_sim_ts=data["accepted_sim_ts"],
-                ttl_days=int(data["ttl_days"]),
-                reopened=bool(data.get("reopened", False)),
-            )
-            action = next_action(exception, stamp.sim_ts)
-            actions[action.value] = actions.get(action.value, 0) + 1
-            if action is ExceptionAction.REOPEN:
-                result = writer.reopen(exception, cycle=args.cycle,
-                                       now_sim_ts=stamp.sim_ts)
-                _log("acceptance_expired", cycle_id, exception.finding_id,
-                     ttl_days=exception.ttl_days,
-                     accepted_by=exception.accepted_by, result=result)
-        _log("sweep_finished", cycle_id, "-", actions=actions)
+        actions = run_sweep(cycle=args.cycle, clock=clock)
         print(json.dumps({"cycle": cycle_id, "sweep": actions}, sort_keys=True))
 
     return 0

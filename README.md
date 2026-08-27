@@ -64,7 +64,13 @@ The remaining five agents hold distinct identities with collection separation en
 
 The reviewer is the second layer, and measuring it corrected an overclaim. With Model Armor disabled the reviewer rejected the planted finding every time, but named the injection in only one run out of five: it was finding a sufficient reason to reject on severity grounds and stopping. The injection never succeeded, but "the reviewer independently catches it" was not true as written. The reviewer now assesses the untrusted text first, before the proposal at all, and reports the result on every finding whether or not it is the reason for rejecting. Detection went from one in five to six in six.
 
-**Failure containment.** Pub/Sub carries a dead-letter queue, tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
+**The fleet runs itself, and says so when it cannot.** Cloud Scheduler publishes one tick a day to a single topic, which fans out to two push subscriptions and two workers — one running as `rz-chase`, one as `rz-exception`. The fan-out is not decoration: a single worker running both agents would need one credential holding both agents' access, which is the shared credential the architecture does not have.
+
+The scheduled work is deliberately the chase and the exception sweep rather than triage. Those are the relentless, stateful weeks this project argues a human should not carry, and neither calls a reasoning model, so a daily tick costs essentially nothing.
+
+Cloud Scheduler cannot template a date into its payload and keeps no counter, so the tick carries no cycle number and the worker derives one from the day. That gives the idempotency key the two properties it needs: stable within a day, so a Pub/Sub redelivery is absorbed; distinct across days, so tomorrow is new work. A literal cycle in the payload would have been the same integer every day, and the guard would then have correctly skipped every tick after the first — the schedule would have quietly stopped doing anything on day two while still reporting success.
+
+**Failure containment.** A worker never returns success for a message it did not process. Malformed ticks answer 400 and failed ones answer 500; both leave the message unacknowledged, so Pub/Sub redelivers and the dead-letter policy catches it after five attempts. Nothing drains that queue on a schedule, because the point is that a person finds it. Tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
 
 ## Tech stack
 
@@ -80,7 +86,7 @@ The reviewer is the second layer, and measuring it corrected an overclaim. With 
 | Telemetry | Cloud Trace, Cloud Logging (OpenTelemetry) |
 | Events | Pub/Sub with dead-letter queue, Cloud Scheduler |
 | Interface | Cloud Run |
-| Infrastructure as code | Terraform, in `infra/`. Not yet written; setup is currently the two scripts below |
+| Infrastructure as code | Terraform, in `infra/`, for the event plumbing |
 
 ## Running deployment
 
@@ -183,6 +189,10 @@ One finding carries a planted prompt-injection payload in its comment field. The
                                      # id in .env as AGENT_ENGINE_ID.
 ./scripts/deploy-agent.sh            # every deploy after that: updates in place
 ./scripts/deploy-ui.sh               # console to Cloud Run
+./scripts/deploy-worker.sh           # the two scheduled workers
+terraform -chdir=infra init
+terraform -chdir=infra plan          # read this before applying
+terraform -chdir=infra apply         # topics, subscriptions, DLQ, scheduler
 .venv/bin/python scripts/session-init.py   # creates the long-running session
 ```
 
@@ -230,7 +240,25 @@ idempotency key, so a second run of the same cycle skips rather than duplicates.
 timed against the live deployment and a table of what to do when one of them
 misbehaves on camera.
 
-### 7. Verify the controls
+### 7. Let it run itself
+
+```bash
+# What the scheduler publishes. Identical to waiting for 09:00 UTC.
+gcloud pubsub topics publish remediation-tick --message='{"advance_days":0}'
+
+# Prove the dead-letter queue by sending it something it must catch.
+./scripts/verify-events.sh
+```
+
+Terraform manages the event plumbing and nothing else. The Agent Engine, its
+session, the Firestore databases, the service accounts and the Cloud Run
+services are read as data rather than declared as resources, so
+`terraform destroy` cannot reach them. That boundary is a safety property: the
+session carries days of real elapsed wall-clock time and cannot be regenerated
+before the deadline, and importing it to make the configuration look complete
+would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
+
+### 8. Verify the controls
 
 ```bash
 ./scripts/verify-controls.sh                          # all four, 3-4 minutes
@@ -254,7 +282,7 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] A resumed cycle writes nothing a second time
 ```
 
-### 8. Reset the demo state
+### 9. Reset the demo state
 
 Rehearsing advances simulated time, and every advance ages the SLA clocks.
 After enough rehearsals almost every clock reads `breached`, so chase escalates
@@ -276,10 +304,13 @@ at all — the tests assert its source does not name them.
 Winding simulated time backwards would have been the other way to do this, and
 it is the wrong one. `real_ts` is wall clock and this script never writes one.
 
-### 9. Tear down
+### 10. Tear down
 
 ```bash
 # Cloud Run scales to zero, so idle cost is already nil. To remove everything:
+terraform -chdir=infra destroy       # events only, by construction
+gcloud run services delete rz-worker-chase --region=us-central1
+gcloud run services delete rz-worker-exception --region=us-central1
 gcloud run services delete remediation-zero-console --region=us-central1
 gcloud run jobs delete reporting-write-probe --region=us-central1
 gcloud firestore databases delete --database=reports

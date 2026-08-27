@@ -1,0 +1,38 @@
+# Copyright 2026 Daviyon Daniels
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The scheduled worker. One image, deployed twice: WORKER_AGENT selects the
+# agent and the service account differs per deployment, so neither instance
+# holds the other's access.
+#
+# Separate from the console image rather than shared with it. The console
+# claims to ship no write path, and the only way that claim stays true is for
+# the container that writes to be a different container.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+COPY requirements-worker.txt .
+RUN pip install --no-cache-dir -r requirements-worker.txt
+
+# The agents' logic, the tools they use, and the push endpoint. No prompts and
+# no model clients: nothing on this path reasons.
+COPY worker/ ./worker/
+COPY scripts/__init__.py scripts/chase.py scripts/exception.py ./scripts/
+COPY tools/ ./tools/
+
+ENV PORT=8080
+CMD exec uvicorn worker.app:app --host 0.0.0.0 --port ${PORT} --workers 1

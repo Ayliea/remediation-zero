@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Copyright 2026 Daviyon Daniels
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Prove the dead-letter queue by sending it a message the worker refuses.
+#
+# Takes a few minutes: the subscription has to exhaust its delivery attempts
+# with backoff before Pub/Sub dead-letters the message. That wait is the
+# control working, not the script being slow.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec .venv/bin/python scripts/verify_events.py --marker "$(date -u +%Y%m%d%H%M%S)" "$@"

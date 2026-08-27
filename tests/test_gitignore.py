@@ -62,6 +62,11 @@ MUST_BE_IGNORED = [
     "infra/terraform.tfstate",
     "infra/terraform.tfvars",
     "infra/.terraform/x",
+    # A saved plan is a resolved copy of everything about to be written. It
+    # looks like a build artifact, which is why it gets committed by accident.
+    "infra/tfplan",
+    "infra/tfplan.binary",
+    "infra/some.tfplan",
 ]
 
 # Paths the ignore rules must not swallow. Over-broad patterns are a real
@@ -78,6 +83,13 @@ MUST_STAY_TRACKED = [
     ".gitignore",
     "agents/triage/__init__.py",
     "tools/idempotency.py",
+    # Terraform source, and the lock file that pins the providers. The lock is
+    # the one Terraform artifact that must stay tracked: it does for providers
+    # what constraints-3.12.txt does for Python.
+    "infra/events.tf",
+    "infra/.terraform.lock.hcl",
+    "worker/app.py",
+    "Dockerfile.worker",
     "tests/test_clock.py",
     "scripts/deploy-agent.sh",
     "scripts/seed.py",

@@ -73,14 +73,22 @@ kubeconfig
 # can contain secrets in plaintext.
 # ===========================================================================
 .terraform/
-.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
+# A saved plan is not a document, it is a serialised copy of every attribute
+# Terraform is about to write, resolved. It gets committed by accident more
+# often than state does, because it looks like a build artifact.
+tfplan
+tfplan.*
+*.tfplan
 *.tfvars
 *.tfvars.json
 !*.tfvars.example
 crash.log
 crash.*.log
+# Deliberately NOT ignored: .terraform.lock.hcl. It pins provider versions the
+# way constraints-3.12.txt pins Python ones, and a reviewer who cannot
+# reproduce the provider set cannot reproduce the infrastructure.
 override.tf
 override.tf.json
 *_override.tf

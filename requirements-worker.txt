@@ -1,0 +1,11 @@
+# The scheduled worker. Narrower than requirements.txt on purpose: chase and
+# the exception sweep call no reasoning model, so this container ships no model
+# client and no agent framework. That is why a daily tick costs nothing, and it
+# is also why a compromise of the scheduled path cannot reach Vertex.
+#
+# Wider than requirements-ui.txt in exactly one respect, and it is the
+# important one: this container can write. The console cannot.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+google-cloud-firestore==2.29.0
+python-dotenv==1.2.3

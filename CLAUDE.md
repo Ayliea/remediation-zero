@@ -96,12 +96,15 @@ python3 -m venv .venv
 ./scripts/deploy-agent.sh --create            # FIRST ENGINE ONLY. never again.
 .venv/bin/python scripts/session-init.py      # refuses if a session exists
 ./scripts/deploy-ui.sh                        # console to Cloud Run
+./scripts/deploy-worker.sh                    # the two scheduled workers
+./scripts/verify-events.sh                    # prove the dead-letter queue
 ./scripts/tick.sh                             # run one cycle
 ./scripts/verify-controls.sh                  # prove the four security claims
 ./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~17s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
 ./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets ONLY
-terraform -chdir=infra apply
+terraform -chdir=infra plan                   # ALWAYS read this first
+terraform -chdir=infra apply                  # events only; manages nothing else
 ```
 
 ## Cost and infrastructure
