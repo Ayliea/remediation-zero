@@ -45,13 +45,28 @@ PLANTED = "RZ-0216"
 
 GREEN, RED, DIM, RESET = "\033[32m", "\033[31m", "\033[2m", "\033[0m"
 results: list[tuple[str, bool, str]] = []
+inconclusive_checks: list[str] = []
 
 
-def record(name: str, passed: bool, detail: str) -> None:
-    mark = f"{GREEN}PASS{RESET}" if passed else f"{RED}FAIL{RESET}"
+AMBER = "\033[33m"
+
+
+def record(name: str, passed: bool, detail: str, inconclusive: bool = False) -> None:
+    """Three outcomes, not two.
+
+    A check that could not run is not a check that passed. Collapsing those
+    two into one green mark is how a control ends up believed on the strength
+    of a test that never exercised it.
+    """
+    if inconclusive:
+        mark = f"{AMBER}????{RESET}"
+    else:
+        mark = f"{GREEN}PASS{RESET}" if passed else f"{RED}FAIL{RESET}"
     print(f"  [{mark}] {name}")
     print(f"         {DIM}{detail}{RESET}")
-    results.append((name, passed, detail))
+    results.append((name, passed and not inconclusive, detail))
+    if inconclusive:
+        inconclusive_checks.append(name)
 
 
 def _token() -> str:
@@ -133,18 +148,49 @@ def check_reporting_cannot_write_tickets() -> None:
         [".venv/bin/python", "-c", script],
         cwd=REPO_ROOT, capture_output=True, text=True, check=False,
     )
-    combined = (proc.stdout + proc.stderr)
-    denied = "PermissionDenied" in combined or "403" in combined or "denied" in combined.lower()
+    combined = proc.stdout + proc.stderr
     wrote = "WROTE" in proc.stdout
 
+    # A denial of the impersonation itself is not a denial of the ticket
+    # write. The first means the check could not run; the second is the
+    # control holding. Reporting them the same way would let this pass on a
+    # machine where the operator simply lacks tokenCreator, which is exactly
+    # how a control gets believed without ever being exercised.
+    could_not_impersonate = (
+        "Unable to acquire impersonated credentials" in combined
+        or "iam.serviceAccounts.getAccessToken" in combined
+    )
+
+    if could_not_impersonate:
+        record(
+            "Reporting identity is denied a ticket write",
+            False,
+            "INCONCLUSIVE: could not impersonate rz-reporting, so the write was "
+            "never attempted. Run ./scripts/grant-iam.sh, which grants the "
+            "operator tokenCreator on that identity, then re-run.",
+            inconclusive=True,
+        )
+        return
+
+    if wrote:
+        record(
+            "Reporting identity is denied a ticket write",
+            False,
+            "the write SUCCEEDED. The reporting identity can write tickets, "
+            "which the architecture says it must not.",
+        )
+        return
+
+    denied_the_write = "PermissionDenied" in combined or "403" in combined
+    detail = next(
+        (ln.strip() for ln in combined.splitlines()
+         if "PermissionDenied" in ln or "403" in ln),
+        combined.strip()[-200:],
+    )
     record(
         "Reporting identity is denied a ticket write",
-        denied and not wrote,
-        ("write succeeded, which it must not"
-         if wrote else
-         next((ln.strip() for ln in combined.splitlines()
-               if "403" in ln or "denied" in ln.lower()), combined.strip()[-180:])
-         or "no denial observed"),
+        denied_the_write,
+        detail or "no denial observed and no write recorded",
     )
 
 
@@ -185,12 +231,18 @@ def main() -> int:
     check_reporting_cannot_write_tickets()
     check_resume_produces_no_duplicates()
 
-    failed = [n for n, ok, _ in results if not ok]
+    failed = [n for n, ok, _ in results if not ok and n not in inconclusive_checks]
     print()
+    if inconclusive_checks:
+        print(f"{AMBER}{len(inconclusive_checks)} check(s) could not run:{RESET}")
+        for name in inconclusive_checks:
+            print(f"  - {name}")
     if failed:
         print(f"{RED}{len(failed)} of {len(results)} controls did not hold:{RESET}")
         for name in failed:
             print(f"  - {name}")
+    if failed or inconclusive_checks:
+        # An unrun check is not a pass, so it is not a zero exit either.
         return 1
     print(f"{GREEN}All {len(results)} controls hold.{RESET}")
     return 0
