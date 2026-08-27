@@ -363,7 +363,7 @@ Minimum instances are zero and maximum instances are capped, so idle cost is neg
 
 ## Findings and learnings
 
-**The reviewer disagrees often, and on substance.** Across the decisions recorded so far it rejected roughly six in ten proposals. The two recurring objections are remediation text that names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and proposed SLAs that exceed the CISA KEV due date for the same CVE. The second is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
+**The reviewer disagrees often, and on substance.** Across 100 verdicts recorded so far it issued 70 rejections, and 48% of findings were ratified. Those are two different denominators and both are reported: a rejected proposal is re-proposed once, so one finding can produce two verdicts, and 37 of 63 findings needed that second proposal. The two recurring objections are remediation text that names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and proposed SLAs that exceed the CISA KEV due date for the same CVE. The second is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
 
 **A high disagreement rate is a health metric, not a defect.** A reviewer that ratifies everything is indistinguishable from having no reviewer, so the rate is reported as a headline figure rather than buried.
 
