@@ -51,9 +51,9 @@ require () {
 }
 
 require GOOGLE_CLOUD_PROJECT
-require GOOGLE_CLOUD_LOCATION
+require AGENT_ENGINE_LOCATION
 
-RESOURCE_NAME="projects/${GOOGLE_CLOUD_PROJECT}/locations/${GOOGLE_CLOUD_LOCATION}/reasoningEngines/${AGENT_ENGINE_ID:-}"
+RESOURCE_NAME="projects/${GOOGLE_CLOUD_PROJECT}/locations/${AGENT_ENGINE_LOCATION}/reasoningEngines/${AGENT_ENGINE_ID:-}"
 
 # ---------------------------------------------------------------------------
 # Guard: without an ID, a deploy silently creates a second engine.
@@ -82,11 +82,19 @@ MSG
   fi
 
   echo "Creating the first Agent Engine instance (--create was passed)."
-  .venv/bin/adk deploy agent_engine \
-    --project="${GOOGLE_CLOUD_PROJECT}" \
-    --region="${GOOGLE_CLOUD_LOCATION}" \
-    --display_name="remediation-zero-orchestrator" \
-    agents/orchestrator
+  # adk deploy prints "Deploy failed: ..." and still exits 0, so its exit code
+  # cannot be trusted. Capture the output and inspect it.
+  if ! out=$(.venv/bin/adk deploy agent_engine \
+      --project="${GOOGLE_CLOUD_PROJECT}" \
+      --region="${AGENT_ENGINE_LOCATION}" \
+      --display_name="remediation-zero-orchestrator" \
+      agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
+    echo "$out"
+    echo >&2
+    echo "DEPLOY FAILED. No resource ID was recorded." >&2
+    exit 1
+  fi
+  echo "$out"
   echo
   echo "Record the printed resource ID in .env as AGENT_ENGINE_ID before"
   echo "running this script again. Subsequent runs update that ID in place."
@@ -96,32 +104,57 @@ fi
 # ---------------------------------------------------------------------------
 # Guard: a typo'd ID must not fall through into creating a second engine.
 # ---------------------------------------------------------------------------
+# Checked over REST rather than `gcloud alpha agent-engines describe`, because
+# the alpha component is not installed by default and gcloud tries to install it
+# interactively, which would make this guard refuse a perfectly valid deploy.
 echo "Verifying the target resource exists before deploying..."
-if ! gcloud alpha agent-engines describe "${AGENT_ENGINE_ID}" \
-      --project="${GOOGLE_CLOUD_PROJECT}" \
-      --location="${GOOGLE_CLOUD_LOCATION}" >/dev/null 2>&1; then
+TOKEN="$(gcloud auth application-default print-access-token 2>/dev/null)"
+if [[ -z "$TOKEN" ]]; then
+  echo "ERROR: no application-default credentials. Run:" >&2
+  echo "  gcloud auth application-default login --no-launch-browser" >&2
+  exit 1
+fi
+HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "https://${AGENT_ENGINE_LOCATION}-aiplatform.googleapis.com/v1/${RESOURCE_NAME}" 2>/dev/null || echo 000)"
+if [[ "$HTTP_CODE" != "200" ]]; then
   cat >&2 <<MSG
 REFUSING TO DEPLOY.
 
 AGENT_ENGINE_ID is set to '${AGENT_ENGINE_ID}', but no such Agent Engine exists
-in project '${GOOGLE_CLOUD_PROJECT}' at '${GOOGLE_CLOUD_LOCATION}'.
+in project '${GOOGLE_CLOUD_PROJECT}' at '${AGENT_ENGINE_LOCATION}' (HTTP ${HTTP_CODE}).
 
 This is treated as an error rather than as a request to create one, because the
 most likely cause is a typo, and creating a new engine here would orphan the
 existing session. Check the ID against:
 
-  gcloud alpha agent-engines list --project=${GOOGLE_CLOUD_PROJECT} --location=${GOOGLE_CLOUD_LOCATION}
+  gcloud alpha agent-engines list --project=${GOOGLE_CLOUD_PROJECT} --location=${AGENT_ENGINE_LOCATION}
 MSG
   exit 1
 fi
 
 echo "Updating in place: ${RESOURCE_NAME}"
-.venv/bin/adk deploy agent_engine \
-  --project="${GOOGLE_CLOUD_PROJECT}" \
-  --region="${GOOGLE_CLOUD_LOCATION}" \
-  --agent_engine_id="${AGENT_ENGINE_ID}" \
-  --display_name="remediation-zero-orchestrator" \
-  agents/orchestrator
+if ! out=$(.venv/bin/adk deploy agent_engine \
+    --project="${GOOGLE_CLOUD_PROJECT}" \
+    --region="${AGENT_ENGINE_LOCATION}" \
+    --agent_engine_id="${AGENT_ENGINE_ID}" \
+    --display_name="remediation-zero-orchestrator" \
+    agents/orchestrator 2>&1) || grep -qi "deploy failed" <<<"$out"; then
+  echo "$out"
+  echo >&2
+  echo "DEPLOY FAILED. The existing resource was not modified." >&2
+  exit 1
+fi
+echo "$out"
+
+# Prove the claim in the banner below rather than asserting it.
+AFTER_CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer ${TOKEN}" \
+  "https://${AGENT_ENGINE_LOCATION}-aiplatform.googleapis.com/v1/${RESOURCE_NAME}" 2>/dev/null || echo 000)"
+if [[ "$AFTER_CODE" != "200" ]]; then
+  echo "ERROR: the resource is not reachable after deploy (HTTP ${AFTER_CODE})." >&2
+  exit 1
+fi
 
 echo
 echo "=========================================================="

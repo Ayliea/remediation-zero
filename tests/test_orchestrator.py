@@ -69,7 +69,14 @@ def test_startup_refuses_when_the_model_is_unconfigured(unconfigured_env):
     refuses to start rather than silently running a different model."""
     import importlib
 
+    import dotenv
+
     from agents.orchestrator import agent as agent_module
+
+    # The module calls load_dotenv() at import, so on a developer machine with
+    # a populated .env it would simply read the value straight back and the
+    # assertion would test nothing. Neutralise the file, not the assertion.
+    unconfigured_env.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
 
     with pytest.raises(ValueError, match="REASONING_MODEL"):
         importlib.reload(agent_module)

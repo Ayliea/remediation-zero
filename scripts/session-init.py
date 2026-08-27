@@ -41,7 +41,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 
 from google.adk.memory import VertexAiMemoryBankService
+from google.adk.memory.memory_entry import MemoryEntry
 from google.adk.sessions import VertexAiSessionService
+from google.genai import types
 
 from tools.clock import SimClock
 
@@ -74,7 +76,11 @@ async def main() -> int:
     load_dotenv()
 
     project = _require("GOOGLE_CLOUD_PROJECT")
-    location = _require("GOOGLE_CLOUD_LOCATION")
+    # The engine's own region, not GOOGLE_CLOUD_LOCATION. Those differ on
+    # purpose: the model serves from `global` while Agent Engine lives in a
+    # named region, and addressing the engine with the model's location gives
+    # a misleading "The ReasoningEngine does not exist".
+    location = _require("AGENT_ENGINE_LOCATION")
     engine_id = _require("AGENT_ENGINE_ID")
 
     clock = SimClock.from_env()
@@ -131,13 +137,17 @@ async def main() -> int:
         project=project, location=location, agent_engine_id=engine_id
     )
     await memory.add_memory(
-        fact=(
-            "The orchestrator session for remediation-zero was created at "
-            f"{_iso(stamp.real_ts)} UTC with clock mode "
-            f"'{clock.mode.value}'. This session is updated in place for the "
-            "duration of the build and is never recreated."
-        ),
-        scope={"app_name": APP_NAME, "user_id": USER_ID},
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        memories=[
+            MemoryEntry(
+                author=USER_ID,
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part(text=_founding_memory(stamp, clock))],
+                ),
+            )
+        ],
     )
 
     print("=" * 58)
@@ -153,6 +163,20 @@ async def main() -> int:
     print("Record this in .env as ORCHESTRATOR_SESSION_ID.")
     print("Screenshot the created real_ts line for the demo video.")
     return 0
+
+
+def _founding_memory(stamp, clock) -> str:
+    """The one real memory written into the scope at bootstrap.
+
+    Real content, not a placeholder: it records when the session that the
+    demo's elapsed-time claim rests on actually began, in wall clock.
+    """
+    return (
+        "The orchestrator session for remediation-zero was created at "
+        f"{_iso(stamp.real_ts)} UTC (real_ts {stamp.real_ts:.3f}) with clock "
+        f"mode '{clock.mode.value}'. This session is updated in place for the "
+        "duration of the build and is never deleted or recreated."
+    )
 
 
 def _iso(epoch: float) -> str:
