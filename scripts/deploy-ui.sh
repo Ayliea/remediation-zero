@@ -44,8 +44,33 @@ gcloud run deploy "${SERVICE}" \
   --cpu=1 \
   --memory=512Mi \
   --timeout=60 \
-  --set-env-vars="SESSION_CREATED_REAL_TS=${SESSION_CREATED_REAL_TS:-0},ORCHESTRATOR_SESSION_ID=${ORCHESTRATOR_SESSION_ID:-unknown}" \
+  --set-env-vars="SESSION_CREATED_REAL_TS=${SESSION_CREATED_REAL_TS:-0},ORCHESTRATOR_SESSION_ID=${ORCHESTRATOR_SESSION_ID:-unknown},GITHUB_TICKET_REPO=${GITHUB_TICKET_REPO:-}" \
   --quiet
+
+# A deploy that creates a revision nobody reaches is a deploy that reported
+# success and changed nothing. This happened: an earlier `gcloud run services
+# update --no-traffic`, run while investigating cold starts, pinned traffic to
+# the revision current at that moment. Two later deploys built cleanly, printed
+# their URLs, and served zero percent. The console kept answering — with code
+# from hours earlier — which is the failure mode a deploy script must never let
+# pass silently.
+SERVING="$(gcloud run services describe "${SERVICE}" \
+  --project="${GOOGLE_CLOUD_PROJECT}" --region="${REGION}" \
+  --format='value(status.traffic[0].revisionName)')"
+LATEST="$(gcloud run services describe "${SERVICE}" \
+  --project="${GOOGLE_CLOUD_PROJECT}" --region="${REGION}" \
+  --format='value(status.latestReadyRevisionName)')"
+if [[ "${SERVING}" != "${LATEST}" ]]; then
+  echo >&2
+  echo "ERROR: the newest revision is not the one being served." >&2
+  echo "  serving : ${SERVING}" >&2
+  echo "  latest  : ${LATEST}" >&2
+  echo >&2
+  echo "Traffic is pinned. Release it with:" >&2
+  echo "  gcloud run services update-traffic ${SERVICE} \\" >&2
+  echo "    --region=${REGION} --project=${GOOGLE_CLOUD_PROJECT} --to-latest" >&2
+  exit 1
+fi
 
 URL="$(gcloud run services describe "${SERVICE}" \
   --project="${GOOGLE_CLOUD_PROJECT}" --region="${REGION}" \

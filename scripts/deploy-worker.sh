@@ -81,6 +81,25 @@ for agent in chase exception; do
     --quiet
 done
 
+# Same guard as the console deploy. A pinned service accepts new revisions and
+# serves none of them, reporting success the whole way.
+for agent in chase exception; do
+  SERVICE="rz-worker-${agent}"
+  SERVING="$(gcloud run services describe "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format='value(status.traffic[0].revisionName)')"
+  LATEST="$(gcloud run services describe "${SERVICE}" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format='value(status.latestReadyRevisionName)')"
+  if [[ "${SERVING}" != "${LATEST}" ]]; then
+    echo >&2
+    echo "ERROR: ${SERVICE} is serving ${SERVING}, not ${LATEST}." >&2
+    echo "Release it with: gcloud run services update-traffic ${SERVICE} \\" >&2
+    echo "  --region=${REGION} --project=${PROJECT} --to-latest" >&2
+    exit 1
+  fi
+done
+
 echo
 echo "=========================================================="
 for agent in chase exception; do

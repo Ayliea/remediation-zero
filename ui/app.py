@@ -53,6 +53,14 @@ _reports_client: firestore.Client | None = None
 #: Reports live in their own database. See tools/reports.py for why.
 REPORTS_DATABASE = "reports"
 
+#: Where chase files its issues. Read from the environment so the console does
+#: not hard-code somebody else's repository, and so a deployment with no
+#: tracker simply shows finding ids without links rather than dead ones.
+TRACKER_URL = (
+    f"https://github.com/{os.environ['GITHUB_TICKET_REPO']}/issues"
+    if os.environ.get("GITHUB_TICKET_REPO") else ""
+)
+
 
 def db() -> firestore.Client:
     global _client
@@ -373,8 +381,22 @@ def render(data: dict) -> str:
         first, last = (history[0], history[-1]) if history else ({}, {})
         real_span = (last.get("real_ts", 0) - first.get("real_ts", 0)) / 60
         sim_span = (last.get("sim_ts", 0) - first.get("sim_ts", 0)) / 86400
+        # The tracker link. A ticket that exists only in this database is a
+        # claim about work; one a person can open is the work. Where the fleet
+        # delivered it, the finding id is the link.
+        issue = t.get("github_issue")
+        finding_cell = (
+            f'<a class="k" href="{esc(TRACKER_URL)}/{int(issue)}" '
+            f'target="_blank" rel="noopener noreferrer" '
+            f'title="open issue #{int(issue)} in the tracker">'
+            f'{esc(t.get("finding_id","—"))} ↗</a>'
+            # Both, not either. With a stored issue number and no tracker
+            # configured the href would be a bare "/12", which is a link to
+            # nowhere dressed as a link to the work.
+            if issue and TRACKER_URL else esc(t.get("finding_id", "—"))
+        )
         tk_rows.append(f"""<tr>
-          <td class="k">{esc(t.get('finding_id','—'))}</td>
+          <td class="k">{finding_cell}</td>
           <td class="k">{esc(t.get('owner_id','—'))}</td>
           <td><span class="tag tag--{'breach' if t.get('escalated') else 'ok'}">{esc(t.get('status','—').replace('_',' '))}</span></td>
           <td class="k" style="font-size:11.5px">{trail}</td>
