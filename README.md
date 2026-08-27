@@ -8,7 +8,7 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 **[Open the console](https://remediation-zero-console-978104855285.us-central1.run.app)** ·
 **[Talk to the deployed agent](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero)** ·
-[Architecture](docs/architecture.png) · [Demo runbook](docs/DEMO.md)
+[Architecture](docs/architecture.png) · [Who can touch what](docs/identities.png) · [Demo runbook](docs/DEMO.md)
 
 ---
 
@@ -96,6 +96,14 @@ reaches exactly the same decisions and simply has nowhere to put them.
 *One finding's path through the fleet. Source: [`docs/architecture.svg`](docs/architecture.svg).
 Every record written anywhere on this path carries both `real_ts` and `sim_ts`; the deadlines
 in Chase run on the second while the first stays wall clock.*
+
+![Which identity can reach which resource](docs/identities.png)
+
+*The same system asked a different question: not what happens to a finding, but
+who is allowed to touch what. Source: [`docs/identities.svg`](docs/identities.svg).
+The two crossed edges are the interesting ones, and both are proven by a Cloud
+Run job running **as** that identity and being refused — not by reading a policy
+document back to you.*
 
 The design decisions worth defending:
 
