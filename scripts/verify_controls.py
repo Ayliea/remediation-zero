@@ -125,72 +125,49 @@ def check_reviewer_catches_it_independently() -> None:
 # --- 3 ----------------------------------------------------------------------
 
 def check_reporting_cannot_write_tickets() -> None:
-    """Impersonate the reporting identity and try to write a ticket.
+    """Run the probe as the reporting identity and read what happened.
 
-    A denial here is the pass condition. This is the claim that would be
-    easiest to assert and hardest to believe, so it is performed.
+    A Cloud Run job rather than impersonation. The job's service account IS
+    rz-reporting, so this is the identity the agent actually runs under
+    attempting the action the architecture says it cannot perform. Nothing is
+    simulated and nothing is granted to the operator to make it work.
     """
-    script = (
-        "import sys;"
-        "from google.cloud import firestore;"
-        "from google.auth import impersonated_credentials, default;"
-        "src,_=default();"
-        "c=impersonated_credentials.Credentials("
-        f"  source_credentials=src,"
-        f"  target_principal='rz-reporting@{PROJECT}.iam.gserviceaccount.com',"
-        "  target_scopes=['https://www.googleapis.com/auth/cloud-platform']);"
-        f"db=firestore.Client(project='{PROJECT}', credentials=c);"
-        "db.collection('tickets').document('__control_probe__')"
-        "  .set({'written_by':'rz-reporting'});"
-        "print('WROTE')"
+    execute = subprocess.run(
+        ["gcloud", "run", "jobs", "execute", "reporting-write-probe",
+         "--project", PROJECT, "--region", "us-central1", "--wait"],
+        capture_output=True, text=True, check=False,
     )
-    proc = subprocess.run(
-        [".venv/bin/python", "-c", script],
-        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
-    )
-    combined = proc.stdout + proc.stderr
-    wrote = "WROTE" in proc.stdout
-
-    # A denial of the impersonation itself is not a denial of the ticket
-    # write. The first means the check could not run; the second is the
-    # control holding. Reporting them the same way would let this pass on a
-    # machine where the operator simply lacks tokenCreator, which is exactly
-    # how a control gets believed without ever being exercised.
-    could_not_impersonate = (
-        "Unable to acquire impersonated credentials" in combined
-        or "iam.serviceAccounts.getAccessToken" in combined
-    )
-
-    if could_not_impersonate:
+    if execute.returncode != 0 and "reporting-write-probe" in execute.stderr:
         record(
             "Reporting identity is denied a ticket write",
             False,
-            "INCONCLUSIVE: could not impersonate rz-reporting, so the write was "
-            "never attempted. Run ./scripts/grant-iam.sh, which grants the "
-            "operator tokenCreator on that identity, then re-run.",
+            "INCONCLUSIVE: the probe job is not deployed. See scripts/grant-iam.sh.",
             inconclusive=True,
         )
         return
 
-    if wrote:
-        record(
-            "Reporting identity is denied a ticket write",
-            False,
-            "the write SUCCEEDED. The reporting identity can write tickets, "
-            "which the architecture says it must not.",
-        )
-        return
+    name = subprocess.run(
+        ["gcloud", "run", "jobs", "executions", "list", "--job",
+         "reporting-write-probe", "--project", PROJECT, "--region", "us-central1",
+         "--limit", "1", "--format", "value(name)"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
 
-    denied_the_write = "PermissionDenied" in combined or "403" in combined
-    detail = next(
-        (ln.strip() for ln in combined.splitlines()
-         if "PermissionDenied" in ln or "403" in ln),
-        combined.strip()[-200:],
-    )
+    logs = subprocess.run(
+        ["gcloud", "logging", "read",
+         f'resource.type=cloud_run_job AND labels."run.googleapis.com/execution_name"="{name}"',
+         "--project", PROJECT, "--limit", "30",
+         "--format", "value(textPayload)", "--order", "asc"],
+        capture_output=True, text=True, check=False,
+    ).stdout
+
+    held = "CONTROL HOLDS" in logs
+    lines = [ln.strip() for ln in logs.splitlines() if "expect" in ln]
     record(
         "Reporting identity is denied a ticket write",
-        denied_the_write,
-        detail or "no denial observed and no write recorded",
+        held,
+        " | ".join(ln.split("|")[-1].strip() + ": " + ln.split("|")[1].strip()
+                   for ln in lines) or logs.strip()[:200],
     )
 
 
