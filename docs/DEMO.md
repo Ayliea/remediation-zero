@@ -59,11 +59,36 @@ export GITHUB_TOKEN="$(gh auth token)"
 # 6. Confirm the suite is green and the drivers parse.
 .venv/bin/pytest -q
 
-# 7. Pick a cycle number nothing has used. Cycles 1-65 are consumed.
-#    Re-using one makes the fleet skip everything, which is correct behaviour
-#    and a terrible opening shot.
-export C=70
+# 7. Reset the derived state so the chase arc is legible. Every rehearsal ages
+#    sla_clocks; run enough of them and the +8d step escalates everything at
+#    once and the nudging never appears on screen. Dry run first -- it prints
+#    exactly what it would clear and what it will not touch.
+./scripts/reset-derived.sh
+./scripts/reset-derived.sh --confirm
+#    This clears sla_clocks and tickets ONLY. Decisions, assignments, the
+#    human queue and the idempotency ledger all survive, so the resume control
+#    still has something to check itself against. Issues already filed on the
+#    tracker are not deleted -- GitHub is not ours to reset -- so close them by
+#    hand first if the recording pans across the issue list.
+
+# 8. Pick a cycle number nothing has used. Derive it rather than hardcoding
+#    one: every rehearsal consumes more, so a literal in this file is correct
+#    only until the next time anyone reads it. It was wrong by the second
+#    rehearsal -- this file said 70 after 70 had already been spent.
+#    Re-using a cycle makes the fleet skip everything, which is correct
+#    behaviour and a terrible opening shot.
+export C=$(.venv/bin/python -c "
+from google.cloud import firestore
+c = firestore.Client()
+used = {d.to_dict().get('cycle') for coll in ('cycles','decisions','tickets')
+        for d in c.collection(coll).stream()}
+used = {v for v in used if isinstance(v, int) and v < 9000}
+print(max(used, default=0) + 10)")
+echo "cycle $C, and $((C+2))-$((C+10)) for the chase steps"
 ```
+
+The chase section below advances to `$((C+2))` through `$((C+10))`, so the
+picker leaves a gap of 10 rather than taking the next integer.
 
 Nothing in the demo needs `--create`, `session-init.py`, or any Terraform.
 Those run once and have already run.
@@ -150,7 +175,7 @@ done
 SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle $C --sweep
 ```
 
-Measured, on clocks with a 7-day SLA:
+Measured on a **freshly reset** corpus of six clocks with a 7-day SLA:
 
 ```
 +2d    open_ticket: 6
@@ -159,6 +184,25 @@ Measured, on clocks with a 7-day SLA:
 +8d    escalate: 3, wait: 3
 +10d   human_queue: 3, nudge: 3
 ```
+
+**These counts are a property of the corpus, not of the code, and rehearsal
+changes the corpus.** The same five commands run on 2026-08-28 against a corpus
+carrying nine clocks left over from earlier rehearsals produced the same arc
+with a much muddier mix:
+
+```
++2d    open_ticket: 2, wait: 7
++4d    nudge: 2,      wait: 7
++6d    nudge: 2,      wait: 7
++8d    escalate: 7,   wait: 2
++10d   human_queue: 7, nudge: 2
+```
+
+The lifecycle is intact in both — ticket, nudge, nudge, escalate, person — but
+in the second the interesting transitions are buried under a `wait` column
+seven deep, and seven clocks escalate in one step because they were already
+aged. **Reset before recording** rather than hoping the corpus is young; the
+step is in pre-flight above for that reason.
 
 **Size the advance to the nudge interval, not to the calendar.** This is the
 correction the dry run earned, and it was earned twice. The runbook first said
@@ -284,11 +328,28 @@ proof of the control. It was proof that the operator cannot impersonate anyone.
 ### 10. It runs itself — 30s
 
 ```bash
+# Pick a tick cycle the ledger has never seen. Same trap as $C above, and this
+# file fell into it: it hardcoded 9001, then the rehearsal that wrote this file
+# spent 9001, so following it verbatim answered tick_already_ran on the FIRST
+# publish and the fresh-work shot never happened.
+#
+# The tick guard keys on an opaque hash of the cycle, so grepping the ledger
+# for the number finds nothing. Derive the key and ask.
+export T=$(.venv/bin/python -c "
+from google.cloud import firestore
+from tools.idempotency import derive_record
+c = firestore.Client()
+for n in range(9001, 9200):
+    if all(not c.collection('idempotency').document(
+            derive_record(finding_id=f'tick-{n}', action=a, cycle=n).key).get().exists
+           for a in ('chase', 'exception')):
+        print(n); break")
+
 # Fresh work. An explicit cycle overrides the one derived from the day.
-gcloud pubsub topics publish remediation-tick --message='{"cycle":9001}'
+gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
 
 # Then the guard: publish the same thing again.
-gcloud pubsub topics publish remediation-tick --message='{"cycle":9001}'
+gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
 ```
 
 **Name a cycle explicitly rather than publishing the scheduler's own payload.**
@@ -341,6 +402,16 @@ commit the engine was built from. The script does not stop at publishing: it
 searches the catalogue the way a team who did not build this would, and fails
 if it cannot find itself. Published and discoverable are different claims.
 
+It also fails if it finds an entry carrying the *wrong* version, which is not a
+hypothetical. The 2026-08-28 pre-flight found this step passing in 2.3 seconds
+against a catalogue entry eleven commits stale: the PATCH that publishes the
+card was missing `updateMask`, so it returned a healthy long-running operation
+and changed nothing, and the search loop matched on display name alone and
+declared victory. Two faults that concealed each other — a write that silently
+did nothing, and a check that could not fail. Both are fixed; the search now
+pins to the published version, and a stale hit is reported as stale rather than
+as success.
+
 ### 12. The honest limit — 15s, no commands
 
 Firestore IAM is database-scoped, not collection-scoped, and Security Rules are
@@ -373,19 +444,19 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 |---|---|
 | Console, cold | 18.2s |
 | Console, warm | 0.6–1.3s |
-| `tick.sh --limit 3` | 49.4s |
+| `tick.sh --limit 3` | 49.4s · 42.7s on 2026-08-28 |
 | `tick.sh` re-run, same cycle | 5.5s (1.2s of work) |
-| `graph.sh`, one finding | 20.4s |
+| `graph.sh`, one finding | 20.4s · 24.1s on 2026-08-28 |
 | `chase.sh --advance-days N` | 6.8–7.7s each |
 | `exception.sh --sweep` | 1.8s |
-| `report.sh` | 14.9s |
+| `report.sh` | 14.9s · 15.9s on 2026-08-28 |
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
 | `verify-controls.sh --only armor,reviewer,resume,secret` | 2m23s |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh`, all five | 5–6 min |
-| `register-agent.sh --apply`, including the search | ~40s |
-| `pytest`, 283 tests | 20.6s |
+| `register-agent.sh --apply`, including the version-pinned search | ~13s |
+| `pytest`, 298 tests | 27.4s on 2026-08-28 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
-| `verify-events.sh` (dead-letter round trip) | ~115s |
+| `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `reset-derived.sh --confirm`, 29 docs | under 5s |

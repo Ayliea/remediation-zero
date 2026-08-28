@@ -128,9 +128,15 @@ fi
 
 if [[ -n "${EXISTING}" ]]; then
   echo "Updating ${EXISTING}..."
+  # updateMask is required. Without it this PATCH returns a perfectly healthy
+  # long-running operation and changes nothing -- the registry entry sat on a
+  # version eleven commits old while every run reported success. Name every
+  # mutable field BODY sets, or the ones left out silently keep their old
+  # values.
   RESPONSE="$(curl -sS -X PATCH \
     -H "Authorization: Bearer ${TOKEN}" -H "Content-Type: application/json" \
-    -d "${BODY}" "https://agentregistry.googleapis.com/v1/${EXISTING}")"
+    -d "${BODY}" \
+    "https://agentregistry.googleapis.com/v1/${EXISTING}?updateMask=displayName,description,agentSpec")"
 else
   echo "Publishing a new catalogue entry..."
   RESPONSE="$(curl -sS -X POST \
@@ -152,27 +158,51 @@ print('  agent      :', d.get('registryResource') or d.get('response',{}).get('r
 # Registration returns a long-running operation, so the entry is not in the
 # catalogue when the call returns. Prove discoverability by searching for it
 # the way a department that did not build it would, rather than asserting it.
-echo "Waiting for the catalogue to reflect it..."
+#
+# Match on the version just published, not merely on the name. An earlier
+# version of this loop broke on any entry whose displayName said "Remediation
+# Zero", which meant a stale catalogue entry from eleven commits back satisfied
+# it in two seconds. That check could not fail for the reason it claimed to
+# test: had the update silently not landed, it would still have reported
+# "discoverable". Requiring the version makes the assertion able to fail.
+echo "Waiting for the catalogue to reflect ${VERSION}..."
 FOUND=""
+STALE=""
 for _ in $(seq 1 30); do
-  FOUND="$(curl -sS -X POST -H "Authorization: Bearer ${TOKEN}" \
+  MATCH="$(curl -sS -X POST -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" -d '{"searchString":"vulnerability remediation"}' \
-    "${BASE}/agents:search" | python3 -c "
-import json,sys
+    "${BASE}/agents:search" | RZ_WANT="${VERSION}" python3 -c "
+import json, os, sys
+want = os.environ['RZ_WANT']
 for a in json.load(sys.stdin).get('agents', []):
-    if 'Remediation Zero' in a.get('displayName',''):
-        print(a['name'] + '|' + str(a.get('version','?')) + '|' +
-              ','.join(x['id'] for x in a.get('skills', [])))
-        break
+    if 'Remediation Zero' not in a.get('displayName', ''):
+        continue
+    got = str(a.get('version', '?'))
+    row = (a['name'] + '|' + got + '|' +
+           ','.join(x['id'] for x in a.get('skills', [])))
+    # Prefix says whether this is the version we just published or an older
+    # one the catalogue has not yet replaced.
+    print(('OK|' if got == want else 'STALE|') + row)
+    break
 ")"
-  [[ -n "${FOUND}" ]] && break
+  case "${MATCH}" in
+    OK\|*)    FOUND="${MATCH#OK|}"; break ;;
+    STALE\|*) STALE="${MATCH#STALE|}" ;;
+  esac
   sleep 5
 done
 
 echo
 if [[ -z "${FOUND}" ]]; then
-  echo "PUBLISHED, BUT NOT FOUND BY SEARCH." >&2
-  echo "The catalogue can lag behind the operation. Re-run to check again." >&2
+  if [[ -n "${STALE}" ]]; then
+    IFS='|' read -r _SN _SV _SK <<<"${STALE}"
+    echo "FOUND, BUT STALE. The catalogue still serves ${_SV}, not ${VERSION}." >&2
+    echo "The entry is discoverable, but it is not the one just published." >&2
+    echo "Either the update did not land, or the catalogue is still lagging." >&2
+  else
+    echo "PUBLISHED, BUT NOT FOUND BY SEARCH." >&2
+    echo "The catalogue can lag behind the operation. Re-run to check again." >&2
+  fi
   exit 1
 fi
 IFS='|' read -r RNAME RVERSION RSKILLS <<<"${FOUND}"
