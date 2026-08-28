@@ -80,15 +80,22 @@ export GITHUB_TOKEN="$(gh auth token)"
 export C=$(.venv/bin/python -c "
 from google.cloud import firestore
 c = firestore.Client()
-used = {d.to_dict().get('cycle') for coll in ('cycles','decisions','tickets')
-        for d in c.collection(coll).stream()}
+# Every collection that records the cycle it was written in. tickets and
+# sla_clocks are deliberately absent: they carry no cycle field, so including
+# them reads as thorough and contributes nothing. human_queue is the one that
+# matters most -- the chase steps land there and nowhere else, so a picker
+# that skips it hands back a cycle the last rehearsal's chase already spent.
+used = set()
+for coll in ('cycles', 'decisions', 'assignments', 'human_queue', 'reports'):
+    used |= {d.to_dict().get('cycle') for d in c.collection(coll).stream()}
 used = {v for v in used if isinstance(v, int) and v < 9000}
-print(max(used, default=0) + 10)")
+print(max(used, default=0) + 20)")
 echo "cycle $C, and $((C+2))-$((C+10)) for the chase steps"
 ```
 
 The chase section below advances to `$((C+2))` through `$((C+10))`, so the
-picker leaves a gap of 10 rather than taking the next integer.
+picker leaves a gap of 20 rather than taking the next integer — enough to clear
+the whole chase range, not just the tick.
 
 Nothing in the demo needs `--create`, `session-init.py`, or any Terraform.
 Those run once and have already run.
