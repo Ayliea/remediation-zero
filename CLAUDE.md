@@ -109,7 +109,9 @@ python3 -m venv .venv
 ./scripts/verify-controls.sh                  # prove the five security claims
 ./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~33s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
-./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets ONLY
+./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets + scans, and undoes
+                                              # what a rescan wrote to findings. seeded findings
+                                              # are never deleted
 terraform -chdir=infra plan                   # ALWAYS read this first
 terraform -chdir=infra apply                  # events only; manages nothing else
 ```
