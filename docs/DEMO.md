@@ -35,8 +35,9 @@ The first run of anything in a fresh shell adds roughly two seconds of import.
 #    nothing for the other. On 2026-08-28 ADC was dead while gcloud was
 #    healthy, and an hour later, with ADC refreshed, gcloud was the dead one.
 gcloud auth application-default print-access-token >/dev/null \
-  || gcloud auth application-default login
-gcloud auth print-access-token >/dev/null || gcloud auth login
+  || gcloud auth application-default login --no-launch-browser
+gcloud auth print-access-token >/dev/null \
+  || gcloud auth login --no-launch-browser
 #    Check the tokens, not the listing, and not the file. `gcloud auth list`
 #    printed this account as ACTIVE while its token could not refresh at all,
 #    and a stale application_default_credentials.json is present, readable
@@ -49,6 +50,22 @@ gcloud auth print-access-token >/dev/null || gcloud auth login
 #    -- and verify-controls reports FAIL on a control that is working exactly
 #    as designed. The gcloud failure is louder, but it lands in the middle of
 #    step 5 with the camera running.
+#
+#    --no-launch-browser is not optional here. This machine is headless --
+#    reached over SSH with DISPLAY unset -- and both commands default to
+#    launching a browser. google-chrome is installed, so gcloud has something
+#    to exec and opens it on a server nobody is watching. The flow then never
+#    completes, credentials.db is never written, and the stale credential
+#    stays in place still failing, with no error to read. The only signal is
+#    the mtime on ~/.config/gcloud/credentials.db not moving. This cost three
+#    attempts on 2026-08-28 that each looked like they had worked.
+#
+#    --no-launch-browser prints a URL: open it on the laptop, paste the code
+#    back. --no-browser is a different flag and the wrong one -- it expects a
+#    second gcloud install on the machine that has the browser.
+#
+#    Do not add --update-adc to the second command as a shortcut. It would
+#    overwrite the ADC the first command just established.
 #
 #    Reauth needs an interactive terminal, so no script and no agent can do
 #    this for you -- run it yourself, now, not at 17:00 on the 31st.
