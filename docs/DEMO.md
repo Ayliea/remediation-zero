@@ -174,6 +174,14 @@ The line worth saying out loud is that every record on the page carries both,
 and where they differ the page prints `simulation ahead by 8d` on the record
 rather than smoothing it away.
 
+Directly below them is a second pair, in the same layout for the same reason:
+**remediated** and **unverifiable**. Point at the second one. It is the larger
+number, it is amber rather than red because it is an absence of evidence and
+not a breach, and those findings are still being chased. Do not explain it
+yet — section 7 is where it earns its meaning, and saying it twice spends the
+surprise. One sentence is enough: the fleet is more careful about what it
+claims to have fixed than about how much it fixed.
+
 ### 2. A cycle — 49s
 
 ```bash
