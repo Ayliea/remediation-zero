@@ -83,6 +83,10 @@ class ChaseState:
     last_contact_sim_ts: Optional[float] = None
     escalated: bool = False
     resolved: bool = False
+    #: Which scan confirmed the remediation. Carried so the closing comment can
+    #: name its evidence rather than telling an owner only that the ticket went
+    #: away. None on any state built before a rescan has run.
+    resolved_by_scan: Optional[str] = None
 
     def after(self, action: ChaseAction, now_sim_ts: float) -> "ChaseState":
         """The state that follows from taking `action` at `now_sim_ts`.

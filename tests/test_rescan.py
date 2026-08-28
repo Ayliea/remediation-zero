@@ -239,3 +239,49 @@ def test_every_outcome_carries_a_reason():
     for item in result.outcomes:
         assert item.reason.strip()
         assert "scan-02" in item.reason
+
+
+# ---------------------------------------------------------------------------
+# Findings that come back
+# ---------------------------------------------------------------------------
+
+def test_a_resolved_finding_reported_again_is_a_regression():
+    """The hole that skipping already-resolved findings would otherwise leave.
+
+    Without this branch the finding falls through the resolved skip and is not
+    new either, so a rescan closes findings and then goes permanently blind to
+    their return.
+    """
+    result = reconcile(
+        previous=[finding("RZ-1", "ast-01", status=STATUS_RESOLVED)],
+        scan=[scanned("RZ-1", "ast-01")],
+        covered_asset_ids=["ast-01"],
+        scan_id="scan-03",
+    )
+    only = result.outcomes[0]
+    assert only.outcome is Outcome.REGRESSED
+    assert "did not hold" in only.reason
+
+
+def test_a_regression_is_not_reported_as_new():
+    """It is the same finding. Filing it fresh would lose the record of what
+    was already tried on it."""
+    result = reconcile(
+        previous=[finding("RZ-1", "ast-01", status=STATUS_RESOLVED)],
+        scan=[scanned("RZ-1", "ast-01")],
+        covered_asset_ids=["ast-01"],
+        scan_id="scan-03",
+    )
+    assert result.counts["new"] == 0
+    assert result.counts["regressed"] == 1
+
+
+def test_a_resolved_finding_that_stays_absent_stays_resolved():
+    """Only reappearance regresses it. Absence must not reopen anything."""
+    result = reconcile(
+        previous=[finding("RZ-1", "ast-01", status=STATUS_RESOLVED)],
+        scan=[],
+        covered_asset_ids=["ast-01"],
+        scan_id="scan-03",
+    )
+    assert result.outcomes == ()

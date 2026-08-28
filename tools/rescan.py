@@ -76,6 +76,10 @@ class Outcome(Enum):
     UNVERIFIABLE = "unverifiable"
     #: Reported now and not before. Enters triage like any other finding.
     NEW = "new"
+    #: Reported again after a previous scan resolved it. The fix came off, or
+    #: never held. Reopened rather than filed fresh: it is the same finding,
+    #: and a duplicate would lose the history of what was already tried.
+    REGRESSED = "regressed"
 
 
 @dataclass(frozen=True)
@@ -192,9 +196,23 @@ def reconcile(
     for finding_id, record in previous_by_id.items():
         asset_id = record.get("asset_id")
 
-        # Already resolved by an earlier scan. Re-running a rescan must not
-        # resolve it a second time, and must not resurrect it either.
         if record.get("status") == STATUS_RESOLVED:
+            # Reported again after being closed. Silently skipping this is how
+            # a rescan closes findings and then goes blind to their return:
+            # the finding falls through this branch and is not new either, so
+            # nothing in the system ever hears about it again.
+            if finding_id in scan_by_id:
+                outcomes.append(FindingOutcome(
+                    finding_id=finding_id,
+                    asset_id=asset_id,
+                    outcome=Outcome.REGRESSED,
+                    reason=(
+                        f"reported again by {scan_id} after an earlier scan "
+                        f"resolved it. The remediation did not hold."
+                    ),
+                ))
+            # Otherwise still absent, still resolved. Re-running a rescan must
+            # not resolve it twice, and must not resurrect it either.
             continue
 
         if finding_id in scan_by_id:

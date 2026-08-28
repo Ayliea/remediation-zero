@@ -113,6 +113,14 @@ def run_chase(
               (d.to_dict() for d in client.collection("owners").stream())}
     tickets = {t["finding_id"]: t for t in
                (d.to_dict() for d in client.collection("tickets").stream())}
+    # Resolution is read from the finding, not the ticket. A finding is what
+    # the scanner observed and `findings` is where a rescan records it; a
+    # ticket is what the fleet did about it, and chase owns that. Having the
+    # rescan write the ticket directly would have saved a read here and put a
+    # second writer inside this agent's collection, which is the boundary the
+    # whole design rests on.
+    findings = {f["finding_id"]: f for f in
+                (d.to_dict() for d in client.collection("findings").stream())}
     # An accepted risk is not chased. Nudging an owner who has been told to
     # stand down destroys the credibility of every other nudge.
     accepted = {
@@ -144,11 +152,21 @@ def run_chase(
             finding_id=finding_id,
             started_sim_ts=sla["started_sim_ts"],
             due_sim_ts=sla["due_sim_ts"],
-            ticket_open=bool(ticket),
+            # A closed ticket record still exists -- it keeps its history --
+            # so its presence is not the question. Reading bool(ticket) alone
+            # would report a resolved finding as still having an open ticket,
+            # and a regression would then nudge on an issue that is closed
+            # rather than reopening it.
+            ticket_open=bool(ticket) and ticket.get("status") != "resolved",
             nudges_sent=int(ticket.get("nudges_sent", 0)),
             last_contact_sim_ts=ticket.get("last_contact_sim_ts"),
             escalated=bool(ticket.get("escalated", False)),
-            resolved=ticket.get("status") == "resolved",
+            # The finding alone decides this. Falling back to the ticket
+            # status would pin a finding resolved forever: the ticket keeps
+            # that status after it closes, so a regression could never
+            # reopen it.
+            resolved=findings.get(finding_id, {}).get("status") == "resolved",
+            resolved_by_scan=findings.get(finding_id, {}).get("resolved_by_scan"),
         )
 
         action = next_action(state, now_sim_ts=stamp.sim_ts)
