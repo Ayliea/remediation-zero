@@ -25,6 +25,9 @@ without anyone waiting six weeks or pretending they did.
 
 The rules, in priority order:
 
+    resolved, ticket open    close it. A rescan confirmed the fix, and a
+                             ticket left open on finished work teaches
+                             people to ignore tickets.
     resolved                 stop. The work is done.
     no ticket                open one. Nothing else can happen first.
     past due, escalated      hand it to a person. Escalation happens once, and
@@ -57,6 +60,8 @@ class ChaseAction(Enum):
     """What chase should do next for one finding."""
 
     OPEN_TICKET = "open_ticket"
+    #: A rescan confirmed the fix. Fires once, then the finding falls to DONE.
+    CLOSE_TICKET = "close_ticket"
     NUDGE = "nudge"
     ESCALATE = "escalate"
     #: Escalated and still unresolved. A person owns it; the fleet stops.
@@ -95,6 +100,8 @@ class ChaseState:
             )
         if action is ChaseAction.ESCALATE:
             return replace(self, escalated=True, last_contact_sim_ts=now_sim_ts)
+        if action is ChaseAction.CLOSE_TICKET:
+            return replace(self, ticket_open=False, last_contact_sim_ts=now_sim_ts)
         return self
 
     def days_overdue(self, now_sim_ts: float) -> float:
@@ -120,6 +127,12 @@ class ChaseState:
 def next_action(state: ChaseState, now_sim_ts: float) -> ChaseAction:
     """Decide what to do for one finding, at one moment in simulated time."""
     if state.resolved:
+        # Closing happens once, and this branch has to precede the no-ticket
+        # rule below. Closing clears ticket_open, so under the other ordering
+        # the next cycle would read "resolved, no ticket" and open a fresh one
+        # for work that is already finished.
+        if state.ticket_open:
+            return ChaseAction.CLOSE_TICKET
         return ChaseAction.DONE
 
     if not state.ticket_open:

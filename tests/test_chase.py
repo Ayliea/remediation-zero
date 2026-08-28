@@ -100,10 +100,39 @@ def test_an_already_escalated_overdue_finding_goes_to_a_person():
     assert next_action(current, now_sim_ts=DUE + 7 * DAY) is ChaseAction.HUMAN_QUEUE
 
 
-def test_a_resolved_finding_is_left_alone():
+def test_a_resolved_finding_stops_being_chased():
+    """Resolution outranks every deadline. Thirty days past due with a nudge
+    already sent, a confirmed fix still ends the chase rather than escalating."""
     current = state(ticket_open=True, resolved=True, nudges_sent=1)
 
-    assert next_action(current, now_sim_ts=DUE + 30 * DAY) is ChaseAction.DONE
+    assert next_action(current, now_sim_ts=DUE + 30 * DAY) is ChaseAction.CLOSE_TICKET
+
+
+def test_a_resolved_finding_closes_its_ticket_exactly_once():
+    """Closing is an action with an outside effect -- a tracker issue closes --
+    so repeating it every cycle would be noise on a finished piece of work."""
+    current = state(ticket_open=True, resolved=True, nudges_sent=1)
+    now = DUE + 30 * DAY
+
+    first = next_action(current, now_sim_ts=now)
+    assert first is ChaseAction.CLOSE_TICKET
+
+    after_closing = current.after(first, now_sim_ts=now)
+    assert next_action(after_closing, now_sim_ts=now) is ChaseAction.DONE
+    assert next_action(after_closing, now_sim_ts=now + 90 * DAY) is ChaseAction.DONE
+
+
+def test_closing_a_ticket_does_not_cause_a_new_one_to_be_opened():
+    """The ordering trap. CLOSE_TICKET clears ticket_open, and the no-ticket
+    rule would otherwise read that as a finding needing its first ticket --
+    reopening work the rescan just confirmed as done, every cycle, forever."""
+    closed = state(ticket_open=True, resolved=True).after(
+        ChaseAction.CLOSE_TICKET, now_sim_ts=DUE
+    )
+
+    assert closed.ticket_open is False
+    assert next_action(closed, now_sim_ts=DUE + 1 * DAY) is not ChaseAction.OPEN_TICKET
+    assert next_action(closed, now_sim_ts=DUE + 1 * DAY) is ChaseAction.DONE
 
 
 def test_the_lifecycle_terminates_within_a_bounded_number_of_actions():
