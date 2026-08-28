@@ -412,6 +412,15 @@ did nothing, and a check that could not fail. Both are fixed; the search now
 pins to the published version, and a stale hit is reported as stale rather than
 as success.
 
+The card's version is HEAD, and the line above it claims HEAD is what the
+engine serves. That holds only while nothing has been committed since the last
+deploy. Nothing records the engine's build commit, so the script compares the
+engine's `updateTime` against the HEAD commit time and prints a note when they
+have drifted, rather than publishing the claim unchecked. **Expect that note if
+you have committed anything since deploying** — it is accurate, and a
+docs-or-scripts-only commit does not require a redeploy. Redeploy first only if
+the difference touches something the engine actually serves.
+
 ### 12. The honest limit — 15s, no commands
 
 Firestore IAM is database-scoped, not collection-scoped, and Security Rules are

@@ -100,10 +100,38 @@ print(json.dumps({
 }))
 " <<<"${CARD}")"
 
+# VERSION is HEAD, but the card claims it is what the engine serves. Those are
+# the same thing only if nothing has been committed since the last deploy.
+# Nothing records the engine's build commit, so compare timestamps instead and
+# say plainly when they have drifted rather than publishing the claim unchecked.
+ENGINE_UPDATED="$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
+  "https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/reasoningEngines/${ENGINE_ID}" \
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('updateTime',''))" 2>/dev/null || true)"
+HEAD_TIME="$(git log -1 --format=%cI)"
+
+DRIFT=""
+if [[ -n "${ENGINE_UPDATED}" ]]; then
+  DRIFT="$(ENGINE_T="${ENGINE_UPDATED}" HEAD_T="${HEAD_TIME}" python3 -c "
+import os
+from datetime import datetime
+def parse(v):
+    return datetime.fromisoformat(v.replace('Z', '+00:00'))
+print('yes' if parse(os.environ['HEAD_T']) > parse(os.environ['ENGINE_T']) else '')
+" 2>/dev/null || true)"
+fi
+
 echo
 echo "Agent Registry — ${PROJECT} / ${LOCATION}"
 echo "  service : ${SERVICE_ID}"
-echo "  version : ${VERSION} (the commit the deployed engine was built from)"
+if [[ -n "${DRIFT}" ]]; then
+  echo "  version : ${VERSION} (HEAD)"
+  echo "            NOTE: HEAD was committed after the engine was last deployed"
+  echo "            (${HEAD_TIME} vs ${ENGINE_UPDATED}). The card will advertise a"
+  echo "            commit the running engine was not built from. Redeploy first if"
+  echo "            the difference touches anything the engine serves."
+else
+  echo "  version : ${VERSION} (the commit the deployed engine was built from)"
+fi
 echo "  skills  : assess_finding, recall_fleet_history, lookup_finding"
 echo
 

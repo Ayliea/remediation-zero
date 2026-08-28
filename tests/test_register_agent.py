@@ -90,3 +90,22 @@ def test_the_stale_path_still_exits_nonzero(source: str) -> None:
     """A stale entry must fail the script, not merely print a warning."""
     tail = source.split("FOUND, BUT STALE", 1)[1]
     assert "exit 1" in tail, "a stale catalogue entry no longer fails the run"
+
+
+def test_version_drift_is_reported_but_not_fatal(source: str) -> None:
+    """VERSION is HEAD; the card claims it is what the engine serves.
+
+    Those coincide only when nothing has been committed since the last deploy.
+    Nothing records the engine's build commit, so the script compares the
+    engine's updateTime against the HEAD commit time and says so when they have
+    drifted. It must not exit on it: a commit touching only docs or scripts
+    legitimately leaves the engine current, and failing there would make the
+    step unrunnable for the common case.
+    """
+    assert "DRIFT" in source, "the engine/HEAD drift check is gone"
+    assert "the running engine was not built from" in source
+
+    drift_branch = source.split('if [[ -n "${DRIFT}" ]]; then', 1)[1].split("fi", 1)[0]
+    assert "exit" not in drift_branch, (
+        "drift is informational; exiting here would block docs-only commits"
+    )
