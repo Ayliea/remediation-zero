@@ -80,11 +80,11 @@ curl -s -o /dev/null -w '%{time_total}s\n' \
 # 3. Start both Cloud Run job checks now, in another terminal, and start
 #    them before anything else in this list. Together they take 5m23s and are
 #    the long pole in pre-flight; everything below runs while they do.
-#    Starting them here is the whole reason step 9 is short.
+#    Starting them here is the whole reason step 10 is short.
 #
-#    `secret` belongs here and not in step 9. It is a Cloud Run job exactly
+#    `secret` belongs here and not in step 10. It is a Cloud Run job exactly
 #    like `probe`, which is easy to miss because only `probe` is named in the
-#    --only help text. Left in step 9 alongside the fast three it put that
+#    --only help text. Left in step 10 alongside the fast three it put that
 #    step at 258 measured seconds against a 25-second budget: four minutes of
 #    dead air with the camera running.
 ./scripts/verify-controls.sh --only probe,secret
@@ -115,9 +115,15 @@ export GITHUB_TOKEN="$(gh auth token)"
 #    exactly what it would clear and what it will not touch.
 ./scripts/reset-derived.sh
 ./scripts/reset-derived.sh --confirm
-#    This clears sla_clocks and tickets ONLY. Decisions, assignments, the
-#    human queue and the idempotency ledger all survive, so the resume control
-#    still has something to check itself against. Issues already filed on the
+#    This clears sla_clocks, tickets and scans, and undoes what a rescan
+#    wrote to findings: the 12 it created are removed, and the ones it
+#    resolved lose those fields and go back to open. Seeded findings are
+#    never deleted. Without that last part a single rescan makes the demo
+#    unrehearsable -- the clocks reset but 106 findings stay resolved, so
+#    section 7 closes their tickets on sight and section 6 has no arc left
+#    to show. Decisions, assignments, the human queue and the idempotency
+#    ledger all survive, so the resume control still has something to check
+#    itself against. Issues already filed on the
 #    tracker are not deleted -- GitHub is not ours to reset -- so close them by
 #    hand first if the recording pans across the issue list. Closing them is
 #    cosmetic: find_issue lists with state=all, so a closed issue still owns
@@ -143,12 +149,13 @@ for coll in ('cycles', 'decisions', 'assignments', 'human_queue', 'reports'):
     used |= {d.to_dict().get('cycle') for d in c.collection(coll).stream()}
 used = {v for v in used if isinstance(v, int) and v < 9000}
 print(max(used, default=0) + 20)")
-echo "cycle $C, and $((C+2))-$((C+10)) for the chase steps"
+echo "cycle $C, $((C+2))-$((C+10)) for the chase steps, $((C+11))-$((C+12)) for the rescan"
 ```
 
-The chase section below advances to `$((C+2))` through `$((C+10))`, so the
+The chase section advances to `$((C+2))` through `$((C+10))` and the rescan
+takes `$((C+11))` and `$((C+12))`, so the
 picker leaves a gap of 20 rather than taking the next integer — enough to clear
-the whole chase range, not just the tick.
+the whole run, not just the tick.
 
 Nothing in the demo needs `--create`, `session-init.py`, or any Terraform.
 Those run once and have already run.
@@ -341,7 +348,63 @@ its issue. That is the shortest path from "the fleet decided something" to "a
 person can act on it", and it is worth clicking on camera rather than
 describing.
 
-### 7. It remembers cycles it never ran — 20s
+### 7. The loop closes — TIME ME
+
+Run this **after** the chase steps above, never before. A finding the rescan
+resolves stops being chased immediately, so resolving first means the nudges
+and the escalation never happen and section 6 has nothing to show. The order
+here is the order the story runs in: press for weeks, then find out what
+actually got fixed.
+
+```bash
+# Dry run first, on camera. It writes nothing and prints the same summary the
+# real run does, so the closures are read before they happen.
+./scripts/rescan.sh --cycle $((C+11)) --dry-run
+```
+
+The line to stop on is not `resolved`. It is `unverifiable`:
+
+    "resolved": 106       absent from the scan, and the asset was scanned
+    "persisting": 192     still reported
+    "unverifiable": 102   absent, but the asset was never scanned
+    "new": 12             first seen by this scan; enters triage
+    "regressed": 0        reported again after being closed
+
+That 102 is the whole point, and it is worth saying out loud. Absence is the
+only evidence of remediation a scanner ever gives you, and two very different
+things produce an identical absence: a host that was examined and is clean, and
+a host that was never examined at all. Closing on absence alone cannot tell
+them apart, and it fails in the direction nobody notices — a live vulnerability
+leaves the queue behind a record saying it was handled. So every scan carries
+the assets it actually covered, and 102 findings here are deliberately left
+open, still chased, still counted against their SLA, because nothing looked at
+their hosts.
+
+```bash
+# Apply it.
+./scripts/rescan.sh --cycle $((C+11))
+
+# Then chase again. The resolved findings close their tickets and their
+# tracker issues; everything else carries on.
+SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((C+12))
+```
+
+If the tracker is configured, the closing comment names the scan and says why
+absence counted as evidence, then the issue closes. The comment is posted
+before the close on purpose: a closed issue is out of every triage view, so the
+reverse order puts the explanation where nobody will read it.
+
+Re-running the rescan on the same cycle is safe and worth showing if there is
+time — it reports `newly_resolved: 0`, because the guard suppresses the repeat
+and the count reflects what changed rather than what was asked for.
+
+**Timing: not yet measured on camera.** The dry run is 2.1s and the apply is a
+one-time write of 106 resolutions plus 12 ingests, which is not what a re-run
+costs. Rehearse it once from a reset state and put the real number in the
+heading and the table below, the way every other number in this file was
+obtained. Do not estimate it.
+
+### 8. It remembers cycles it never ran — 20s
 
 In the same playground session, after the assessment:
 
@@ -368,7 +431,7 @@ tool refusing to report an empty history it did not actually look for. An
 unreachable memory and a fleet that has done nothing are different claims, and
 only one of them is ever true.
 
-### 8. Reporting — 15s
+### 9. Reporting — 15s
 
 ```bash
 ./scripts/report.sh --cycle $C
@@ -386,7 +449,7 @@ write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
 them.
 
-### 9. The controls — 33s
+### 10. The controls — 33s
 
 ```bash
 ./scripts/verify-controls.sh --only armor,reviewer,resume
@@ -414,7 +477,7 @@ identities returned `PERMISSION_DENIED` on `iam.serviceAccounts.getAccessToken`
 — a refusal to impersonate, which says nothing about the secret. It read as
 proof of the control. It was proof that the operator cannot impersonate anyone.
 
-### 10. It runs itself — 30s
+### 11. It runs itself — 30s
 
 ```bash
 # Pick a tick cycle the ledger has never seen. Same trap as $C above, and this
@@ -474,7 +537,7 @@ delivery attempts to be exhausted, and reads it back out of the queue. Measured
 at `2 of 2 expected copies, first after ~99s` — two because the tick fans out
 to two subscriptions and each dead-letters independently.
 
-### 11. Another department can find it — 20s
+### 12. Another department can find it — 20s
 
 ```bash
 ./scripts/register-agent.sh --apply
@@ -510,7 +573,7 @@ you have committed anything since deploying** — it is accurate, and a
 docs-or-scripts-only commit does not require a redeploy. Redeploy first only if
 the difference touches something the engine actually serves.
 
-### 12. The honest limit — 15s, no commands
+### 13. The honest limit — 15s, no commands
 
 Firestore IAM is database-scoped, not collection-scoped, and Security Rules are
 bypassed by server SDKs. So the boundary was put where IAM can actually enforce
@@ -554,7 +617,10 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh`, all five | 5–6 min |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
-| `pytest`, 319 tests | 26.0s on 2026-08-28 |
+| `pytest`, 369 tests | 28.0s on 2026-08-28 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
-| `reset-derived.sh --confirm`, 29 docs | under 5s |
+| `rescan.sh --dry-run` | 2.1s on 2026-08-28, three runs |
+| `rescan.sh --cycle N`, first apply | NOT MEASURED. 106 resolutions + 12 ingests; needs one rehearsal from a reset state |
+| `reset-derived.sh` dry run | 2.3s on 2026-08-28 |
+| `reset-derived.sh --confirm`, 29 docs | under 5s. Predates the rescan; it now also undoes 118 findings and the manifest, so re-measure |
