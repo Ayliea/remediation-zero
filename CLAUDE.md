@@ -16,7 +16,7 @@ These are not preferences. Violating any of them breaks the submission.
    - Installed and pinned: **2.8.0**. Verified against the installed package, not from memory.
    - `Workflow` is real and top-level, backed by `google.adk.workflow` (`Node`, `Edge`, `START`, `DEFAULT_ROUTE`, `JoinNode`, `RetryConfig`).
    - **There is no top-level `Task` API.** Task models live at `google.adk.agents.llm.task`. Delegation in 2.x is expressed through `AgentTool` plus `SequentialAgent` / `ParallelAgent` / `LoopAgent` / `ManagedAgent`.
-   - `Agent` gained `rerun_on_resume` and `retry_config`; both are relevant to resume safety and the circuit breaker.
+   - `Agent` gained `rerun_on_resume` and `retry_config`; both are relevant to resume safety and to bounding retries.
    - Session and memory services are **async throughout** (`create_session`, `list_sessions`, `add_memory`).
    - The agent loader resolves `root_agent` from `agents/<name>/agent.py`.
 2. **No pre-existing code.** Everything in this repo must be written during the submission period. Do not import, adapt, or reconstruct code from any other project.
@@ -132,9 +132,10 @@ rather than good practice.
 ## Failure handling
 
 - Triage and reviewer disagreement: one retry, then route to the human queue. Never loop.
-- Every agent loop has an iteration cap and a circuit breaker.
+- Every agent loop has an iteration cap, and all of them are bounded `range()` loops rather than conditions that might not become true: `MAX_REVIEW_ATTEMPTS = 2` in `adjudicate`, `max_capacity_retries = 3` around the reviewer, `RetryConfig(max_attempts=4)` on the graph nodes.
+- **There is no circuit breaker.** Nothing trips open after N consecutive failures, so a reviewer outage is absorbed per finding rather than once for the run: every finding pays its own retries and backoff before being recorded `unavailable`. The bounded caps mean this terminates and cannot spin, but on a long batch it is slower and more expensive than a breaker would be. Named here as a limit rather than left to be discovered, because this file previously claimed the breaker existed and it never did.
 - Failed messages go to the dead-letter queue. Findings are never silently dropped.
-- Tool calls retry with exponential backoff and a maximum attempt count.
+- Model calls retry with exponential backoff and jitter, capped at four attempts (`_with_backoff` in `tools/review_models.py`, `RetryConfig` on the graph nodes). **Tracker delivery does not retry in process**: a failure is logged `delivery_failed` and never fails the cycle, and the next cycle re-attempts it because the ticket record carries no issue number until one exists.
 
 ## Ask before
 

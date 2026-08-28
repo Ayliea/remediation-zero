@@ -167,7 +167,7 @@ published a message the worker cannot process
        One per subscription: each dead-letters independently.
 ```
 
-Two copies rather than one because the tick fans out to two subscriptions and each exhausts its delivery attempts separately. A dead-letter queue nobody has watched catch anything is a configuration line, not a control, and its two common failure modes are both silent: without publisher access for the Pub/Sub service agent the subscription simply retries forever, and an empty queue looks the same whether nothing failed or nothing could ever arrive. Tool calls retry with backoff, and the triage and review pair has a loop cap and circuit breaker. Failures degrade to a human queue rather than silently dropping findings.
+Two copies rather than one because the tick fans out to two subscriptions and each exhausts its delivery attempts separately. A dead-letter queue nobody has watched catch anything is a configuration line, not a control, and its two common failure modes are both silent: without publisher access for the Pub/Sub service agent the subscription simply retries forever, and an empty queue looks the same whether nothing failed or nothing could ever arrive. Model calls retry with exponential backoff and jitter, capped at four attempts; the triage and review pair has a loop cap of two, and a reviewer still returning 429 past its own retries is recorded unavailable rather than counted as a rejection. There is no circuit breaker — nothing trips open across findings, so an outage is paid per finding rather than once per run. Failures degrade to a human queue rather than silently dropping findings.
 
 ## Tech stack
 
