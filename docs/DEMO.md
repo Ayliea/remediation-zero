@@ -27,22 +27,48 @@ The first run of anything in a fresh shell adds roughly two seconds of import.
 ## Pre-flight, five minutes before recording
 
 ```bash
-# 1. The console scales to zero, and a cold start is 18.2 seconds of white
-#    screen. Warm it. This is the single most important line in this file.
+# 1. Refresh both credentials before anything else touches the cloud. There
+#    are two of them, they expire independently, and neither failure
+#    announces itself. Application Default Credentials are what the Python
+#    tools and verify-controls authenticate with; the gcloud user credential
+#    is what every `gcloud` command in this file uses. Refreshing one does
+#    nothing for the other. On 2026-08-28 ADC was dead while gcloud was
+#    healthy, and an hour later, with ADC refreshed, gcloud was the dead one.
+gcloud auth application-default print-access-token >/dev/null \
+  || gcloud auth application-default login
+gcloud auth print-access-token >/dev/null || gcloud auth login
+#    Check the tokens, not the listing, and not the file. `gcloud auth list`
+#    printed this account as ACTIVE while its token could not refresh at all,
+#    and a stale application_default_credentials.json is present, readable
+#    and exactly the right shape -- `ls` cannot tell it from a live one
+#    either. Only asking for a token distinguishes them.
+#
+#    The ADC failure is the expensive one to miss, because it is silent and
+#    it looks like a real defect: Model Armor fails closed when it cannot
+#    reach the screener, so every finding is blocked -- the benign ones too
+#    -- and verify-controls reports FAIL on a control that is working exactly
+#    as designed. The gcloud failure is louder, but it lands in the middle of
+#    step 5 with the camera running.
+#
+#    Reauth needs an interactive terminal, so no script and no agent can do
+#    this for you -- run it yourself, now, not at 17:00 on the 31st.
+
+# 2. The console scales to zero, and a cold start is 18.2 seconds of white
+#    screen. Warm it. Nothing else here matters if the first frame is white.
 curl -s -o /dev/null -w '%{time_total}s\n' \
   https://remediation-zero-console-978104855285.us-central1.run.app/
 #    Run it twice. The second should be under 1.5s. If it is not, wait and
 #    repeat rather than starting the recording.
 
-# 2. Start the slow control check now, in another terminal. It takes 218
+# 3. Start the slow control check now, in another terminal. It takes 218
 #    seconds, so starting it here means the result is on screen when you
 #    reach it rather than being waited for on camera.
 ./scripts/verify-controls.sh --only probe
 
-# 3. The dead-letter check takes about two minutes. Start it here too.
+# 4. The dead-letter check takes about two minutes. Start it here too.
 ./scripts/verify-events.sh
 
-# 4. Confirm the console is serving its newest revision. A pinned service
+# 5. Confirm the console is serving its newest revision. A pinned service
 #    accepts deploys and serves none of them: it stays up, answering with old
 #    code, so every check of it passes. This happened, and it went unnoticed
 #    for six hours.
@@ -52,14 +78,14 @@ gcloud run services describe remediation-zero-console --region=us-central1 \
 #    gcloud run services update-traffic remediation-zero-console \
 #      --region=us-central1 --to-latest
 
-# 5. Export the tracker so chase files real issues on camera.
+# 6. Export the tracker so chase files real issues on camera.
 export GITHUB_TICKET_REPO="Ayliea/remediation-zero-tickets"
 export GITHUB_TOKEN="$(gh auth token)"
 
-# 6. Confirm the suite is green and the drivers parse.
+# 7. Confirm the suite is green and the drivers parse.
 .venv/bin/pytest -q
 
-# 7. Reset the derived state so the chase arc is legible. Every rehearsal ages
+# 8. Reset the derived state so the chase arc is legible. Every rehearsal ages
 #    sla_clocks; run enough of them and the +8d step escalates everything at
 #    once and the nudging never appears on screen. Dry run first -- it prints
 #    exactly what it would clear and what it will not touch.
@@ -74,7 +100,7 @@ export GITHUB_TOKEN="$(gh auth token)"
 #    its finding. The demo uses --start 10 to work on findings no rehearsal has
 #    touched, which is what actually keeps the tracker shot honest.
 
-# 8. Pick a cycle number nothing has used. Derive it rather than hardcoding
+# 9. Pick a cycle number nothing has used. Derive it rather than hardcoding
 #    one: every rehearsal consumes more, so a literal in this file is correct
 #    only until the next time anyone reads it. It was wrong by the second
 #    rehearsal -- this file said 70 after 70 had already been spent.
