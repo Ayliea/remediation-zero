@@ -34,6 +34,34 @@ PROJECT="${GOOGLE_CLOUD_PROJECT:?set in .env}"
 REGION="${AGENT_ENGINE_LOCATION:-us-central1}"
 IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/cloud-run-source-deploy/rz-worker:$(git rev-parse --short HEAD)"
 
+# Refuse a deploy that would silently take delivery away. This script reads the
+# tracker from the deploy-time shell, so running it from a terminal that never
+# exported GITHUB_TICKET_REPO produces a healthy-looking deploy whose only
+# visible symptom is `delivery_disabled` in a log nobody is reading. That
+# happened on 2026-08-28: the workers were redeployed to pick up a fix and came
+# back unable to file a ticket, and the deploy reported success throughout.
+#
+# Losing a capability is not the same as never having had one. If the running
+# service can deliver and this invocation cannot, that is a regression and the
+# operator has to say so out loud.
+if [[ -z "${GITHUB_TICKET_REPO:-}" ]]; then
+  LIVE_REPO="$(gcloud run services describe "rz-worker-chase" \
+    --project="${PROJECT}" --region="${REGION}" \
+    --format='value(spec.template.spec.containers[0].env.filter("name":"GITHUB_TICKET_REPO").extract("value"))' \
+    2>/dev/null | tr -d "[]\"' ")"
+  if [[ -n "${LIVE_REPO}" ]]; then
+    echo "REFUSING: rz-worker-chase currently delivers to ${LIVE_REPO}," >&2
+    echo "and GITHUB_TICKET_REPO is not set in this shell. Deploying now would" >&2
+    echo "leave the worker unable to file a ticket, and would report success." >&2
+    echo >&2
+    echo "  export GITHUB_TICKET_REPO=\"${LIVE_REPO}\"" >&2
+    echo >&2
+    echo "Or pass DROP_DELIVERY=1 to remove it deliberately." >&2
+    [[ "${DROP_DELIVERY:-}" == "1" ]] || exit 1
+    echo "DROP_DELIVERY=1 set; removing tracker delivery deliberately." >&2
+  fi
+fi
+
 echo "Building ${IMAGE}..."
 gcloud builds submit \
   --project="${PROJECT}" \
@@ -46,7 +74,6 @@ gcloud builds submit \
 # un-configured — it cannot read the credential at all. An exception sweep that
 # could file a ticket would be a capability nobody asked it to have.
 GITHUB_REPO="${GITHUB_TICKET_REPO:-}"
-
 for agent in chase exception; do
   SERVICE="rz-worker-${agent}"
   SA="rz-${agent}@${PROJECT}.iam.gserviceaccount.com"
