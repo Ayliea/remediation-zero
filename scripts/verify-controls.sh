@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Prove the five security claims by performing the actions they prevent.
+# Prove the six security claims by performing the actions they prevent.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 exec .venv/bin/python scripts/verify_controls.py "$@"

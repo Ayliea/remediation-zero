@@ -106,8 +106,8 @@ python3 -m venv .venv
 .venv/bin/python scripts/gen_rescan.py        # regenerate the follow-up scan; fixed seed
 ./scripts/rescan.sh --cycle N --dry-run       # what a rescan would close. ALWAYS read this first
 ./scripts/rescan.sh --cycle N                 # apply it. the only path that resolves a finding
-./scripts/verify-controls.sh                  # prove the five security claims
-./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~33s
+./scripts/verify-controls.sh                  # prove the six security claims
+./scripts/verify-controls.sh --only armor,reviewer,resume,coverage  # the fast four, 33s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
 ./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets + scans, and undoes
                                               # what a rescan wrote to findings. seeded findings

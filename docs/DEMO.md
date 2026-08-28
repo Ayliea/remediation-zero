@@ -449,14 +449,20 @@ write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
 them.
 
-### 10. The controls — 33s
+### 10. The controls — 33.4s
 
 ```bash
-./scripts/verify-controls.sh --only armor,reviewer,resume
+./scripts/verify-controls.sh --only armor,reviewer,resume,coverage
 ```
 
+`coverage` is the one that pairs with section 7. It runs the real reconciler
+against the real findings twice with the same empty scan, changing only what
+the scan claims to have examined: nothing covered closes 0, the real manifest
+closes 204. Say that the second half is the point — a reconciler that refused
+everything would pass the first line and be a broken function, not a control.
+
 Then switch to the terminal where `--only probe,secret` has been running since
-pre-flight and show its result. Those two of the five checks are Cloud Run
+pre-flight and show its result. Those two of the six checks are Cloud Run
 jobs, each running **as** the identity being tested rather than borrowing it:
 
 ```
@@ -611,11 +617,12 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `chase.sh --advance-days N` | 6.8–7.7s each |
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 13.8s–15.9s |
-| `verify-controls.sh --only armor,reviewer,resume` | 33s on 2026-08-28. Was 17.2s while the reviewer check was re-reading a cached decision instead of calling the models |
+| `verify-controls.sh --only armor,reviewer,resume,coverage` | 33.4s on 2026-08-28. Was 17.2s for the three while the reviewer check was re-reading a cached decision instead of calling the models |
 | `verify-controls.sh --only probe,secret` (pre-flight) | 5m23s on 2026-08-28 |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
-| `verify-controls.sh`, all five | 5–6 min |
+| `verify-controls.sh --only coverage` | 2.1s on 2026-08-28 |
+| `verify-controls.sh`, all six | 5–6 min |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
 | `pytest`, 369 tests | 28.0s on 2026-08-28 |
 | `gcloud pubsub topics publish` → both workers | ~4s |

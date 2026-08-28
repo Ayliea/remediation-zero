@@ -421,8 +421,8 @@ would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
 ### 9. Verify the controls
 
 ```bash
-./scripts/verify-controls.sh                          # all five, 5-6 minutes
-./scripts/verify-controls.sh --only armor,reviewer,resume   # the fast three, under 20s
+./scripts/verify-controls.sh                          # all six, 5-6 minutes
+./scripts/verify-controls.sh --only armor,reviewer,resume,coverage  # the fast four, 33.4s
 ./scripts/verify-controls.sh --only secret                   # the token boundary, ~2m
 ```
 
@@ -442,7 +442,24 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] Reporting identity is denied a ticket write
 [PASS] Exception identity is denied the tracker token
 [PASS] A resumed cycle writes nothing a second time
+[PASS] Absence alone never closes a finding
 ```
+
+The last one is the newest and the one worth watching, because it changes a
+single variable. It runs the real reconciler against the real findings twice
+with the same empty scan, and only the coverage manifest differs:
+
+```
+scan covering nothing:              closed 0,   held 306 as unverifiable
+same scan, 45 assets covered:       closed 204
+findings on unscanned assets still open in Firestore: 102
+```
+
+A scanner that reached no host at all reports exactly what a fleet that fixed
+everything reports. If absence alone were enough, the first line would close
+the entire estate and file a record saying every vulnerability was remediated.
+Removing the coverage gate makes it do precisely that — 306 closed, and the
+two runs become identical, because the manifest has stopped mattering.
 
 ### 10. Reset the demo state
 

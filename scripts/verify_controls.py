@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prove the five security claims. Every one of them, by doing it.
+"""Prove the six security claims. Every one of them, by doing it.
 
     ./scripts/verify-controls.sh
 
@@ -41,6 +41,7 @@ from google.cloud import firestore  # noqa: E402
 from tools.clock import SimClock  # noqa: E402
 from tools.idempotency import derive_key  # noqa: E402
 from tools.model_armor import ModelArmor  # noqa: E402
+from tools.rescan import Outcome, reconcile  # noqa: E402
 
 PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 PLANTED = "RZ-0216"
@@ -281,6 +282,76 @@ def check_resume_produces_no_duplicates() -> None:
     )
 
 
+# --- 6 ----------------------------------------------------------------------
+
+def check_absence_alone_never_closes_a_finding() -> None:
+    """Hand the fleet a scan that examined nothing, and watch it close nothing.
+
+    A scanner that failed to reach a single host reports no findings, which is
+    byte for byte what a fleet that fixed everything looks like. If absence
+    alone were enough to close a finding, this input would resolve the entire
+    estate and file a record saying every vulnerability was remediated.
+
+    The check runs the real reconciler against the real findings in Firestore,
+    twice, changing exactly one thing: what the scan claims to have examined.
+    Both runs report zero findings. The first covers nothing and must close
+    nothing. The second covers what the last real scan covered and must close
+    something, because a reconciler that refuses everything would pass the
+    first half and is not a control -- it is a broken function.
+    """
+    client = firestore.Client()
+    findings = [doc.to_dict() for doc in client.collection("findings").stream()]
+    scans = [doc.to_dict() for doc in client.collection("scans").stream()]
+
+    if not findings or not scans:
+        record(
+            "Absence alone never closes a finding",
+            False,
+            "no findings or no scan manifest in Firestore; seed and run a "
+            "rescan first. Nothing was exercised.",
+            inconclusive=True,
+        )
+        return
+
+    latest = max(scans, key=lambda scan: scan.get("real_ts", 0))
+    covered = latest.get("covered_asset_ids", [])
+
+    # The action the control is meant to stop: a blind scan closing findings.
+    blind = reconcile(previous=findings, scan=[], covered_asset_ids=[],
+                      scan_id="verify-controls-blind")
+
+    # The same call, the same empty scan, with the real coverage manifest.
+    # This is the half that proves the first one means something.
+    sighted = reconcile(previous=findings, scan=[],
+                        covered_asset_ids=covered,
+                        scan_id="verify-controls-sighted")
+
+    # And the persisted consequence: findings the last real rescan could not
+    # verify are still open in Firestore, not quietly closed.
+    still_open = sum(
+        1 for finding in findings
+        if finding.get("status") == "open"
+        and finding.get("asset_id") not in set(covered)
+    )
+
+    passed = (
+        blind.counts["resolved"] == 0
+        and blind.counts["unverifiable"] > 0
+        and sighted.counts["resolved"] > 0
+        and still_open > 0
+    )
+
+    record(
+        "Absence alone never closes a finding",
+        passed,
+        f"scan covering nothing: closed {blind.counts['resolved']}, "
+        f"held {blind.counts['unverifiable']} as unverifiable | "
+        f"same scan with {len(covered)} assets covered: closed "
+        f"{sighted.counts['resolved']} | "
+        f"{still_open} findings on unscanned assets are still open in Firestore",
+    )
+
+
 #: The checks, in the order they run. The probe is named separately because it
 #: costs a Cloud Run job execution and roughly three and a half minutes, while
 #: the other three together take under twenty seconds. A demonstration that has
@@ -299,6 +370,8 @@ CHECKS = {
                lambda: check_exception_cannot_read_the_token()),
     "resume": ("A resumed cycle writes nothing a second time",
                lambda: check_resume_produces_no_duplicates()),
+    "coverage": ("Absence alone never closes a finding",
+                 lambda: check_absence_alone_never_closes_a_finding()),
 }
 
 
