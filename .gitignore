@@ -134,3 +134,13 @@ Thumbs.db
 # Browser automation output from design review.
 .playwright-mcp/
 console-top.png
+
+# ===========================================================================
+# Deploy staging
+# ===========================================================================
+# `adk deploy agent_engine` stages the bundle in agents/<name>_tmp<timestamp>/,
+# a full copy of agents/, tools/, prompts/ and data/. It is cleaned up when the
+# deploy finishes and survives when the deploy is interrupted -- which is
+# precisely the moment someone reaches for `git add -A`. Committing it would
+# put a second, silently diverging copy of the source tree in the repository.
+agents/*_tmp[0-9]*/

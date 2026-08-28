@@ -20,6 +20,7 @@ tests are as much about what the clock refuses to do as what it does.
 """
 
 import ast
+import re
 import time
 from pathlib import Path
 
@@ -110,6 +111,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 SKIPPED_DIRS = frozenset({".venv", ".git", "__pycache__", ".pytest_cache", ".terraform"})
 
+#: `adk deploy agent_engine` stages a full copy of the source tree in
+#: agents/<name>_tmp<timestamp>/. Those copies are not new code and are not on
+#: the allowlist, so a deploy left mid-flight turns this suite red over a
+#: duplicate of a file already accounted for. Matched narrowly -- the name must
+#: end in _tmp followed by digits -- so no real package can hide behind it.
+STAGING_DIR = re.compile(r"_tmp\d+(?:_\d+)*$")
+
 #: Every module allowed to read a wall clock directly, and why. The allowlist
 #: is the test: anything absent from it fails, so a new clock read has to be
 #: argued for in writing rather than merely committed. Recording the reason is
@@ -197,6 +205,7 @@ def _source_files() -> list[Path]:
         path
         for path in sorted(REPO_ROOT.rglob("*.py"))
         if not SKIPPED_DIRS.intersection(path.parts)
+        and not any(STAGING_DIR.search(part) for part in path.parts)
     ]
 
 
