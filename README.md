@@ -126,9 +126,12 @@ guesses surface as a confident closure instead of an error.
 
 ![Architecture](docs/architecture.png)
 
-*One finding's path through the fleet. Source: [`docs/architecture.svg`](docs/architecture.svg).
-Every record written anywhere on this path carries both `real_ts` and `sim_ts`; the deadlines
-in Chase run on the second while the first stays wall clock.*
+*One finding's path through the fleet, and the two ways it can leave. Source:
+[`docs/architecture.svg`](docs/architecture.svg). Every record written anywhere on this path
+carries both `real_ts` and `sim_ts`; the deadlines in Chase run on the second while the first
+stays wall clock. The green return path is the only one that ends a chase for a good reason —
+and it is drawn from Rescan rather than from Chase because a finding is closed by evidence
+arriving from outside, never by the fleet deciding it has pressed for long enough.*
 
 ![Which identity can reach which resource](docs/identities.png)
 

@@ -1,8 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 820" role="img"
-     aria-label="One finding's path through Remediation Zero: the scanner's free text crosses a Model Armor boundary before any model sees it, triage on Gemini proposes a decision, a reviewer on Gemma from a different model family ratifies or rejects it with one retry only, and anything unresolved goes to a human queue. The reporting agent can read every collection but is denied write access to tickets by IAM.">
+     aria-label="One finding's path through Remediation Zero: the scanner's free text crosses a Model Armor boundary before any model sees it, triage on Gemini proposes a decision, a reviewer on Gemma from a different model family ratifies or rejects it with one retry only, and anything unresolved goes to a human queue. A later rescan closes the findings it confirms remediated, but only on assets its coverage manifest says were examined; findings absent from an unscanned asset are left open and still chased, and findings the rescan reports for the first time re-enter at triage like any other. The reporting agent can read every collection but is denied write access to tickets by IAM.">
   <defs>
     <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#16181D"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2F6B3A"/>
     </marker>
     <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#A33A2A"/>
@@ -98,6 +101,23 @@
   <text x="808" y="534" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">Chase</text>
   <text x="808" y="554" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">ticket → 3 nudges → escalate</text>
   <text x="808" y="572" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">paced by simulated time</text>
+
+
+  <!-- The loop closing. A rescan is an input like the first scan, so it sits
+       with the inputs. What makes it a different kind of input is the
+       manifest beside it: without one, absence cannot mean anything. -->
+  <rect x="40" y="372" width="216" height="112" rx="2" fill="#fff" stroke="#16181D" stroke-width="1.5"/>
+  <text x="58" y="398" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">Rescan</text>
+  <text x="58" y="418" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">findings + coverage manifest</text>
+  <text x="58" y="436" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">absence counts as fixed</text>
+  <text x="58" y="454" font-family="Source Sans 3, sans-serif" font-size="13" fill="#4A5058">only on assets it examined</text>
+  <text x="58" y="474" font-family="Source Sans 3, sans-serif" font-size="12" fill="#767D87">new findings re-enter at Triage</text>
+
+  <text x="40" y="508" font-family="Source Sans 3, sans-serif" font-size="13" fill="#9A6608">unverifiable · stays open</text>
+  <text x="40" y="526" font-family="Source Sans 3, sans-serif" font-size="13" fill="#9A6608">and on the SLA clock</text>
+
+  <path d="M230,484 L230,652 L900,652 L900,586" fill="none" stroke="#2F6B3A" stroke-width="1.8" marker-end="url(#ag)"/>
+  <text x="330" y="644" font-family="Source Sans 3, sans-serif" font-size="13" fill="#2F6B3A">resolved · chase stops and the ticket closes</text>
 
   <path d="M1010,546 L1150,546 L1150,364" fill="none" stroke="#A33A2A" stroke-width="1.6" stroke-dasharray="6 5" marker-end="url(#ar)"/>
   <text x="1022" y="538" font-family="Source Sans 3, sans-serif" font-size="13" fill="#A33A2A">still unresolved</text>
