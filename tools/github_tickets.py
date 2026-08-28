@@ -171,6 +171,18 @@ class GitHubTickets:
         Returns None rather than a plausible number when nothing matches. A
         guess here comments on somebody else's issue.
         """
+        row = self._find_issue_row(finding_id)
+        return int(row["number"]) if row else None
+
+    def _find_issue_row(self, finding_id: str) -> Optional[dict]:
+        """The matching issue as GitHub returned it, state included.
+
+        `find_issue` deliberately narrows this to a number, because a number is
+        all a caller needs to comment. `open_issue` needs more: an issue that
+        has been closed is still the issue for this finding, but commenting on
+        it delivers a nudge nobody will read. Splitting the row out keeps both
+        callers honest without a second round trip for the state.
+        """
         marker = f"[{finding_id}]"
         page = 1
         while page <= MAX_LIST_PAGES:
@@ -183,7 +195,7 @@ class GitHubTickets:
                 return None
             for issue in batch:
                 if marker in (issue.get("title") or ""):
-                    return int(issue["number"])
+                    return issue
             if len(batch) < 100:
                 return None
             page += 1
@@ -195,14 +207,31 @@ class GitHubTickets:
             f"without reaching the end. Refusing to report it absent."
         )
 
+    def reopen(self, issue_number: int) -> None:
+        """Reopen a closed issue so what follows it is visible.
+
+        A finding that comes back is the same finding, so it keeps its issue
+        rather than gaining a duplicate. But a closed issue is out of every
+        triage view and most notification settings, so a nudge or an escalation
+        posted to one is delivered in the sense that the API accepted it and in
+        no other sense. Reopening is what makes the delivery true.
+        """
+        self._call("PATCH", f"{API}/repos/{self._repo}/issues/{issue_number}",
+                   {"state": "open"})
+
     def open_issue(self, finding_id: str, title: str, body: str,
                    labels: Optional[list] = None) -> int:
         """File the issue, or return the number of the one already filed."""
-        existing = self.find_issue(finding_id)
-        if existing is not None:
+        row = self._find_issue_row(finding_id)
+        if row is not None:
+            existing = int(row["number"])
+            was_closed = (row.get("state") or "").lower() == "closed"
+            if was_closed:
+                self.reopen(existing)
             logger.info(json.dumps({
                 "event": "github_issue_exists", "finding_id": finding_id,
-                "cycle_id": "-", "issue": existing}, sort_keys=True))
+                "cycle_id": "-", "issue": existing,
+                "reopened": was_closed}, sort_keys=True))
             return existing
 
         created = self._call("POST", f"{API}/repos/{self._repo}/issues", {

@@ -285,3 +285,52 @@ def test_a_decision_with_no_reviewer_reason_still_produces_a_usable_issue():
                       severity="high", remediation="Apply MS15-093.")
     assert "Apply MS15-093." in body
     assert "Reviewer" not in body.split("### Owner")[0].split("### Finding")[0]
+
+
+# -- reusing an issue that was closed ----------------------------------------
+#
+# A finding that comes back is the same finding, so it keeps its issue rather
+# than gaining a duplicate. That is right, and it was silently wrong in one
+# respect: a closed issue is out of every triage view and most notification
+# settings, so the nudge and the escalation that follow were delivered only in
+# the sense that the API returned 201. Found by a dry run in which the graph
+# step ratified RZ-0101, whose issue an earlier rehearsal had closed.
+
+CLOSED_ROW = {"number": 14, "title": "[RZ-0101] CVE-2015-2502 on ast-026 — low",
+              "state": "closed"}
+OPEN_ROW = dict(CLOSED_ROW, state="open")
+
+
+def test_a_closed_issue_is_reopened_before_it_is_reused() -> None:
+    http = ListHTTP([CLOSED_ROW])
+    gh = GitHubTickets(repo="o/r", token="t", http=http)
+
+    assert gh.open_issue("RZ-0101", "title", "body") == 14
+
+    patches = [c for c in http.calls if c[0] == "PATCH"]
+    assert patches, "a closed issue was reused without being reopened"
+    assert patches[0][2] == {"state": "open"}
+
+
+def test_reusing_a_closed_issue_still_files_no_duplicate() -> None:
+    """Reopening must not become a second way to create an issue."""
+    http = ListHTTP([CLOSED_ROW])
+    GitHubTickets(repo="o/r", token="t", http=http).open_issue("RZ-0101", "t", "b")
+
+    posts = [c for c in http.calls if c[0] == "POST"]
+    assert not posts, f"reopening filed a duplicate issue: {posts}"
+
+
+def test_an_already_open_issue_is_not_patched() -> None:
+    """Reopening an open issue is a pointless write against a rate limit."""
+    http = ListHTTP([OPEN_ROW])
+    gh = GitHubTickets(repo="o/r", token="t", http=http)
+
+    assert gh.open_issue("RZ-0101", "title", "body") == 14
+    assert not [c for c in http.calls if c[0] == "PATCH"]
+
+
+def test_find_issue_still_returns_only_a_number() -> None:
+    """The public contract did not widen when the row lookup was split out."""
+    gh = GitHubTickets(repo="o/r", token="t", http=ListHTTP([CLOSED_ROW]))
+    assert gh.find_issue("RZ-0101") == 14

@@ -105,7 +105,7 @@ Those run once and have already run.
 
 ## The path, in order
 
-Total command runtime is about 2m35s, plus the dead-letter check running in another terminal. Narration is what fills the rest.
+Total command runtime is roughly 3–4 minutes, plus the dead-letter check running in another terminal. Model latency is the variable: the same cycle measured 42.7s and 67.2s on the same day. Narration is what fills the rest.
 
 ### 1. The ledger — 20s of talking, no commands
 
@@ -222,6 +222,20 @@ seven deep, and seven clocks escalate in one step because they were already
 aged. **Reset before recording** rather than hoping the corpus is young; the
 step is in pre-flight above for that reason.
 
+After the reset, on the three clocks a single cycle creates:
+
+```
++2d    open_ticket: 3
++4d    nudge: 1, wait: 2
++6d    nudge: 3
++8d    escalate: 1, wait: 2
++10d   human_queue: 1, nudge: 2
+```
+
+Smaller counts than the six-clock run above, and a much clearer arc. This is
+what to expect on camera, because it is what the pre-flight sequence in this
+file actually produces.
+
 **Size the advance to the nudge interval, not to the calendar.** This is the
 correction the dry run earned, and it was earned twice. The runbook first said
 42 days, on the reasoning that the story is "six weeks in eight seconds": every
@@ -264,6 +278,13 @@ each nudge and escalation arrives as a comment on it.
 ```bash
 open https://github.com/Ayliea/remediation-zero-tickets/issues
 ```
+
+A finding that comes back keeps its issue rather than gaining a duplicate, and
+if that issue had been closed it is **reopened** before the nudge lands —
+`"reopened": true` in the log. A comment on a closed issue is out of every
+triage view and most notification settings, so it is delivered in the sense
+that the API returned 201 and in no other sense. Expect to see this on RZ-0101
+if the graph step ratifies it, since earlier rehearsals closed its issue.
 
 The console links to them too: a finding id in the ticket table is an anchor to
 its issue. That is the shortest path from "the fleet decided something" to "a
@@ -471,19 +492,19 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 |---|---|
 | Console, cold | 18.2s |
 | Console, warm | 0.6–1.3s |
-| `tick.sh --limit 3` | 49.4s · 42.7s on 2026-08-28 |
+| `tick.sh --limit 3` | 42.7s–67.2s. Gemma latency varies; budget the high end |
 | `tick.sh` re-run, same cycle | 5.5s (1.2s of work) |
-| `graph.sh`, one finding | 20.4s · 24.1s on 2026-08-28 |
+| `graph.sh`, one finding | 20.4s–59.8s. Same variance, wider |
 | `chase.sh --advance-days N` | 6.8–7.7s each |
 | `exception.sh --sweep` | 1.8s |
-| `report.sh` | 14.9s · 15.9s on 2026-08-28 |
+| `report.sh` | 13.8s–15.9s |
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
 | `verify-controls.sh --only armor,reviewer,resume,secret` | 2m23s |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh`, all five | 5–6 min |
-| `register-agent.sh --apply`, including the version-pinned search | ~13s |
-| `pytest`, 298 tests | 27.4s on 2026-08-28 |
+| `register-agent.sh --apply`, including the version-pinned search | 13–19s |
+| `pytest`, 303 tests | 28.0s |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `reset-derived.sh --confirm`, 29 docs | under 5s |
