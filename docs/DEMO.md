@@ -24,7 +24,7 @@ that produced these numbers also found five defects; they are fixed in
 Durations are wall clock on a warm console and a warm Python import cache.
 The first run of anything in a fresh shell adds roughly two seconds of import.
 
-## Pre-flight, five minutes before recording
+## Pre-flight, six minutes before recording
 
 ```bash
 # 1. Refresh both credentials before anything else touches the cloud. There
@@ -77,10 +77,17 @@ curl -s -o /dev/null -w '%{time_total}s\n' \
 #    Run it twice. The second should be under 1.5s. If it is not, wait and
 #    repeat rather than starting the recording.
 
-# 3. Start the slow control check now, in another terminal. It takes 218
-#    seconds, so starting it here means the result is on screen when you
-#    reach it rather than being waited for on camera.
-./scripts/verify-controls.sh --only probe
+# 3. Start both Cloud Run job checks now, in another terminal, and start
+#    them before anything else in this list. Together they take 5m23s and are
+#    the long pole in pre-flight; everything below runs while they do.
+#    Starting them here is the whole reason step 9 is short.
+#
+#    `secret` belongs here and not in step 9. It is a Cloud Run job exactly
+#    like `probe`, which is easy to miss because only `probe` is named in the
+#    --only help text. Left in step 9 alongside the fast three it put that
+#    step at 258 measured seconds against a 25-second budget: four minutes of
+#    dead air with the camera running.
+./scripts/verify-controls.sh --only probe,secret
 
 # 4. The dead-letter check takes about two minutes. Start it here too.
 ./scripts/verify-events.sh
@@ -379,15 +386,15 @@ write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
 them.
 
-### 9. The controls — 25s
+### 9. The controls — 18s
 
 ```bash
-./scripts/verify-controls.sh --only armor,reviewer,resume,secret
+./scripts/verify-controls.sh --only armor,reviewer,resume
 ```
 
-Then switch to the terminal where `--only probe` has been running since
-pre-flight and show its result. Two of the five checks are Cloud Run jobs, each
-running **as** the identity being tested rather than borrowing it:
+Then switch to the terminal where `--only probe,secret` has been running since
+pre-flight and show its result. Those two of the five checks are Cloud Run
+jobs, each running **as** the identity being tested rather than borrowing it:
 
 ```
 expect DENIED   | got DENIED (PermissionDenied)   | write a ticket        (as rz-reporting)
@@ -542,12 +549,12 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 13.8s–15.9s |
 | `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
-| `verify-controls.sh --only armor,reviewer,resume,secret` | 2m23s |
+| `verify-controls.sh --only probe,secret` (pre-flight) | 5m23s on 2026-08-28 |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh`, all five | 5–6 min |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
-| `pytest`, 303 tests | 28.0s |
+| `pytest`, 319 tests | 26.0s on 2026-08-28 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `reset-derived.sh --confirm`, 29 docs | under 5s |
