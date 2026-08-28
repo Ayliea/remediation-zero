@@ -74,7 +74,8 @@ A finding lands. From there no human is involved until a decision genuinely need
 3. **Ownership and Routing** maps the affected asset to an accountable human.
 4. **Remediation Chase** opens the ticket and pursues it across weeks, nudging on a cadence scaled to the SLA window, escalating once when the deadline passes, and handing the finding to a person when chasing has stopped being useful.
 5. **Exception and Expiry** records risk acceptances with a TTL and re-opens the finding automatically when one lapses.
-6. **Reporting** produces the weekly metrics the analyst would otherwise assemble by hand.
+6. **Rescan Reconciliation** applies the follow-up scan, closing the findings it confirms fixed, reopening the ones that came back, and refusing to close anything it cannot vouch for.
+7. **Reporting** produces the weekly metrics the analyst would otherwise assemble by hand.
 
 Firestore is the record and the tracker is a delivery of it. When
 `GITHUB_TICKET_REPO` and `GITHUB_TOKEN` are set, chase files a real GitHub issue
@@ -88,6 +89,38 @@ ingress and would have to pass Model Armor first, which is a second feature and
 is not built. Email and chat are not wired either. Delivery is also optional and
 its absence is logged rather than silent: with no tracker configured the fleet
 reaches exactly the same decisions and simply has nowhere to put them.
+
+### How it knows a fix landed
+
+Absence is the only evidence of remediation a scanner ever gives you, and two
+very different things produce an identical absence: a host that was examined
+and is clean, and a host that was never examined at all. Closing on absence
+alone cannot tell them apart, and it fails in the expensive direction — an
+un-closed ticket is visible and annoying, a wrongly closed one drops a live
+vulnerability out of the fleet's attention behind a record saying it was
+handled.
+
+So every scan carries the set of assets it actually examined, and a finding is
+resolved only when it is absent **and** its asset is in that set. A finding
+whose asset was never reached is recorded `unverifiable`: untouched, still
+chased, still counted against its SLA. The fleet keeps pressing on exactly the
+things it has no evidence about.
+
+Against the committed corpus, `rescan-01` covers 45 of the 60 assets and
+produces:
+
+| outcome | count | meaning |
+|---|---|---|
+| `resolved` | 106 | absent, and the asset was scanned |
+| `persisting` | 192 | still reported |
+| `unverifiable` | 102 | absent, but the asset was never scanned |
+| `new` | 12 | reported for the first time; enters triage |
+| `regressed` | 0 | reported again after being closed |
+
+`./scripts/rescan.sh --cycle N --dry-run` prints exactly that before writing
+anything. A scan whose findings name an asset its own manifest excludes is
+refused rather than reconciled: preferring either half is a guess, and both
+guesses surface as a confident closure instead of an error.
 
 ## Architecture
 

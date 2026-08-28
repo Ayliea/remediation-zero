@@ -74,7 +74,9 @@ One responsibility each. No agent reaches outside its own collections.
 
 No agent owns `human_queue`. Any agent may append to it; nothing reads from it except the console UI. It is the terminal state for anything the fleet could not resolve safely.
 
-Read-only reference collections, written by the seed script and never by an agent: `findings`, `assets`, `owners`. Derived state: `sla_clocks`.
+Read-only reference collections, written by the seed and rescan scripts and never by an agent: `findings`, `assets`, `owners`, `scans`. Derived state: `sla_clocks`.
+
+`scans` holds each scan's coverage manifest, and `findings.status` is the only thing that marks a finding resolved. Both are written by `scripts/rescan.py`, never by an agent. Chase reads the finding and closes its own ticket; nothing outside chase writes `tickets`.
 
 ## Commands
 
@@ -101,6 +103,9 @@ python3 -m venv .venv
 ./scripts/verify-events.sh                    # prove the dead-letter queue
 ./scripts/register-agent.sh --apply           # publish to Agent Registry, then prove discovery
 ./scripts/tick.sh                             # run one cycle
+.venv/bin/python scripts/gen_rescan.py        # regenerate the follow-up scan; fixed seed
+./scripts/rescan.sh --cycle N --dry-run       # what a rescan would close. ALWAYS read this first
+./scripts/rescan.sh --cycle N                 # apply it. the only path that resolves a finding
 ./scripts/verify-controls.sh                  # prove the five security claims
 ./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~33s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
@@ -143,7 +148,10 @@ Stop and ask rather than deciding unilaterally:
 
 - Adding any dependency not already in `requirements.txt`
 - Adding any Google Cloud service not listed in the stack table
-- Changing the Firestore schema after 2026-08-28
+- Changing the Firestore schema after 2026-08-28. Asked and agreed on 2026-08-28: the rescan
+  path adds the `scans` collection, and `findings` gains `status: resolved` with
+  `resolved_by_scan`, `resolved_reason`, `resolved_cycle`, both resolution stamps, and the
+  `regressed_*` fields. Nothing existing changed shape.
 - Anything that would delete or recreate a cloud resource
 - Any change that removes an observable behavior
 
