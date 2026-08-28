@@ -264,3 +264,37 @@ def test_the_store_keeps_the_record_not_just_the_key():
     assert record.finding_id == "CVE-2024-1234"
     assert record.action == "ticket"
     assert record.cycle == 7
+
+
+# ---------------------------------------------------------------------------
+# The convention, enforced rather than remembered
+# ---------------------------------------------------------------------------
+
+def test_every_module_that_guards_a_side_effect_has_a_suite():
+    """CLAUDE.md: write the test alongside the tool for anything carrying an
+    idempotency key or a permission boundary.
+
+    That rule was followed for some modules and quietly not for others, and
+    the gap was invisible because nothing checked. Six writers reached the
+    deployed system with no tests of their own. A convention nobody can
+    forget is worth more than one everybody agrees with, so this fails on the
+    next module that acquires a guard without acquiring a suite.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    missing = []
+    for module in sorted(root.glob("tools/*.py")) + sorted(root.glob("worker/*.py")):
+        if module.name in ("__init__.py", "idempotency.py"):
+            continue
+        if "IdempotencyGuard" not in module.read_text(encoding="utf-8"):
+            continue
+        if not (root / "tests" / f"test_{module.stem}.py").exists():
+            missing.append(f"{module.parent.name}/{module.name}")
+
+    assert not missing, (
+        "These modules guard a side effect and have no test suite. Every one "
+        "of them writes something a person sees, so a bug here is a duplicate "
+        "ticket or a nudge that never sent:\n"
+        + "\n".join(f"  {name} -> tests/test_{Path(name).stem}.py" for name in missing)
+    )
