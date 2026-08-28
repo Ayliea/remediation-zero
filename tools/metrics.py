@@ -39,14 +39,30 @@ def _rate(numerator: int, denominator: int) -> float:
     return numerator / denominator
 
 
+def _latest_scan(scans: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The most recent scan, by wall clock. Empty mapping if none have run."""
+    if not scans:
+        return {}
+    return max(scans, key=lambda scan: scan.get("real_ts", 0))
+
+
 def compute_metrics(
     decisions: Sequence[Mapping[str, Any]],
     tickets: Sequence[Mapping[str, Any]],
     sla_clocks: Sequence[Mapping[str, Any]],
     human_queue: Sequence[Mapping[str, Any]],
     exceptions: Sequence[Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    scans: Sequence[Mapping[str, Any]],
+    assets: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Everything a report is allowed to state."""
+    """Everything a report is allowed to state.
+
+    `findings`, `scans` and `assets` are required rather than defaulted. A
+    default of `()` would let a caller that forgot them report zero
+    remediation, which is indistinguishable from a week in which nothing was
+    fixed -- and that is the one number here nobody would question.
+    """
     ratified = sum(1 for d in decisions if d.get("outcome") == "ratified")
     to_human = sum(1 for d in decisions if d.get("outcome") == "human_queue")
     unavailable = sum(1 for d in decisions if d.get("outcome") == "unavailable")
@@ -58,6 +74,10 @@ def compute_metrics(
         d.get("proposed_severity") for d in decisions if d.get("proposed_severity")
     )
     queue_kinds = Counter(item.get("kind", "adjudication") for item in human_queue)
+
+    resolved_findings = sum(1 for f in findings if f.get("status") == "resolved")
+    latest = _latest_scan(scans)
+    scan_counts = latest.get("counts", {})
 
     return {
         # Adjudication
@@ -89,4 +109,30 @@ def compute_metrics(
         "exceptions_active": sum(1 for e in exceptions if e.get("status") == "active"),
         "exceptions_expired": sum(1 for e in exceptions if e.get("status") == "expired"),
         "severity_mix": dict(severities),
+        # Remediation. The outcome, as distinct from the activity above: every
+        # other number in this dict measures how hard the fleet worked, and
+        # none of them say whether anything actually got fixed.
+        "findings_total": len(findings),
+        "findings_resolved": resolved_findings,
+        "findings_open": len(findings) - resolved_findings,
+        # Deliberately not called `remediation_rate`. The denominator is what
+        # the last scan actually examined, and the name says so, because the
+        # bare rate is a vanity metric: examine a tenth of the estate, close
+        # everything you see, report 100%. A metric that can only be quoted
+        # with its qualification attached cannot be quoted without it.
+        "remediated_of_scanned": _rate(scan_counts.get("resolved", 0),
+                                       scan_counts.get("resolved", 0)
+                                       + scan_counts.get("persisting", 0)),
+        # What the fleet refuses to vouch for. This is the honest counterpart
+        # to the line above and the report is required to carry both.
+        "unverifiable": scan_counts.get("unverifiable", 0),
+        "regressions": scan_counts.get("regressed", 0),
+        "newly_discovered": scan_counts.get("new", 0),
+        # Coverage, which is what makes the rate above mean anything.
+        "latest_scan": latest.get("scan_id"),
+        "assets_total": len(assets),
+        "assets_covered": len(latest.get("covered_asset_ids", ())),
+        "coverage_rate": _rate(len(latest.get("covered_asset_ids", ())),
+                               len(assets)),
+        "scans_recorded": len(scans),
     }

@@ -69,6 +69,11 @@ def main() -> int:
         sla_clocks=rows("sla_clocks"),
         human_queue=rows("human_queue"),
         exceptions=rows("exceptions"),
+        # Reference collections. Reporting reads them and, under its own
+        # identity, cannot write them -- which the probe control proves.
+        findings=rows("findings"),
+        scans=rows("scans"),
+        assets=rows("assets"),
     )
 
     summary = write_summary(metrics, os.environ["REASONING_MODEL"], rm._client())

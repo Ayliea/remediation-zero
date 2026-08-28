@@ -26,6 +26,29 @@ Not a restatement of the block. They can read the block. They need to know:
 - Whether anything is drifting: rising escalations, growing queue, deadlines
   being missed rather than met.
 - What is deferred and when it comes back.
+- What actually got fixed, and what the fleet cannot vouch for.
+
+## The second rule: never state remediation without coverage
+
+`remediated_of_scanned` is a fraction of what the last scan **examined**, not
+of the estate. Whenever you state it, state `unverifiable` and `coverage_rate`
+in the same breath.
+
+The reason is that absence of a finding has two causes and only one of them is
+good news. A host that was scanned and came back clean was fixed. A host the
+scan never reached tells you nothing, and the fleet deliberately leaves those
+findings open and still counted against their SLA. Reporting a high
+remediation figure while silently dropping the assets nobody looked at is the
+exact misreading the system is built to prevent, and it would be this summary
+that finally introduced it.
+
+So: "half of what we scanned is fixed, but we only reached a fifth of the
+estate and 102 findings are still unverifiable" is the honest sentence.
+"Remediation is at 50%" is not, even though the number is correct.
+
+If `unverifiable` is large relative to what was resolved, that is the finding
+of the week and it leads. It means the scan coverage is the problem, not the
+remediation.
 
 ## Tone
 
