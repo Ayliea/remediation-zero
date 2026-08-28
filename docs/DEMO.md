@@ -69,7 +69,10 @@ export GITHUB_TOKEN="$(gh auth token)"
 #    human queue and the idempotency ledger all survive, so the resume control
 #    still has something to check itself against. Issues already filed on the
 #    tracker are not deleted -- GitHub is not ours to reset -- so close them by
-#    hand first if the recording pans across the issue list.
+#    hand first if the recording pans across the issue list. Closing them is
+#    cosmetic: find_issue lists with state=all, so a closed issue still owns
+#    its finding. The demo uses --start 10 to work on findings no rehearsal has
+#    touched, which is what actually keeps the tracker shot honest.
 
 # 8. Pick a cycle number nothing has used. Derive it rather than hardcoding
 #    one: every rehearsal consumes more, so a literal in this file is correct
@@ -117,8 +120,16 @@ rather than smoothing it away.
 ### 2. A cycle — 49s
 
 ```bash
-./scripts/tick.sh --cycle $C --limit 3
+./scripts/tick.sh --cycle $C --start 10 --limit 3
 ```
+
+`--start 10` picks RZ-0010 through RZ-0012. The default start is 1, and
+RZ-0001 and RZ-0003 already carry issues on the tracker from earlier
+rehearsals. That matters because `find_issue` lists with `state=all`: a closed
+issue still counts as the issue for that finding, so chase would comment on a
+closed ticket rather than open a new one, and the "watch it file a real ticket"
+shot would silently not happen. Closing the rehearsal issues tidies the list
+but does not free the finding — only picking an untouched one does.
 
 Three findings triaged, adjudicated, and assigned. Expect roughly two ratified
 and one routed to a person after two rejections. The rejection reasons are the
@@ -131,7 +142,7 @@ spots.
 ### 3. The same cycle again — 6s
 
 ```bash
-./scripts/tick.sh --cycle $C --limit 3
+./scripts/tick.sh --cycle $C --start 10 --limit 3
 ```
 
 `skipped_already_adjudicated` three times, and `preserved_outcomes` showing the
