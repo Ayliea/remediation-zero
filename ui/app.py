@@ -38,6 +38,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(REPO_ROOT / ".env")
@@ -149,6 +150,13 @@ def snapshot() -> dict:
     tickets = rows("tickets")
     exceptions = rows("exceptions")
     cycles = rows("cycles")
+    # The scan manifests. Their stored counts are read, never recomputed: the
+    # rescan wrote what it concluded, and a console that re-derives it can
+    # disagree with the record it exists to display.
+    scans = sorted(rows("scans", limit=20),
+                   key=lambda scan: scan.get("real_ts", 0), reverse=True)
+    latest_scan = scans[0] if scans else {}
+
     reports = sorted(
         (d.to_dict() for d in reports_db().collection("reports").limit(10).stream()),
         key=lambda r: r.get("real_ts", 0),
@@ -173,7 +181,19 @@ def snapshot() -> dict:
                      "human_queue", "idempotency")
     }
 
+    # Kept out of `counts`, which is a strip of raw collection sizes. This is
+    # a filtered count, not a collection, and putting it there would render it
+    # beside `findings 412` as though the two were the same kind of number.
+    resolved_total = int(
+        client.collection("findings")
+        .where(filter=FieldFilter("status", "==", "resolved"))
+        .count().get()[0][0].value
+    )
+
     return {
+        "resolved_total": resolved_total,
+        "scans": scans,
+        "latest_scan": latest_scan,
         "human_queue": human_queue,
         "sla": sla,
         "decisions": decisions,
@@ -196,6 +216,9 @@ STYLE = """
   --real:#0B7A6B;      /* wall clock. evidence. */
   --sim:#3B5BDB;       /* scenario time. */
   --breach:#A33A2A; --pending:#9A6608; --ok:#2F6B3A;
+  /* remediation, paired the way the clocks are: neither number means
+     anything without the other beside it. */
+  --fixed:#2F6B3A; --unknown:#9A6608;
 }
 *{box-sizing:border-box}
 body{
@@ -229,9 +252,16 @@ body{
 .clock-k::before{content:"";width:22px;height:2px;display:inline-block}
 .clock--real .clock-k{color:var(--real)} .clock--real .clock-k::before{background:var(--real)}
 .clock--sim .clock-k{color:var(--sim)} .clock--sim .clock-k::before{background:var(--sim)}
+.clock--fixed .clock-k{color:var(--fixed)} .clock--fixed .clock-k::before{background:var(--fixed)}
+.clock--unknown .clock-k{color:var(--unknown)} .clock--unknown .clock-k::before{background:var(--unknown)}
+.coverage{padding:14px 0 22px;border-bottom:1px solid var(--rule);
+  color:var(--ink-2);font-size:13px;line-height:1.55}
+.coverage b{color:var(--ink);font-weight:600}
+.coverage code{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--ink-2)}
 .clock-v{font-family:"IBM Plex Mono",monospace;font-weight:600;
   font-size:clamp(30px,5.4vw,46px);line-height:1;letter-spacing:-.02em;margin:0}
 .clock--real .clock-v{color:var(--real)} .clock--sim .clock-v{color:var(--sim)}
+.clock--fixed .clock-v{color:var(--fixed)} .clock--unknown .clock-v{color:var(--unknown)}
 .clock-n{color:var(--ink-2);font-size:13px;margin:11px 0 0;max-width:44ch}
 
 /* ---- ledger sections ---- */
@@ -312,6 +342,47 @@ def render(data: dict) -> str:
     session_age = now - SESSION_CREATED if SESSION_CREATED else 0
     sim_now = data["sim_now"]
     counts = data["counts"]
+    latest_scan = data.get("latest_scan") or {}
+    scan_counts = latest_scan.get("counts", {})
+
+    # --- remediation: paired, because one number without the other misleads --
+    # The clocks above are rendered as a pair because they mean different
+    # things and have to be read together. These two are the same shape: a
+    # count of what was fixed, standing alone, invites exactly the reading the
+    # coverage gate exists to prevent -- close what you looked at, report it as
+    # though you looked everywhere.
+    if latest_scan:
+        covered = len(latest_scan.get("covered_asset_ids", ()))
+        assets_total = counts.get("assets", 0)
+        unverifiable = scan_counts.get("unverifiable", 0)
+        regressed = scan_counts.get("regressed", 0)
+        regressed_note = (
+            f" <b>{regressed}</b> had been closed by an earlier scan and came back."
+            if regressed else ""
+        )
+        remediation = f"""<div class="clocks">
+  <div class="clock clock--fixed">
+    <p class="clock-k">remediated · confirmed absent</p>
+    <p class="clock-v">{data.get('resolved_total', 0)}</p>
+    <p class="clock-n">Findings a scan stopped reporting on an asset it had actually
+    examined. Resolution ends the chase: the next cycle closes the ticket and the
+    tracker issue with it.</p>
+  </div>
+  <div class="clock clock--unknown">
+    <p class="clock-k">unverifiable · not examined</p>
+    <p class="clock-v">{unverifiable}</p>
+    <p class="clock-n">Also absent, but nothing looked at their assets. Absence is not
+    evidence here, so these stay open, still chased, still on the SLA clock.</p>
+  </div>
+</div>
+<p class="coverage"><code>{esc(str(latest_scan.get('scan_id', '—')))}</code> examined
+<b>{covered}</b> of <b>{assets_total}</b> assets. A scan that reached nothing reports
+exactly what a fleet that fixed everything reports, so the manifest of what was
+examined is stored with the scan and every closure is checked against it.{regressed_note}</p>"""
+    else:
+        remediation = """<p class="coverage">No rescan has run yet, so nothing is
+resolved and nothing is unverifiable. Until one does, the fleet can open and press
+but cannot confirm.</p>"""
 
     # --- human queue: the terminal state, so it leads -----------------------
     hq_rows = []
@@ -489,6 +560,8 @@ def render(data: dict) -> str:
     wall clock, the gap is shown on every record rather than smoothed over.</p>
   </div>
 </div>
+
+{remediation}
 
 <div class="counts">{count_items}</div>
 
