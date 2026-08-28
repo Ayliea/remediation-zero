@@ -1,0 +1,32 @@
+# Copyright 2026 Daviyon Daniels
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The console image, built the same way the worker image already is.
+#
+# `gcloud run deploy --source` generates its own build config and does not set
+# a logging option. Cloud Build runs as the compute default service account
+# here, and a build with a user-specified service account and no logging option
+# is rejected -- as INTERNAL_ERROR with an empty statusDetail, which names
+# neither the cause nor the fix. Two console deploys sat QUEUED for forty
+# minutes and then failed that way on 2026-08-28, having worked the day before.
+#
+# cloudbuild.worker.yaml already carried CLOUD_LOGGING_ONLY for this reason.
+# The console now builds through the same path rather than through the one
+# convenience flag that cannot express the option it needs.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "Dockerfile", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]
+options:
+  logging: CLOUD_LOGGING_ONLY

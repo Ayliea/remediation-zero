@@ -32,11 +32,23 @@ REGION="${AGENT_ENGINE_LOCATION:-us-central1}"
 SERVICE="remediation-zero-console"
 SA="console-reader@${GOOGLE_CLOUD_PROJECT}.iam.gserviceaccount.com"
 
+IMAGE="us-central1-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/cloud-run-source-deploy/console"
+
+# Built through an explicit config rather than --source, so the build can set
+# CLOUD_LOGGING_ONLY. See cloudbuild.console.yaml for what happens without it.
+echo "Building ${IMAGE}..."
+gcloud builds submit \
+  --project="${GOOGLE_CLOUD_PROJECT}" \
+  --region="${REGION}" \
+  --config=cloudbuild.console.yaml \
+  --substitutions="_IMAGE=${IMAGE}" \
+  --quiet
+
 echo "Deploying ${SERVICE} to ${REGION}..."
 gcloud run deploy "${SERVICE}" \
   --project="${GOOGLE_CLOUD_PROJECT}" \
   --region="${REGION}" \
-  --source=. \
+  --image="${IMAGE}" \
   --service-account="${SA}" \
   --allow-unauthenticated \
   --min-instances=0 \
