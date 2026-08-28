@@ -386,7 +386,7 @@ write anything but reports. It describes figures it was handed. The console
 prints those figures beside the prose so the narrative can be checked against
 them.
 
-### 9. The controls — 18s
+### 9. The controls — 33s
 
 ```bash
 ./scripts/verify-controls.sh --only armor,reviewer,resume
@@ -548,7 +548,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `chase.sh --advance-days N` | 6.8–7.7s each |
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 13.8s–15.9s |
-| `verify-controls.sh --only armor,reviewer,resume` | 17.2s |
+| `verify-controls.sh --only armor,reviewer,resume` | 33s on 2026-08-28. Was 17.2s while the reviewer check was re-reading a cached decision instead of calling the models |
 | `verify-controls.sh --only probe,secret` (pre-flight) | 5m23s on 2026-08-28 |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |

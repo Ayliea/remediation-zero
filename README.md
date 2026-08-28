@@ -40,7 +40,7 @@ is worth less than one they can break.
 - **It files real tickets in a real tracker.** Chase opens a GitHub issue
   carrying the ratified severity, the deadline, the specific remediation and
   the reviewer's own reason for accepting it, then comments as it nudges and
-  escalates. → [the issues it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues)
+  escalates. → [the issues it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues?q=is%3Aissue)
 
 - **The deployed agent answers, and tells you what it cannot do.** It reads a
   finding, delegates to Gemini for a proposal and Gemma to adjudicate, and
@@ -81,7 +81,7 @@ Firestore is the record and the tracker is a delivery of it. When
 carrying the ratified severity, the deadline, the specific remediation, the
 evidence cited, and the reviewer's own reason for accepting it — then comments
 on that issue as it nudges, escalates, and finally hands the finding to a
-person. [See the tickets it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues).
+person. [See the tickets it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues?q=is%3Aissue).
 
 That direction is one-way on purpose. Reading replies back would be untrusted
 ingress and would have to pass Model Armor first, which is a second feature and

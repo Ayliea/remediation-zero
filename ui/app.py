@@ -165,8 +165,10 @@ def snapshot() -> dict:
         + [e.get("expires_sim_ts", 0) or 0 for e in exceptions]
     )
 
+    # int(): Firestore's count aggregation returns a float, so an empty
+    # collection renders as "0.0" on the front page. A count is a whole number.
     counts = {
-        name: client.collection(name).count().get()[0][0].value
+        name: int(client.collection(name).count().get()[0][0].value)
         for name in ("findings", "assets", "owners", "decisions", "tickets",
                      "human_queue", "idempotency")
     }

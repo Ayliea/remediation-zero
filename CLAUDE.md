@@ -102,7 +102,7 @@ python3 -m venv .venv
 ./scripts/register-agent.sh --apply           # publish to Agent Registry, then prove discovery
 ./scripts/tick.sh                             # run one cycle
 ./scripts/verify-controls.sh                  # prove the five security claims
-./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~17s
+./scripts/verify-controls.sh --only armor,reviewer,resume  # the fast three, ~33s
 ./scripts/reset-derived.sh                    # dry run: what a reset would clear
 ./scripts/reset-derived.sh --confirm          # clears sla_clocks + tickets ONLY
 terraform -chdir=infra plan                   # ALWAYS read this first
