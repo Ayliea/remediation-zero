@@ -155,6 +155,26 @@ class TicketWriter:
                               cycle=cycle, now_sim_ts=now_sim_ts, state=state)
                 return f"escalate:{finding_id}"
 
+            if action is ChaseAction.CLOSE_TICKET:
+                # The ticket keeps its history rather than being deleted. What
+                # the fleet did about a finding stays readable after the
+                # finding stops being a problem, which is what makes the
+                # closure auditable instead of merely tidy.
+                ticket_ref.update(
+                    {
+                        "status": "resolved",
+                        "resolved_cycle": cycle,
+                        "resolved_real_ts": stamp.real_ts,
+                        "resolved_sim_ts": now_sim_ts,
+                        "resolved_by_scan": getattr(state, "resolved_by_scan", None),
+                        "last_contact_sim_ts": now_sim_ts,
+                        "history": firestore.ArrayUnion([entry]),
+                    }
+                )
+                self._deliver("close_ticket", finding_id, ticket_ref, owner=owner,
+                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
+                return f"close_ticket:{finding_id}"
+
             if action is ChaseAction.HUMAN_QUEUE:
                 self._client.collection(HUMAN_QUEUE).document(
                     f"unresolved-{finding_id}"

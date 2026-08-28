@@ -334,3 +334,37 @@ def test_find_issue_still_returns_only_a_number() -> None:
     """The public contract did not widen when the row lookup was split out."""
     gh = GitHubTickets(repo="o/r", token="t", http=ListHTTP([CLOSED_ROW]))
     assert gh.find_issue("RZ-0101") == 14
+
+
+# --- closing what a rescan confirmed ----------------------------------------
+
+def test_closing_an_issue_marks_it_completed_not_merely_closed():
+    """GitHub distinguishes "completed" from "not planned", and the two read
+    very differently to a person auditing a vulnerability queue. A remediated
+    finding was completed; recording it as not planned would misstate the
+    outcome in the one place a reviewer looks."""
+    http = FakeHTTP()
+    tickets = GitHubTickets(repo="Ayliea/x", token="t", http=http)
+
+    tickets.close_issue(42)
+
+    method, url, body = http.calls[-1]
+    assert method == "PATCH"
+    assert url.endswith("/issues/42")
+    assert body == {"state": "closed", "state_reason": "completed"}
+
+
+def test_closing_is_the_mirror_of_reopening():
+    """reopen and close_issue must target the same resource the same way, or a
+    finding that comes back cannot be reopened on the issue it closed."""
+    http = FakeHTTP()
+    tickets = GitHubTickets(repo="Ayliea/x", token="t", http=http)
+
+    tickets.close_issue(7)
+    tickets.reopen(7)
+
+    closed, reopened = http.calls[-2], http.calls[-1]
+    assert closed[0] == reopened[0] == "PATCH"
+    assert closed[1] == reopened[1]
+    assert closed[2]["state"] == "closed"
+    assert reopened[2]["state"] == "open"

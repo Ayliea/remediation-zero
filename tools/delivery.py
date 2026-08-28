@@ -24,6 +24,7 @@ is a single comment. Creating is the exception, and looking before creating is
 the recovery path for a ticket whose number was lost.
 """
 
+import json
 import logging
 from typing import Any, Optional
 
@@ -89,6 +90,15 @@ class GitHubDelivery:
             return None
 
         self._gh.comment(number, _comment(event, cycle, now_sim_ts, state, owner))
+
+        # Comment first, then close. The reverse posts into an issue that is
+        # already out of every triage view, so the reason a person most wants
+        # is the one they are least likely to see.
+        if event == "close_ticket":
+            self._gh.close_issue(number)
+            logger.info(json.dumps({
+                "event": "issue_closed", "finding_id": finding_id,
+                "cycle_id": str(cycle), "issue": number}, sort_keys=True))
         return None
 
     def _latest_decision(self, finding_id: str) -> dict:
@@ -192,5 +202,16 @@ def _comment(event: str, cycle: int, now_sim_ts: float, state: Any, owner: Any) 
             f"the SLA. The fleet has no further action that does not involve a "
             f"human, so it has stopped rather than continuing to nudge. This is "
             f"a successful outcome, not a failure."
+        )
+    if event == "close_ticket":
+        scan = getattr(state, "resolved_by_scan", None) or "a later scan"
+        return (
+            f"**Resolved** · cycle {cycle}\n\n"
+            f"{scan} did not report this finding, and the asset it was found "
+            f"on was covered by that scan. Absence on a scanned asset is what "
+            f"the fleet treats as evidence of remediation — absence on an "
+            f"asset that was never examined is not, and would have left this "
+            f"open.\n\n"
+            f"Closing. Nothing further is required from {who}."
         )
     return f"Chase action `{event}` · cycle {cycle}."

@@ -219,6 +219,21 @@ class GitHubTickets:
         self._call("PATCH", f"{API}/repos/{self._repo}/issues/{issue_number}",
                    {"state": "open"})
 
+    def close_issue(self, issue_number: int) -> None:
+        """Close an issue whose finding a rescan confirmed remediated.
+
+        The mirror of `reopen`, and it exists for the same reason: an issue
+        left open on finished work is indistinguishable in every triage view
+        from one that still needs doing. A fleet that files tickets and never
+        closes them teaches people to stop reading tickets, which costs more
+        than never having filed them.
+
+        The closing comment is posted before this, so the issue carries its
+        own reason rather than simply disappearing from the open list.
+        """
+        self._call("PATCH", f"{API}/repos/{self._repo}/issues/{issue_number}",
+                   {"state": "closed", "state_reason": "completed"})
+
     def open_issue(self, finding_id: str, title: str, body: str,
                    labels: Optional[list] = None) -> int:
         """File the issue, or return the number of the one already filed."""
