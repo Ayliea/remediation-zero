@@ -12,11 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SimClock: the single source of time for the entire system.
+"""SimClock: the single source of time for the system's records.
 
-Nothing anywhere calls `datetime.now()`, `time.time()`, or a database server
-timestamp directly. Every time read goes through here, and every persisted
-record carries both stamps that `now()` returns.
+No module that produces a persisted record reads a clock of its own. Every
+stamp on every record comes from here, carrying both of the values `now()`
+returns. No database server timestamp is used anywhere.
+
+The rule is scoped to records rather than to the whole repository, because
+some code legitimately measures wall time without producing one: poll loops
+that need an elapsed-time deadline, the console rendering how long the
+long-running session has been alive, and this module, which is where the
+single `time.time` reference lives. Those sites are enumerated with their
+reasons in `tests/test_clock.py`, which fails closed: a module that reads a
+clock without being on that list is a test failure until someone writes down
+why it is allowed to.
+
+Saying "nothing anywhere" would read better and would not be true, and an
+invariant that overstates itself is one nobody bothers to check.
 
 The two stamps mean different things and only one of them is negotiable:
 

@@ -19,7 +19,9 @@ That claim is only worth something if real_ts is never falsifiable, so these
 tests are as much about what the clock refuses to do as what it does.
 """
 
+import ast
 import time
+from pathlib import Path
 
 import pytest
 
@@ -98,3 +100,171 @@ def test_unrecognised_mode_is_rejected_rather_than_guessed():
     fabricate time; guessing 'real' would break a demo quietly."""
     with pytest.raises(ValueError, match="SIM_CLOCK_MODE"):
         SimClock.from_env({"SIM_CLOCK_MODE": "simulated"})
+
+
+# ---------------------------------------------------------------------------
+# The rule, enforced across the repository rather than asserted in prose
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+SKIPPED_DIRS = frozenset({".venv", ".git", "__pycache__", ".pytest_cache", ".terraform"})
+
+#: Every module allowed to read a wall clock directly, and why. The allowlist
+#: is the test: anything absent from it fails, so a new clock read has to be
+#: argued for in writing rather than merely committed. Recording the reason is
+#: what stops the list growing by reflex each time the test goes red.
+CLOCK_READERS = {
+    "tools/clock.py":
+        "the single source. Holds the one `time.time` reference in the "
+        "system; everything that stamps a record delegates to now().",
+    "tests/test_clock.py":
+        "bounds-checks the clock against the wall clock, so it has to read "
+        "the wall clock independently to have anything to compare against.",
+    "scripts/verify_events.py":
+        "poll deadlines while waiting for the dead-letter queue to drain. "
+        "Measures elapsed time and writes no record.",
+    "scripts/session-init.py":
+        "prints the age of an existing session inside a refusal message. It "
+        "writes no record; refusing is the whole point of the script.",
+    "ui/app.py":
+        "renders how long the long-running session has been alive, which is "
+        "a wall-clock quantity no record carries. The console is read-only.",
+}
+
+#: Wall-clock reads, matched on the last two components of the dotted name so
+#: that `from datetime import datetime` and `import datetime` are both caught.
+#: The receiver is part of the match on purpose: `clock.now()` is the correct
+#: call everywhere in this system, and matching the bare attribute `.now`
+#: would reject every correct call site and accept nothing.
+WALL_CLOCK_READS = frozenset({
+    "time.time", "time.time_ns",
+    "datetime.now", "datetime.utcnow",
+    "date.today",
+})
+
+#: `from time import time` makes the read a bare name, out of reach of the
+#: dotted match above, so the import itself is what gets caught.
+WALL_CLOCK_IMPORTS = frozenset({("time", "time"), ("time", "time_ns")})
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    """Reconstruct an attribute chain such as `datetime.datetime.now`."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _clock_reads(path: Path) -> list[tuple[int, str]]:
+    """Every direct clock read in one file, located by line.
+
+    Parsed rather than grepped, because a substring search cannot tell a call
+    from prose that mentions one. `tools/ingest.py` documents that it does not
+    read a clock, naming the function it avoids; a grep reports that sentence
+    as the violation it exists to deny.
+    """
+    hits: set[tuple[int, str]] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            # An Attribute node is reached for a call and for a bare reference
+            # alike: `time.time()` and `source=time.time` surface the same
+            # node. The second is how a clock read would otherwise be smuggled
+            # past a check that only looked at calls.
+            if node.attr == "SERVER_TIMESTAMP":
+                hits.add((node.lineno, "SERVER_TIMESTAMP"))
+                continue
+            name = _dotted_name(node)
+            if name and ".".join(name.split(".")[-2:]) in WALL_CLOCK_READS:
+                hits.add((node.lineno, name))
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if (node.module, alias.name) in WALL_CLOCK_IMPORTS:
+                    hits.add((node.lineno, f"from {node.module} import {alias.name}"))
+
+    return sorted(hits)
+
+
+def _source_files() -> list[Path]:
+    """Every Python file in the repository, vendored code excluded."""
+    return [
+        path
+        for path in sorted(REPO_ROOT.rglob("*.py"))
+        if not SKIPPED_DIRS.intersection(path.parts)
+    ]
+
+
+def test_the_scan_covers_the_whole_repository():
+    """A scan that silently matched nothing would pass every check below it."""
+    scanned = _source_files()
+    assert len(scanned) > 30, f"only {len(scanned)} files scanned; the walk is broken"
+    assert REPO_ROOT / "tools" / "clock.py" in scanned
+
+
+def test_no_module_outside_the_allowlist_reads_its_own_clock():
+    """Constraint 6, across the repository rather than in one module.
+
+    This rule used to be checked in exactly one file, which meant it held
+    there and was unverified in the other forty.
+    """
+    offenders = {}
+    for path in _source_files():
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        if relative in CLOCK_READERS:
+            continue
+        if reads := _clock_reads(path):
+            offenders[relative] = reads
+
+    assert not offenders, (
+        "These modules read a clock directly. Every stamp on a persisted "
+        "record must come from SimClock.now(). If one of these genuinely "
+        "writes no record, add it to CLOCK_READERS with the reason why:\n"
+        + "\n".join(
+            f"  {name}: " + ", ".join(f"line {line} {what}" for line, what in reads)
+            for name, reads in sorted(offenders.items())
+        )
+    )
+
+
+def test_the_allowlist_has_no_stale_entries():
+    """An allowlist that outlives the reads it excuses stops describing the
+    system and starts concealing it. An entry naming a file that no longer
+    exists, or one that no longer reads a clock, is a failure in the same way
+    an unexcused read is."""
+    stale = []
+    for relative in CLOCK_READERS:
+        path = REPO_ROOT / relative
+        if not path.exists():
+            stale.append(f"{relative}: no such file")
+        elif not _clock_reads(path):
+            stale.append(f"{relative}: no longer reads a clock, so the entry is dead")
+
+    assert not stale, "Stale CLOCK_READERS entries:\n" + "\n".join(
+        f"  {entry}" for entry in stale
+    )
+
+
+def test_nothing_that_writes_a_record_is_on_the_allowlist():
+    """The allowlist exists for scripts, tests and the read-only console.
+
+    An agent, a worker or a tool is where records are stamped, so one
+    appearing here would mean the rule had been relaxed in precisely the place
+    it is meant to hold. tools/clock.py is the sole exception, because it is
+    the source everything else delegates to.
+    """
+    writers = [
+        name
+        for name in CLOCK_READERS
+        if name.startswith(("agents/", "worker/"))
+        or (name.startswith("tools/") and name != "tools/clock.py")
+    ]
+    assert not writers, (
+        "A record-writing module has been excused from the clock rule: "
+        + ", ".join(writers)
+    )
