@@ -26,8 +26,8 @@ is worth less than one they can break.
   falls in a specific place. → `./scripts/verify-controls.sh`
 
 - **Every decision is challenged by a reviewer on a different model family, and
-  it disagrees.** 70 rejections across 100 verdicts; 48% of findings ratified;
-  37 of 63 needed a second proposal. The rate is reported rather than tuned
+  it disagrees.** 79 rejections across 121 verdicts; 53% of findings ratified;
+  42 of 79 needed a second proposal. The rate is reported rather than tuned
   away, because a reviewer that ratifies everything is indistinguishable from
   having no reviewer. → `./scripts/tick.sh --cycle 1 --limit 3`
 
@@ -44,8 +44,8 @@ is worth less than one they can break.
 
 - **The deployed agent answers, and tells you what it cannot do.** It reads a
   finding, delegates to Gemini for a proposal and Gemma to adjudicate, and
-  recalls cycles it never ran from Memory Bank — cycles filed by scheduled
-  workers whose processes have long since exited. It holds no credential that
+  recalls cycles it never ran from Memory Bank — cycles filed days ago by
+  processes that have long since exited. It holds no credential that
   can write, and says so when asked. → the playground link above
 
 Where a control could not be built as designed, the limit is named in place
@@ -149,7 +149,9 @@ The design decisions worth defending:
 
 **Injectable clock.** All time reads pass through a `SimClock` service. Every document carries both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which is simulation. This makes a six-week remediation cycle demonstrable in three minutes without fabricating evidence of elapsed time.
 
-**Least privilege per agent, and an honest account of its limit.** Each sub-agent runs under its own service account. There is no shared credential.
+**Seven agents, and an honest account of what that word covers here.** Three are ADK `Agent` objects with prompts and model clients: the orchestrator, triage on Gemini, and the reviewer on Gemma. The other four — ownership, chase, exception, reporting — are deterministic drivers with their own service accounts and their own collections, and they call no model at all. That is deliberate rather than unfinished: assigning an owner, counting down an SLA, and reopening a lapsed acceptance are decisions with correct answers, and a model is the wrong instrument for a decision that has one. It also means the scheduled path ships no model client and cannot reach Vertex.
+
+**Least privilege per agent, and an honest account of its limit.** Each sub-agent has its own service account and there is no shared credential. Two of them — chase and exception — genuinely execute as their own identity, in their own Cloud Run workers. The ADK Workflow graph currently runs under a single client; the remaining identities are granted and their boundaries are proven by `verify-controls.sh` running as those identities, rather than assumed at runtime.
 
 Firestore cannot enforce collection-level access control for server-side clients, and the design says so rather than implying otherwise. `roles/datastore.user` resolves to `datastore.entities.create/update/delete`, which are database-scoped, and Security Rules — which *are* collection-aware — are bypassed entirely by server SDKs authenticating as a service account.
 
@@ -472,11 +474,15 @@ nearly everything and stops showing the lifecycle it exists to demonstrate.
 
 ```bash
 ./scripts/reset-derived.sh              # dry run: prints what would go
-./scripts/reset-derived.sh --confirm    # clears sla_clocks and tickets
+./scripts/reset-derived.sh --confirm    # clears sla_clocks, tickets, scans
 ```
 
-Both collections are derived: chase rebuilds them from the decisions that
-produced them, so clearing them costs nothing that cannot be recomputed. The
+All three are derived: chase rebuilds the first two from the decisions that
+produced them and re-running the rescan rebuilds the third, so clearing them
+costs nothing that cannot be recomputed. The same run undoes what a rescan
+wrote into `findings` — removing the findings it created and stripping the
+resolution fields from the seeded ones it annotated — because otherwise one
+rescan leaves the demo unrehearsable. No seeded finding is ever deleted. The
 allowlist is closed and everything else is refused by default, including any
 collection added to the schema later. `decisions` and `human_queue` are the
 adjudication record, `idempotency` is what the resume control checks itself

@@ -95,23 +95,25 @@ filed it.
 The system runs itself on a schedule. Cloud Scheduler publishes a tick, Pub/Sub
 fans it to two workers, each executing as its own service account.
 
-This morning at 09:01 UTC, unattended, the chase agent evaluated nine findings
-and decided to wait on every one of them. In real elapsed time nothing is due
-yet — the SLA windows are 7 to 30 days and the fleet is under two days old.
+At 09:01 UTC on August 28th, unattended, both workers woke on cycle 30693,
+walked the fleet, and did nothing. No ticket, no nudge, no escalation — in real
+elapsed time nothing was due yet, because the SLA windows are 7 to 30 days and
+the fleet was under two days old.
 
 I could dress that up. I would rather report it accurately: **the autonomous
-loop's correct answer today is "not yet."** That is judgment, and a system that
-manufactures activity to look busy is worse than one that waits.
+loop's correct answer that morning was "not yet."** That is judgment, and a
+system that manufactures activity to look busy is worse than one that waits.
 
-The same logs contain something I did not have to write a test for:
+The duplicate-delivery guard I did have to go and provoke, because production
+had not obliged. Publishing the same tick a second time gets this:
 
 ```
 tick_already_ran   cycle=9004
 tick_already_ran   cycle=9003
 ```
 
-Pub/Sub delivers at least once. The same tick arrived twice, and the
-idempotency key recognised the repeat and did nothing. Every side-effecting
+Pub/Sub delivers at least once, so a redelivered tick is a real possibility
+rather than a hypothetical. The second copy is recognised and does nothing. Every side-effecting
 tool takes a key derived from the finding, the action, and the cycle, so a
 resumed agent cannot open a second ticket or send a second nudge.
 
@@ -176,11 +178,17 @@ is the one that most deserves an adversarial read.
 
 Two gaps that every reviewer found within an hour, so I would rather name them:
 
-There is **no closure loop**. Nothing in the system can mark a finding fixed —
-there is no rescan ingestion, so the queue only grows. And there is **no
-deduplication**: real scanner output repeats one CVE across hundreds of hosts,
-and the synthetic corpus here has 400 findings with 400 distinct CVEs, so the
-problem never arises. Those are the next two things.
+There is **no deduplication**: real scanner output repeats one CVE across
+hundreds of hosts, and the synthetic corpus here has 400 findings with 400
+distinct CVEs, so the problem never arises. That is the next thing.
+
+And the closure loop is newer than the rest of the system, which shows. A
+rescan closes what it confirms fixed and refuses to close what it could not
+examine — but the scan file's coverage manifest is taken on trust, and a
+regression reopening a finding resets that ticket's episode counters rather
+than preserving the whole trail. Both are known and neither is exercised by
+the committed corpus, which is exactly the kind of thing worth saying out loud
+about a feature that is four days old.
 
 ### The stack
 
@@ -188,7 +196,7 @@ ADK 2.8 on Vertex AI. Gemini 3.5 Flash for reasoning, Gemma for review,
 Firestore for state, Agent Engine Memory Bank across sessions, Pub/Sub with a
 dead-letter queue proven by poisoning it, Model Armor on untrusted ingress,
 Cloud Run, Cloud Trace, Secret Manager, Terraform. Per-agent service accounts
-throughout. 319 tests.
+throughout. 562 tests.
 
 ### Written for the All Things Agentic Hackathon
 

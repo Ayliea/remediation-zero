@@ -332,8 +332,9 @@ the one number the demo is staking its credibility on.
 
 If the mix reads mostly `breached` before you start, rehearsal has aged the
 corpus past the interesting part. `./scripts/reset-derived.sh` clears
-`sla_clocks` and `tickets` and nothing else; run a fresh cycle on untouched
-findings afterwards to rebuild them.
+`sla_clocks`, `tickets` and `scans`, and undoes what a rescan wrote to
+`findings` — see step 8 for the full scope. It deletes no seeded finding. Run
+a fresh cycle on untouched findings afterwards to rebuild them.
 
 **Then show where it landed.** With the tracker exported, each opened ticket is
 a real GitHub issue carrying the ratified severity, the deadline, the specific
@@ -425,9 +426,9 @@ Cycle-300: 3 decisions were adjudicated, resulting in 2 ratifications.
 Cycle-301: 2 findings were ratified, and 1 was routed to the human queue.
 ```
 
-Those cycles ran on a daily schedule, in worker processes that exited hours
-ago. **This agent never saw them.** It is reading Agent Platform Memory Bank,
-where every completed cycle files one recollection carrying both clocks —
+Those cycles ran days ago, in processes that exited long since. **This agent
+never saw them.** It is reading Agent Platform Memory Bank, where every
+adjudication cycle files one recollection carrying both clocks —
 because a memory read weeks later is useless if it cannot say which time it
 means, and dangerous if the reader assumes the wrong one.
 
@@ -632,7 +633,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `verify-controls.sh --only coverage` | 2.1s on 2026-08-28 |
 | `verify-controls.sh`, all six | 5–6 min |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
-| `pytest`, 369 tests | 28.0s on 2026-08-28 |
+| `pytest`, 562 tests | 28.0s on 2026-08-29 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `rescan.sh --dry-run` | 2.1s on 2026-08-28, three runs |

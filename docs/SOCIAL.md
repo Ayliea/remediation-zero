@@ -64,7 +64,7 @@ to lose that by rounding for effect.
 > filed 79 reasons.
 >
 > Built solo in five days on Google Cloud — ADK 2.8, Vertex AI, Firestore,
-> Pub/Sub, Cloud Run, Model Armor, per-agent service accounts, 319 tests.
+> Pub/Sub, Cloud Run, Model Armor, per-agent service accounts, 562 tests.
 >
 > Write-up and code in the comments.
 >
@@ -209,7 +209,9 @@ hashtag if it is standing in for the LinkedIn bonus post.
 - "Seven agents." Three are ADK agents; the others are identities plus
   deterministic drivers.
 - Any framing implying the system fixes vulnerabilities. It runs the
-  remediation lifecycle up to escalation. There is no closure loop yet.
+  remediation lifecycle and closes findings a rescan confirms remediated. It
+  does not remediate anything itself, and it refuses to close a finding whose
+  host the scan never examined.
 - Screenshots showing real hostnames or IPs — the corpus is synthetic
   (`.invalid`, `192.0.2.0/24`) and should visibly stay that way.
 - Veo or Lyria tie-ins. The build plan rules them out: no honest role here, and

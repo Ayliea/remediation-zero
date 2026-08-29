@@ -53,7 +53,7 @@ CARD="$(cat <<JSON
 {
   "protocolVersion": "0.3.0",
   "name": "Remediation Zero — Orchestrator",
-  "description": "Owns the vulnerability remediation lifecycle for a one-person security team. Triage proposes a severity, an SLA and a remediation path citing CISA KEV, NVD and EPSS; an adversarial reviewer on a different model family ratifies or rejects it with a stated reason before anything becomes state. This agent reasons and recalls and holds no credential that can write: an Agent Engine runs as a single service account, so the agents that write run in the ADK Workflow graph and scheduled Cloud Run workers, each under its own identity.",
+  "description": "Owns the vulnerability remediation lifecycle for a one-person security team. Triage proposes a severity, an SLA and a remediation path citing CISA KEV, NVD and EPSS; an adversarial reviewer on a different model family ratifies or rejects it with a stated reason before anything becomes state. This agent reasons and recalls and holds no credential that can write: an Agent Engine runs as a single service account, so the agents that write run in the ADK Workflow graph and scheduled Cloud Run workers. The two scheduled workers each run as their own service account; the graph currently runs under one, and the per-agent identities that back the others are granted and proven by verify-controls rather than assumed at runtime.",
   "url": "https://${LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT}/locations/${LOCATION}/reasoningEngines/${ENGINE_ID}",
   "version": "${VERSION}",
   "provider": {

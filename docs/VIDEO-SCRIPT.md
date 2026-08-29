@@ -38,7 +38,7 @@ longer matches the console is worse than no figure.
 | 42 of 79 ratified | console stat strip |
 | unattended run, cycle 30693 | Cloud Logging, `rz-worker-*`, 2026-08-28T09:01 |
 | `tick_already_ran` ×2 | same, cycles 9003 and 9004 |
-| five controls | `./scripts/verify-controls.sh` |
+| six controls | `./scripts/verify-controls.sh` |
 
 Pre-flight is in `DEMO.md`. Run it. In particular the credential step and the
 two Cloud Run job checks, which take 5m23s and must be started first.
@@ -125,25 +125,34 @@ Say "53%" slowly.
 ## 1:35–2:20 — Claim two. Autonomy, stated honestly.
 
 **On screen:** Cloud Logging, filtered to `rz-worker-chase` and
-`rz-worker-exception`, the 09:01 entries visible.
+`rz-worker-exception`. Show the 09:01 `chase_finished` / `sweep_finished`
+entries for cycle 30693 — the actions field is empty, which is the point.
+Then publish the tick again live so `tick_already_ran` appears on camera.
 
-> This morning at 9:01 UTC, with nobody watching, Cloud Scheduler published a
-> tick. Pub/Sub fanned it to two workers, each running as its own service
-> account. Chase evaluated nine findings and decided, for every one of them,
-> to wait — because in real elapsed time nothing is due yet.
+> At 9:01 UTC, with nobody watching, Cloud Scheduler published a tick. Pub/Sub
+> fanned it to two workers, each running as its own service account. They
+> walked the fleet and did nothing — no ticket, no nudge, no escalation —
+> because in real elapsed time nothing was due yet.
 >
 > I want to be precise about that, because it is the honest version. The
-> autonomous loop's correct answer today is *not yet*. That is judgment, not
-> inaction.
+> autonomous loop's correct answer that morning was *not yet*. That is
+> judgment, not inaction, and a system that manufactures activity to look busy
+> is worse than one that waits.
 >
-> Here is the part I did not have to build a test for, because production
-> produced it: **`tick_already_ran`**. Pub/Sub delivers at least once, so the
-> same tick arrived twice. The idempotency key recognised it and did nothing
-> the second time. No duplicate ticket, no duplicate nudge — in production,
-> unattended.
+> And these two workers ship no model client at all. The container has no
+> Vertex SDK in it, so the unattended path structurally cannot reach a model
+> or spend money while nobody is watching. That is a decision, not an
+> omission.
+>
+> Now let me provoke the thing production has not yet handed me. I publish the
+> same tick a second time — **`tick_already_ran`**. Pub/Sub delivers at least
+> once, so a redelivered tick is a real possibility rather than a
+> hypothetical, and the second copy does nothing. No duplicate ticket, no
+> duplicate nudge.
 
-**Direction:** point at the literal `tick_already_ran` line. This is the best
-evidence in the video that the system is real rather than demonstrated, and it
+**Direction:** point at the literal `tick_already_ran` line. Publishing it
+live is stronger than a captured log, not weaker: it is reproducible on
+camera, and it
 costs nothing to show because it already happened.
 
 ---
@@ -200,10 +209,11 @@ only counts for something if you draw attention to the distinction yourself.
 > Trace, Secret Manager, Terraform.
 >
 > What it does not do yet, and I would rather say it than have you find it:
-> there is no rescan ingestion, so nothing here can mark a finding fixed. No
-> deduplication — real scanner output repeats one CVE across hundreds of hosts
-> and this corpus does not. Those are the next two things, and they are named
-> in the README.
+> no deduplication — real scanner output repeats one CVE across hundreds of
+> hosts and this corpus does not. And the rescan trusts the coverage manifest
+> it is handed; it checks that a scan cannot report a host it claims not to
+> have examined, but it cannot check that the claim was true. Those are the
+> next two things, and they are named in the README.
 >
 > Remediation Zero. It does the six weeks after the scan, and it shows its
 > work.
