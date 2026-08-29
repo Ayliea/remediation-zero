@@ -427,7 +427,7 @@ would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
 ### 9. Verify the controls
 
 ```bash
-./scripts/verify-controls.sh                          # all six, 7m30s
+./scripts/verify-controls.sh                          # all six, 5-7.5 min
 ./scripts/verify-controls.sh --only armor,reviewer,resume,coverage  # the fast four, 33.4s
 ./scripts/verify-controls.sh --only secret                   # the token boundary, ~2m
 ```
