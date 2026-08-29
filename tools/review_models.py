@@ -244,8 +244,10 @@ def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
         )
 
     # The injection assessment is folded into the reason so it survives into
-    # the decision record. It is reported on every finding, so its absence in
-    # the record means the reviewer did not answer, not that it found nothing.
+    # the decision record. Only a positive is carried: a "none" answer records
+    # nothing, so absence in the record means the reviewer read the text and
+    # found nothing, or did not answer at all, and those are not
+    # distinguishable afterwards. Live, 14 of 121 verdicts carry a note.
     injection = INJECTION_PATTERN.search(text)
     finding_note = ""
     if injection:

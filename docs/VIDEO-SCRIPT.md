@@ -105,7 +105,7 @@ interesting part and every second here is taken from the parts that are.
 > on a different model family. Using a different family is the point: a model
 > auditing its own reasoning shares its own blind spots.
 >
-> It disagrees with 47% of proposals. That is not a defect I failed to tune
+> It disagrees with 65% of proposals. That is not a defect I failed to tune
 > out, it is the headline metric, because a reviewer that ratifies everything
 > is indistinguishable from having no reviewer at all.
 >
