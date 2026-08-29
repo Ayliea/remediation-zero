@@ -58,12 +58,15 @@ def attempt(label: str, expect_denied: bool, fn) -> bool:
         denied = "PermissionDenied" in name or "403" in message
         # An invalid request is not a denial. Reporting it as one is how the
         # earlier version of this probe passed without exercising anything.
+        # One branch, not three: the previous shape classified correctly and
+        # then overwrote the label unconditionally, so a 400 that was not an
+        # InvalidArgument scored right and printed ERROR. The score is what
+        # gates the control, but the label is what a person reads.
         if "InvalidArgument" in name or "400" in message[:8]:
             denied = False
             outcome = f"INVALID REQUEST ({name})"
-        outcome = f"DENIED ({name})" if denied else f"ERROR ({name})"
-        if "InvalidArgument" in name:
-            outcome = f"INVALID REQUEST ({name})"
+        else:
+            outcome = f"DENIED ({name})" if denied else f"ERROR ({name})"
 
     ok = denied == expect_denied
     print(f"  expect {expectation:8} | got {outcome:34} | {'ok' if ok else 'MISMATCH'}  {label}")
