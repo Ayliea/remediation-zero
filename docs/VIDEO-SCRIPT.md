@@ -38,7 +38,7 @@ longer matches the console is worse than no figure.
 | 42 of 79 ratified | console stat strip |
 | unattended run, cycle 30693 | Cloud Logging, `rz-worker-*`, 2026-08-28T09:01 |
 | `tick_already_ran` ×2 | same, cycles 9003 and 9004 |
-| five controls | `./scripts/verify-controls.sh` |
+| six controls | `./scripts/verify-controls.sh` |
 
 Pre-flight is in `DEMO.md`. Run it. In particular the credential step and the
 two Cloud Run job checks, which take 5m23s and must be started first.
