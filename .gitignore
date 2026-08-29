@@ -130,6 +130,11 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+# nano writes <file>.save when a session is interrupted. The copy is a
+# stale buffer, not a newer draft, and it can carry raw terminal escape
+# bytes from captured mouse input. One appeared beside VIDEO-SCRIPT.md
+# claiming a control count the tracked file had already corrected.
+*.save
 
 # Browser automation output from design review.
 .playwright-mcp/
