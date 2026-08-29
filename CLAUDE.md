@@ -113,7 +113,7 @@ python3 -m venv .venv
                                               # what a rescan wrote to findings. seeded findings
                                               # are never deleted
 terraform -chdir=infra plan                   # ALWAYS read this first
-terraform -chdir=infra apply                  # events only; manages nothing else
+terraform -chdir=infra apply                  # events + the console warmer; nothing else
 ```
 
 ## Cost and infrastructure

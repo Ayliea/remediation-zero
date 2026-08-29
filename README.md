@@ -415,7 +415,8 @@ gcloud pubsub topics publish remediation-tick --message='{"advance_days":0}'
 ./scripts/verify-events.sh
 ```
 
-Terraform manages the event plumbing and nothing else. The Agent Engine, its
+Terraform manages the event plumbing, plus one Cloud Scheduler job that warms
+the console before a demonstration. Nothing else. The Agent Engine, its
 session, the Firestore databases, the service accounts and the Cloud Run
 services are read as data rather than declared as resources, so
 `terraform destroy` cannot reach them. That boundary is a safety property: the
@@ -496,7 +497,7 @@ it is the wrong one. `real_ts` is wall clock and this script never writes one.
 
 ```bash
 # Cloud Run scales to zero, so idle cost is already nil. To remove everything:
-terraform -chdir=infra destroy       # events only, by construction
+terraform -chdir=infra destroy       # events + the warmer, by construction
 gcloud run services delete rz-worker-chase --region=us-central1
 gcloud run services delete rz-worker-exception --region=us-central1
 gcloud run services delete remediation-zero-console --region=us-central1
@@ -508,13 +509,13 @@ Deliberately absent: any command that deletes the Agent Engine or its session. T
 
 ### Cost notes
 
-Minimum instances are zero and maximum instances are capped, so idle cost is negligible. If Gemma is served from a dedicated endpoint in your region rather than per-token, that endpoint is the only always-on component: deploy it when needed and destroy it immediately after. Set a billing budget alert before running anything.
+Minimum instances are zero and maximum instances are capped, so idle cost is negligible. The one thing that is not idle is a Cloud Scheduler job that pings the console every five minutes to keep a demonstration off a cold start; pause it with `gcloud scheduler jobs pause console-warm --location=us-central1` when nobody is watching. If Gemma is served from a dedicated endpoint in your region rather than per-token, that endpoint is the only always-on component: deploy it when needed and destroy it immediately after. Set a billing budget alert before running anything.
 
 ---
 
 ## Findings and learnings
 
-**The reviewer disagrees often, and on substance.** Across 100 verdicts recorded so far it issued 70 rejections, and 48% of findings were ratified. Those are two different denominators and both are reported: a rejected proposal is re-proposed once, so one finding can produce two verdicts, and 37 of 63 findings needed that second proposal. The two recurring objections are remediation text that names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and proposed SLAs that exceed the CISA KEV due date for the same CVE. The second is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
+**The reviewer disagrees often, and on substance.** Across 121 verdicts recorded so far it issued 79 rejections, and 53% of findings were ratified. Those are two different denominators and both are reported: a rejected proposal is re-proposed once, so one finding can produce two verdicts, and 42 of 79 findings needed that second proposal. The two recurring objections are remediation text that names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and proposed SLAs that exceed the CISA KEV due date for the same CVE. The second is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
 
 **A high disagreement rate is a health metric, not a defect.** A reviewer that ratifies everything is indistinguishable from having no reviewer, so the rate is reported as a headline figure rather than buried.
 
