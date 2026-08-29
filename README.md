@@ -14,7 +14,7 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 ## What's unusual here
 
-Four claims. Each one is checkable by someone who did not write this, and the
+Five claims. Each one is checkable by someone who did not write this, and the
 command that checks it is given, because a claim a reader has to take on faith
 is worth less than one they can break.
 
@@ -427,14 +427,14 @@ would trade that guarantee for tidiness. `infra/existing.tf` says so in place.
 ### 9. Verify the controls
 
 ```bash
-./scripts/verify-controls.sh                          # all six, 5-6 minutes
+./scripts/verify-controls.sh                          # all six, 7m30s
 ./scripts/verify-controls.sh --only armor,reviewer,resume,coverage  # the fast four, 33.4s
 ./scripts/verify-controls.sh --only secret                   # the token boundary, ~2m
 ```
 
-The probe check executes a Cloud Run job as the reporting identity, which is
-what makes it real and also what makes it slow. Timed individually it is 218
-seconds; the other three together are 19.5. `--only` exists so a demonstration
+Two of the six -- `probe` and `secret` -- execute a Cloud Run job as the
+identity being tested, which is what makes them real and also what makes them
+slow: 5m23s for the pair. The other four together are 33.4s. `--only` exists so a demonstration
 is not forced to choose between running the controls live and running them at
 all. A partial run prints the checks it did not exercise before printing any
 result, because a control suite that quietly skips its slowest check is how

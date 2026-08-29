@@ -352,10 +352,12 @@ def check_absence_alone_never_closes_a_finding() -> None:
     )
 
 
-#: The checks, in the order they run. The probe is named separately because it
-#: costs a Cloud Run job execution and roughly three and a half minutes, while
-#: the other four together take well under a minute. A demonstration that has
-#: to run all six in sequence spends its whole budget waiting for two of them,
+#: The checks, in the order they run. Two of them -- `probe` and `secret` --
+#: each cost a Cloud Run job execution, together about 5m23s, while the other
+#: four take 33.4s between them. Both slow ones are named here because naming
+#: only `probe` is what put `secret` in the on-camera step, where it cost four
+#: minutes of dead air against a 25-second budget. A demonstration that has to
+#: run all six in sequence spends its whole budget waiting for two of them,
 #: so the set is selectable. The default is still all six: a partial run has
 #: to be asked for explicitly, because a control suite that quietly skips the
 #: slow check is how the slow check stops being run at all.
@@ -380,8 +382,8 @@ def main() -> int:
     parser.add_argument(
         "--only", default="", metavar="NAME[,NAME...]",
         help=("run a subset: " + ", ".join(CHECKS) +
-              ". 'probe' executes a Cloud Run job and takes about 3m30s; the "
-              "other four together take about 35s."),
+              ". 'probe' and 'secret' each execute a Cloud Run job, about "
+              "3m30s and 2m; the other four together take about 33s."),
     )
     args = parser.parse_args()
 
