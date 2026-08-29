@@ -360,13 +360,25 @@ def render(data: dict) -> str:
             f" <b>{regressed}</b> had been closed by an earlier scan and came back."
             if regressed else ""
         )
+        # Both halves of the pair have to describe the same scan. This tile
+        # used the all-time resolved count against the latest scan's
+        # unverifiable count: identical while one scan has run, and divergent
+        # from the second onward, with the left number climbing while the
+        # right reset. A pair whose whole point is that neither number means
+        # anything alone cannot have its two halves counting different things.
+        scan_resolved = scan_counts.get("resolved", 0)
+        resolved_all_time = data.get("resolved_total", 0)
+        all_time_note = (
+            f" <b>{resolved_all_time}</b> are resolved across every scan so far."
+            if resolved_all_time != scan_resolved else ""
+        )
         remediation = f"""<div class="clocks">
   <div class="clock clock--fixed">
     <p class="clock-k">remediated · confirmed absent</p>
-    <p class="clock-v">{data.get('resolved_total', 0)}</p>
-    <p class="clock-n">Findings a scan stopped reporting on an asset it had actually
+    <p class="clock-v">{scan_resolved}</p>
+    <p class="clock-n">Findings this scan stopped reporting on an asset it had actually
     examined. Resolution ends the chase: the next cycle closes the ticket and the
-    tracker issue with it.</p>
+    tracker issue with it.{all_time_note}</p>
   </div>
   <div class="clock clock--unknown">
     <p class="clock-k">unverifiable · not examined</p>

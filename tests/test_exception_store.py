@@ -130,6 +130,36 @@ def test_a_refusal_is_recorded_for_a_person_rather_than_dropped(writer, client):
     assert entry["reason"].strip()
 
 
+def test_repeating_a_refusal_in_one_cycle_writes_once(writer, client):
+    """Constraint 5 covers the refusal too.
+
+    This write sat outside the idempotency guard for most of the build. Its
+    document id is deterministic, so a repeat overwrote rather than
+    duplicated and nothing visible broke -- which is exactly why it survived
+    review. A write that is merely harmless today is still one nothing holds
+    to a key.
+    """
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            accept(writer, in_kev=True)
+
+    written = [key for key in client.writes
+               if key == (HUMAN_QUEUE, "acceptance-refused-RZ-1-c003")]
+    assert len(written) == 1, f"the refusal was written {len(written)} times"
+
+
+def test_a_refusal_in_a_later_cycle_is_not_suppressed(writer, client):
+    """The key is scoped to the cycle, so a fresh request still reaches a
+    person rather than being mistaken for the previous one repeating."""
+    with pytest.raises(ValueError):
+        accept(writer, in_kev=True, cycle=3)
+    with pytest.raises(ValueError):
+        accept(writer, in_kev=True, cycle=4)
+
+    assert (HUMAN_QUEUE, "acceptance-refused-RZ-1-c003") in client.docs
+    assert (HUMAN_QUEUE, "acceptance-refused-RZ-1-c004") in client.docs
+
+
 def test_a_refused_acceptance_writes_no_exception(writer, client):
     """The refusal must not half-apply. A finding recorded as accepted and
     also refused is worse than either outcome."""

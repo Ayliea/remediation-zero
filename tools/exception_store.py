@@ -64,21 +64,31 @@ class ExceptionWriter:
                 approved_by_human=approved_by_human,
             )
         except ValueError as exc:
-            stamp = self._clock.now()
-            self._client.collection(HUMAN_QUEUE).document(
-                f"acceptance-refused-{finding_id}-c{cycle:03d}"
-            ).set(
-                {
-                    "finding_id": finding_id,
-                    "cycle": cycle,
-                    "kind": "acceptance_refused",
-                    "reason": str(exc),
-                    "requested_by": accepted_by,
-                    "requested_ttl_days": ttl_days,
-                    "real_ts": stamp.real_ts,
-                    "sim_ts": stamp.sim_ts,
-                }
-            )
+            # The refusal is a side effect, so it takes a key like every other
+            # one. The document id is deterministic and a repeat overwrites
+            # rather than duplicates, which is why this went unnoticed for so
+            # long -- but constraint 5 admits no exceptions, and a write that
+            # happens to be harmless is still a write nothing holds to a key.
+            @self._guard.protects(action="refuse_acceptance")
+            def _refuse(*, finding_id: str, cycle: int) -> str:
+                stamp = self._clock.now()
+                self._client.collection(HUMAN_QUEUE).document(
+                    f"acceptance-refused-{finding_id}-c{cycle:03d}"
+                ).set(
+                    {
+                        "finding_id": finding_id,
+                        "cycle": cycle,
+                        "kind": "acceptance_refused",
+                        "reason": str(exc),
+                        "requested_by": accepted_by,
+                        "requested_ttl_days": ttl_days,
+                        "real_ts": stamp.real_ts,
+                        "sim_ts": stamp.sim_ts,
+                    }
+                )
+                return f"refused:{finding_id}"
+
+            _refuse(finding_id=finding_id, cycle=cycle)
             raise
 
         @self._guard.protects(action="accept_risk")
