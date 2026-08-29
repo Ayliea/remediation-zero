@@ -48,6 +48,7 @@ from scripts.exception import run_sweep
 from tools.clock import SimClock
 from tools.idempotency import CompletedCall, derive_record
 from tools.store import FirestoreIdempotencyStore
+from tools.telemetry import cycle_id
 from worker.envelope import (
     MalformedTick,
     Tick,
@@ -80,7 +81,7 @@ def _log(event: str, cycle: int | None = None, **fields) -> None:
         {
             "event": event,
             "agent": AGENT,
-            "cycle_id": f"cycle-{cycle:03d}" if cycle is not None else "-",
+            "cycle_id": cycle_id(cycle),
             "finding_id": "-",  # the worker acts on the fleet, not one finding
             **({"cycle": cycle} if cycle is not None else {}),
             **fields,

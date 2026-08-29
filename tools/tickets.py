@@ -33,6 +33,7 @@ from google.cloud import firestore
 from tools.chase import ChaseAction, ChaseState
 from tools.clock import SimClock
 from tools.idempotency import IdempotencyGuard
+from tools.telemetry import cycle_id
 
 logger = logging.getLogger("remediation_zero.tickets")
 
@@ -76,9 +77,12 @@ class TicketWriter:
             if number is not None:
                 ticket_ref.update({"github_issue": number})
         except Exception as exc:  # noqa: BLE001 - deliberately broad
+            # The cycle is in `fields`; it was being dropped on the one line
+            # that most needs it. A delivery failure is re-attempted by the
+            # next cycle, so which cycle failed is the whole question.
             logger.warning(json.dumps({
                 "event": "delivery_failed", "finding_id": finding_id,
-                "cycle_id": "-", "action": event,
+                "cycle_id": cycle_id(fields.get("cycle")), "action": event,
                 "error": type(exc).__name__, "detail": str(exc)[:200],
             }, sort_keys=True))
 

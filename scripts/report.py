@@ -38,6 +38,7 @@ from tools.clock import SimClock
 from tools.metrics import compute_metrics
 from tools.reports import REPORTS_DATABASE, ReportWriter, write_summary
 from tools.store import FirestoreIdempotencyStore
+from tools.telemetry import cycle_id
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger("remediation_zero.reporting")
@@ -86,7 +87,7 @@ def main() -> int:
     )
 
     logger.info(json.dumps({
-        "event": "report_written", "cycle_id": f"cycle-{args.cycle:03d}",
+        "event": "report_written", "cycle_id": cycle_id(args.cycle),
         "finding_id": "-", "report_id": document_id,
         "decisions": metrics["decisions_total"],
         "disagreement_rate": round(metrics["disagreement_rate"], 3),

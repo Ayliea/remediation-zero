@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from tools.chase import MAX_NUDGES
 from tools.github_tickets import GitHubTickets, issue_body, issue_title
+from tools.telemetry import cycle_id
 
 logger = logging.getLogger("remediation_zero.delivery")
 
@@ -79,9 +80,11 @@ class GitHubDelivery:
                     attempts=decision.get("attempts"),
                 ),
                 labels=LABELS,
+                cycle=cycle,
             )
-            logger.info('{"event": "issue_filed", "finding_id": "%s", '
-                        '"cycle_id": "-", "issue": %s}' % (finding_id, created))
+            logger.info(json.dumps({
+                "event": "issue_filed", "finding_id": finding_id,
+                "cycle_id": cycle_id(cycle), "issue": created}, sort_keys=True))
             return created
 
         if not number:
@@ -98,7 +101,7 @@ class GitHubDelivery:
             self._gh.close_issue(number)
             logger.info(json.dumps({
                 "event": "issue_closed", "finding_id": finding_id,
-                "cycle_id": str(cycle), "issue": number}, sort_keys=True))
+                "cycle_id": cycle_id(cycle), "issue": number}, sort_keys=True))
         return None
 
     def _latest_decision(self, finding_id: str) -> dict:

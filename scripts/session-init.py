@@ -46,6 +46,7 @@ from google.adk.sessions import VertexAiSessionService
 from google.genai import types
 
 from tools.clock import SimClock
+from tools.telemetry import cycle_id
 
 #: Stable identity for the long-running session. These are deliberately fixed
 #: rather than generated, so that "does a session already exist" is a question
@@ -127,7 +128,7 @@ async def main() -> int:
             "created_real_ts": stamp.real_ts,
             "created_sim_ts": stamp.sim_ts,
             "clock_mode": clock.mode.value,
-            "cycle_id": "cycle-0",
+            "cycle_id": cycle_id(0),
         },
     )
 

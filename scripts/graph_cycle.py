@@ -53,7 +53,8 @@ from tools.enrichment import EnrichmentCache
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
-from tools.telemetry import configure_tracing, finding_span, flush, set_outcome
+from tools.telemetry import (cycle_id, configure_tracing, finding_span,
+                            flush, set_outcome)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 logger = logging.getLogger("remediation_zero.graph")
@@ -192,7 +193,7 @@ async def run(finding_id: str, cycle: int) -> int:
         "assignments": AssignmentWriter(store=store, client=db, clock=clock),
         "reasoning_model": os.environ["REASONING_MODEL"],
         "reviewer_model": os.environ["REVIEWER_MODEL"],
-        "cycle_id": f"cycle-{cycle:03d}",
+        "cycle_id": cycle_id(cycle),
         "scratch": {},
     }
 

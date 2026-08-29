@@ -49,6 +49,7 @@ from google.cloud import firestore
 from tools.clock import SimClock
 from tools.idempotency import IdempotencyGuard
 from tools.rescan import STATUS_RESOLVED, Outcome, Reconciliation
+from tools.telemetry import cycle_id
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,8 @@ SCANS = "scans"
 
 def _log(event: str, cycle: int, finding_id: str, **fields: Any) -> None:
     logger.info(json.dumps(
-        {"event": event, "cycle_id": str(cycle), "finding_id": finding_id, **fields},
+        {"event": event, "cycle_id": cycle_id(cycle), "finding_id": finding_id,
+         **fields},
         sort_keys=True, default=str,
     ))
 

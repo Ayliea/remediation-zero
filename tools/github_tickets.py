@@ -45,6 +45,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
+from tools.telemetry import cycle_id
+
 logger = logging.getLogger("remediation_zero.github")
 
 API = "https://api.github.com"
@@ -235,7 +237,8 @@ class GitHubTickets:
                    {"state": "closed", "state_reason": "completed"})
 
     def open_issue(self, finding_id: str, title: str, body: str,
-                   labels: Optional[list] = None) -> int:
+                   labels: Optional[list] = None,
+                   cycle: Optional[int] = None) -> int:
         """File the issue, or return the number of the one already filed."""
         row = self._find_issue_row(finding_id)
         if row is not None:
@@ -245,7 +248,7 @@ class GitHubTickets:
                 self.reopen(existing)
             logger.info(json.dumps({
                 "event": "github_issue_exists", "finding_id": finding_id,
-                "cycle_id": "-", "issue": existing,
+                "cycle_id": cycle_id(cycle), "issue": existing,
                 "reopened": was_closed}, sort_keys=True))
             return existing
 

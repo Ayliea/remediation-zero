@@ -113,3 +113,56 @@ def test_setting_an_outcome_on_nothing_is_harmless():
     """Losing observability is bad. Losing a remediation decision because the
     observability backend was unreachable is worse."""
     set_outcome(None, "ratified")
+
+
+# ---------------------------------------------------------------------------
+# The cycle_id field format
+# ---------------------------------------------------------------------------
+
+def test_a_cycle_renders_zero_padded_and_prefixed():
+    """The format every emitter has to agree on for the field to be groupable."""
+    from tools.telemetry import cycle_id
+
+    assert cycle_id(12) == "cycle-012"
+    assert cycle_id(0) == "cycle-000"
+    assert cycle_id(30693) == "cycle-30693"
+
+
+def test_a_missing_cycle_is_a_sentinel_rather_than_the_word_none():
+    """A line that genuinely has no cycle must stay distinguishable from one
+    that lost it. `str(None)` would put the string "None" in the field and
+    read as data."""
+    from tools.telemetry import cycle_id
+
+    assert cycle_id(None) == "-"
+
+
+def test_no_module_builds_a_cycle_id_of_its_own():
+    """One definition, because a log field is only groupable if every emitter
+    agrees on it.
+
+    scan_store and delivery spelled this `str(cycle)` while everything else
+    zero-padded it, so a single rescan wrote both `12` and `cycle-012` into
+    the same field: filtering one finding's journey by cycle_id returned half
+    of it and gave no sign the other half existed.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    # The value must come from the shared helper, or be a name already
+    # carrying its result. Anything else is a second definition.
+    permitted = re.compile(r'"cycle_id":\s*(cycle_id\b|f?"-")')
+    offenders = []
+
+    for directory in ("tools", "worker", "scripts"):
+        for path in sorted((root / directory).rglob("*.py")):
+            for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), start=1):
+                if '"cycle_id":' in line and not permitted.search(line):
+                    offenders.append(
+                        f"{path.relative_to(root)}:{number}: {line.strip()}")
+
+    assert not offenders, (
+        "These lines build a cycle_id instead of calling "
+        "tools.telemetry.cycle_id():\n  " + "\n  ".join(offenders))

@@ -42,6 +42,24 @@ FINDING_ID = "remediation_zero.finding_id"
 CYCLE_ID = "remediation_zero.cycle_id"
 OUTCOME = "remediation_zero.outcome"
 
+#: How a cycle number is rendered wherever it is logged or traced. One
+#: definition because a log field is only groupable if every emitter agrees:
+#: `scan_store` and `delivery` spelled it `str(cycle)` while everything else
+#: used this zero-padded form, so a single rescan wrote both `12` and
+#: `cycle-012` into the same field and filtering a finding's journey by
+#: cycle_id silently returned half of it.
+CYCLE_ID_UNKNOWN = "-"
+
+
+def cycle_id(cycle: Optional[int]) -> str:
+    """Render a cycle number for the `cycle_id` log and span field.
+
+    `None` becomes a sentinel rather than the string "None", so a line that
+    genuinely has no cycle is distinguishable from one that lost it.
+    """
+    return CYCLE_ID_UNKNOWN if cycle is None else f"cycle-{int(cycle):03d}"
+
+
 _configured = False
 _provider = None  # the provider we attached the exporter to
 
