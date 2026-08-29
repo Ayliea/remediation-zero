@@ -354,9 +354,9 @@ def check_absence_alone_never_closes_a_finding() -> None:
 
 #: The checks, in the order they run. The probe is named separately because it
 #: costs a Cloud Run job execution and roughly three and a half minutes, while
-#: the other three together take under twenty seconds. A demonstration that has
-#: to run all four in sequence spends its whole budget waiting for one of them,
-#: so the set is selectable. The default is still all four: a partial run has
+#: the other four together take well under a minute. A demonstration that has
+#: to run all six in sequence spends its whole budget waiting for two of them,
+#: so the set is selectable. The default is still all six: a partial run has
 #: to be asked for explicitly, because a control suite that quietly skips the
 #: slow check is how the slow check stops being run at all.
 CHECKS = {
@@ -381,7 +381,7 @@ def main() -> int:
         "--only", default="", metavar="NAME[,NAME...]",
         help=("run a subset: " + ", ".join(CHECKS) +
               ". 'probe' executes a Cloud Run job and takes about 3m30s; the "
-              "other three together take under 20s."),
+              "other four together take about 35s."),
     )
     args = parser.parse_args()
 

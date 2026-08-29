@@ -19,15 +19,16 @@ impersonation here and nothing is simulated: this is the identity the reporting
 agent actually runs under, attempting the action the architecture says it
 cannot perform.
 
-Three attempts, and the expected result of each is printed before it runs so
+Four attempts, and the expected result of each is printed before it runs so
 that a reader can check the outcome against the claim rather than trusting a
 summary:
 
     write a ticket                   must be DENIED
     write to the human queue         must be DENIED
+    read a finding                   must SUCCEED
     write a report                   must SUCCEED
 
-The third matters as much as the first two. An identity that cannot write
+The last two matter as much as the first two. An identity that cannot do
 anything proves nothing about scoping; it only proves it is broken. The control
 is that the boundary falls in a specific place.
 """

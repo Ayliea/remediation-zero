@@ -270,3 +270,17 @@ def test_resolving_and_reopening_are_different_actions(regression, writer):
     from tools.idempotency import derive_key
     assert derive_key("RZ-1", "resolve_finding", 9) != derive_key(
         "RZ-1", "reopen_finding", 9)
+
+
+def test_the_document_key_is_not_stored_as_a_field(writer):
+    """to_document carries the natural key out under _document_id and the seed
+    path pops it before writing. A rescan-ingested finding carrying a field
+    seeded ones lack is a difference with no cause but the two paths having
+    been written separately."""
+    scan = [{"finding_id": "RZ-9", "asset_id": "ast-01"}]
+    rec = reconcile(previous=[], scan=scan, covered_asset_ids=["ast-01"],
+                    scan_id="rescan-01")
+
+    writer.ingest_new(rec, scan, cycle=5)
+
+    assert "_document_id" not in writer._client.docs[("findings", "RZ-9")]

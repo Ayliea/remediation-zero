@@ -235,6 +235,12 @@ class ScanWriter:
                 nonlocal ran
                 ran = True
                 document = to_document(record, self._clock, kind="findings")
+                # to_document carries the natural key out under this field and
+                # the seed path pops it before writing. Leaving it here would
+                # give rescan-ingested findings a field seeded ones do not
+                # have, for no reason but the two paths having been written
+                # separately.
+                document.pop("_document_id", None)
                 document["status"] = "open"
                 document["first_seen_scan"] = reconciliation.scan_id
                 self._client.collection(FINDINGS).document(finding_id).set(document)
