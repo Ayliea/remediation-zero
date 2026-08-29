@@ -631,7 +631,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh --only coverage` | 2.1s on 2026-08-28 |
-| `verify-controls.sh`, all six | 5m40s on 2026-08-28, the only unsplit run measured. It covered five checks: it started at 23:21 and `coverage` landed at 23:26, so add its 2.1s and re-measure before quoting this as six |
+| `verify-controls.sh`, all six | 7m30s on 2026-08-29 at `2ad2506`, six checks, all passing. An earlier five-check run took 5m40s; `coverage` is 2.1s of that gap and run-to-run variance in the two Cloud Run job checks is the rest, so budget the high end |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
 | `pytest`, 562 tests | 28.0s on 2026-08-29 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
