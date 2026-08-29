@@ -155,3 +155,47 @@ def test_the_period_sentinel_does_not_collide_with_a_finding():
     from tools.idempotency import derive_key
     assert derive_key("__period__", "report", 4) != derive_key(
         "RZ-0001", "report", 4)
+
+
+# ---------------------------------------------------------------------------
+# Rates reach the model rounded
+# ---------------------------------------------------------------------------
+
+def test_every_rate_metrics_produces_is_rounded_before_the_model_sees_it():
+    """RATE_KEYS has to keep step with metrics.py.
+
+    It did not, once. `_rate` grew from two callers to four when the rescan
+    landed, the rounding list stayed at two, and a report went out reading
+    "we remediated 0.35570469798657717 of scanned findings" -- in the prose a
+    person reads, from the one function whose docstring warns that handing a
+    model a bare float invites it to print one.
+
+    Derived from the source rather than restated, so a fifth rate cannot be
+    added without this failing.
+    """
+    import re
+    from pathlib import Path
+    from tools.reports import RATE_KEYS
+
+    source = (Path(__file__).resolve().parents[1] / "tools" / "metrics.py").read_text()
+    produced = set(re.findall(r'"([a-z_]+)":\s*_rate\(', source))
+
+    assert produced, "no _rate call sites found; the scan is broken"
+    missing = produced - set(RATE_KEYS)
+    assert not missing, (
+        "metrics.py produces these rates and reports.RATE_KEYS does not round "
+        f"them, so they reach the model as bare floats: {sorted(missing)}")
+
+    stale = set(RATE_KEYS) - produced
+    assert not stale, f"RATE_KEYS names rates metrics.py no longer produces: {sorted(stale)}"
+
+
+def test_a_rate_is_rendered_as_a_whole_percent():
+    """The precision the prose should carry, decided in code rather than asked
+    of the model."""
+    from tools.reports import _presentable
+
+    shown = _presentable({"remediated_of_scanned": 0.35570469798657717,
+                          "coverage_rate": 0.75, "rejection_reasons": []})
+    assert shown["remediated_of_scanned"] == "36%"
+    assert shown["coverage_rate"] == "75%"

@@ -47,6 +47,19 @@ COLLECTION = "reports"
 REPORTS_DATABASE = "reports"
 
 
+#: Every metric that `metrics._rate` produces, and therefore every one that
+#: reaches the model as a bare float unless it is rounded here. This started
+#: as a two-name literal and fell out of date the moment the rescan added two
+#: more: a report went out reading "we remediated 0.35570469798657717 of
+#: scanned findings". A test keeps this in step with metrics.py.
+RATE_KEYS = (
+    "ratification_rate",
+    "disagreement_rate",
+    "remediated_of_scanned",
+    "coverage_rate",
+)
+
+
 def _presentable(metrics: dict[str, Any]) -> dict[str, Any]:
     """Round rates before the model sees them.
 
@@ -55,7 +68,7 @@ def _presentable(metrics: dict[str, Any]) -> dict[str, Any]:
     make, not something to ask the model to remember not to do.
     """
     shown = dict(metrics)
-    for key in ("ratification_rate", "disagreement_rate"):
+    for key in RATE_KEYS:
         if key in shown:
             shown[key] = f"{shown[key] * 100:.0f}%"
     # Reasons matter more than their count, but twenty of them drowns the

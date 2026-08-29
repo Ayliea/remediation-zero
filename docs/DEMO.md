@@ -127,8 +127,9 @@ export GITHUB_TOKEN="$(gh auth token)"
 #    tracker are not deleted -- GitHub is not ours to reset -- so close them by
 #    hand first if the recording pans across the issue list. Closing them is
 #    cosmetic: find_issue lists with state=all, so a closed issue still owns
-#    its finding. The demo uses --start 10 to work on findings no rehearsal has
-#    touched, which is what actually keeps the tracker shot honest.
+#    its finding. The demo uses --start 41 to work on findings no rehearsal has
+#    touched AND that rescan-01 resolves, which is what keeps the tracker shot
+#    honest and lets section 7 actually close something.
 
 # 9. Pick a cycle number nothing has used. Derive it rather than hardcoding
 #    one: every rehearsal consumes more, so a literal in this file is correct
@@ -190,10 +191,25 @@ claims to have fixed than about how much it fixed.
 ### 2. A cycle — 49s
 
 ```bash
-./scripts/tick.sh --cycle $C --start 10 --limit 3
+./scripts/tick.sh --cycle $C --start 41 --limit 3
 ```
 
-`--start 10` picks RZ-0010 through RZ-0012. The default start is 1, and
+`--start 41` picks RZ-0041 through RZ-0043. **These three are chosen because
+`rescan-01` resolves all of them**, which is what makes section 7 work: a
+finding the rescan does not resolve never closes its ticket, and the closing
+beat has nothing to show. The dry run on 2026-08-29 used `--start 10` and
+section 7 printed `wait: 2` where it promised `close_ticket` -- RZ-0010 and
+RZ-0101 are both still reported in rescan-01, so they persist, correctly and
+undemonstratively. Verified with 41: two of the three ratify, both open
+tickets, and both close at cycle $((C+12)) with their tracker issues.
+
+Other starts whose three findings are all resolved and untouched by earlier
+rehearsals: 51, 52, 53, 85, 184, 274, 278, 388, 389, 390. Whether a given
+finding ratifies is the reviewer's call and can differ between runs, so if
+none of the three opens a ticket, take the next start on that list rather
+than re-running the same one.
+
+The default start is 1, and
 RZ-0001 and RZ-0003 already carry issues on the tracker from earlier
 rehearsals. That matters because `find_issue` lists with `state=all`: a closed
 issue still counts as the issue for that finding, so chase would comment on a
@@ -212,7 +228,7 @@ spots.
 ### 3. The same cycle again — 6s
 
 ```bash
-./scripts/tick.sh --cycle $C --start 10 --limit 3
+./scripts/tick.sh --cycle $C --start 41 --limit 3
 ```
 
 `skipped_already_adjudicated` three times, and `preserved_outcomes` showing the
@@ -632,7 +648,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `exception.sh --sweep` | 1.8s |
 | `report.sh` | 13.8s–15.9s |
 | `verify-controls.sh --only armor,reviewer,resume,coverage` | 33.4s on 2026-08-28. Was 17.2s for the three while the reviewer check was re-reading a cached decision instead of calling the models |
-| `verify-controls.sh --only probe,secret` (pre-flight) | 5m23s on 2026-08-28 |
+| `verify-controls.sh --only probe,secret` (pre-flight) | 3.5-5.5 min. 5m23s on 2026-08-28, 3m29s on 2026-08-29. Two Cloud Run job executions; this is where the whole control-suite spread lives |
 | `verify-controls.sh --only probe` | 218s |
 | `verify-controls.sh --only secret` | ~2m |
 | `verify-controls.sh --only coverage` | 2.1s on 2026-08-28 |
@@ -642,6 +658,6 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `rescan.sh --dry-run` | 2.1s on 2026-08-28, three runs |
-| `rescan.sh --cycle N`, first apply | NOT MEASURED. 106 resolutions + 12 ingests; needs one rehearsal from a reset state |
+| `rescan.sh --cycle N`, first apply | 24s on 2026-08-29, from a reset state. 106 resolutions + 12 ingests |
 | `reset-derived.sh` dry run | 2.3s on 2026-08-28 |
 | `reset-derived.sh --confirm`, 29 docs | under 5s. Predates the rescan; it now also undoes 118 findings and the manifest, so re-measure |
