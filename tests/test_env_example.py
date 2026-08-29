@@ -79,8 +79,33 @@ def test_the_example_carries_no_real_values():
     assert "3119663582942330880" not in EXAMPLE
 
 
+def _documented_value(key: str) -> str:
+    """The value .env.example actually assigns, ignoring commentary.
+
+    Anchored to the start of a line so a `#`-prefixed mention cannot be read
+    as an assignment.
+    """
+    match = re.search(rf"^{re.escape(key)}=(.*)$", EXAMPLE, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
 def test_the_two_locations_are_documented_as_different():
-    """The single most expensive confusion in this build."""
-    assert "GOOGLE_CLOUD_LOCATION=" in EXAMPLE
-    assert "AGENT_ENGINE_LOCATION=" in EXAMPLE
-    assert "global" in EXAMPLE
+    """The single most expensive confusion in this build.
+
+    Asserting that the word "global" appears somewhere is not this check, and
+    was what this test used to do. It passed for as long as
+    GOOGLE_CLOUD_LOCATION was set to us-central1, because the word was sitting
+    in a comment three lines below explaining a split the file did not make.
+    A reader copies values, not commentary, so values are what is asserted.
+    """
+    model_location = _documented_value("GOOGLE_CLOUD_LOCATION")
+    engine_location = _documented_value("AGENT_ENGINE_LOCATION")
+
+    assert model_location == "global", (
+        "GOOGLE_CLOUD_LOCATION must be global. The reasoning and reviewer "
+        f"models are served from global and 404 from a named region. "
+        f"Found {model_location!r}.")
+    assert engine_location and engine_location != "global", (
+        "AGENT_ENGINE_LOCATION must be a named region. Agent Engine does not "
+        f"deploy to global. Found {engine_location!r}.")
+    assert model_location != engine_location

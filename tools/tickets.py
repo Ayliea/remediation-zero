@@ -100,6 +100,22 @@ class TicketWriter:
             ticket_ref = self._client.collection(COLLECTION).document(finding_id)
 
             if action is ChaseAction.OPEN_TICKET:
+                # merge, not replace. This branch opens a ticket that has
+                # never existed and reopens one a rescan regressed, and the
+                # second case only became reachable when CLOSE_TICKET landed.
+                # A plain set() served the first case correctly and silently
+                # destroyed the second: nudges, escalation, the whole history
+                # and the tracker issue number all replaced by a fresh
+                # document, so the console showed a finding the fleet had
+                # chased for weeks as though it had just been found.
+                #
+                # The counters do reset. A regression is a new problem and the
+                # owner gets the same three nudges before escalation as they
+                # would on any other ticket; inheriting nudges_sent would trip
+                # the MAX_NUDGES gate in chase.next_action immediately and
+                # escalate without ever asking. What is preserved is the
+                # record of what happened, which is the part that cannot be
+                # reconstructed later.
                 ticket_ref.set(
                     {
                         "finding_id": finding_id,
@@ -112,11 +128,24 @@ class TicketWriter:
                         "nudges_sent": 0,
                         "escalated": False,
                         "last_contact_sim_ts": now_sim_ts,
-                        "history": [
-                            {"action": "open_ticket", "cycle": cycle,
-                             "real_ts": stamp.real_ts, "sim_ts": now_sim_ts}
-                        ],
-                    }
+                        # A resolution that no longer holds must not sit
+                        # beside status "open" contradicting it. Same
+                        # treatment scan_store.reopen gives the finding.
+                        "resolved_cycle": firestore.DELETE_FIELD,
+                        "resolved_real_ts": firestore.DELETE_FIELD,
+                        "resolved_sim_ts": firestore.DELETE_FIELD,
+                        "resolved_by_scan": firestore.DELETE_FIELD,
+                    },
+                    merge=True,
+                )
+                # Appended rather than assigned, so a reopen extends the trail
+                # instead of starting it over. ArrayUnion creates the field
+                # when the ticket is genuinely new.
+                ticket_ref.update(
+                    {"history": firestore.ArrayUnion([
+                        {"action": "open_ticket", "cycle": cycle,
+                         "real_ts": stamp.real_ts, "sim_ts": now_sim_ts}
+                    ])}
                 )
                 self._deliver("open_ticket", finding_id, ticket_ref,
                               owner=owner, cycle=cycle, now_sim_ts=now_sim_ts,

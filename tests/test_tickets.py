@@ -21,6 +21,7 @@ to someone who already got the first one.
 """
 
 import pytest
+from google.cloud import firestore
 
 from tools.chase import ChaseAction, ChaseState
 from tools.clock import ClockMode, SimClock
@@ -35,16 +36,45 @@ OWNER = {"owner_id": "own-1", "email": "dev@example.invalid",
 # --- a Firestore that records what was asked of it --------------------------
 
 class FakeDoc:
+    """Models the Firestore write semantics this code actually depends on.
+
+    Faithful enough to tell a replace from a merge, and to resolve the
+    sentinels Firestore resolves server-side. That distinction is not a
+    detail: the previous double applied `set()` and `set(merge=True)`
+    identically and stored `ArrayUnion` objects verbatim, so it reported a
+    green suite while a reopened ticket was losing its entire history. A
+    double that cannot represent the failure cannot catch it.
+    """
+
     def __init__(self, docs, key, log):
         self._docs, self._key, self._log = docs, key, log
 
-    def set(self, data):
-        self._log.append(("set", self._key))
-        self._docs[self._key] = dict(data)
+    def set(self, data, merge=False):
+        self._log.append(("set/merge" if merge else "set", self._key))
+        if merge:
+            self._apply(self._docs.setdefault(self._key, {}), data)
+        else:
+            self._docs[self._key] = self._apply({}, data)
 
     def update(self, data):
         self._log.append(("update", self._key))
-        self._docs.setdefault(self._key, {}).update(data)
+        self._apply(self._docs.setdefault(self._key, {}), data)
+
+    @staticmethod
+    def _apply(target, data):
+        """Resolve the field transforms rather than storing them as values."""
+        for key, value in data.items():
+            if value is firestore.DELETE_FIELD:
+                target.pop(key, None)
+            elif isinstance(value, firestore.ArrayUnion):
+                merged = list(target.get(key, []))
+                merged.extend(v for v in value.values if v not in merged)
+                target[key] = merged
+            elif isinstance(value, firestore.Increment):
+                target[key] = target.get(key, 0) + value.value
+            else:
+                target[key] = value
+        return target
 
 
 class FakeCollection:
@@ -207,6 +237,66 @@ def test_closing_keeps_the_history_rather_than_deleting_the_ticket(writer, clien
     assert ticket["status"] == "resolved"
     assert ticket["resolved_cycle"] == 5
     assert ticket["opened_cycle"] == 5, "the opening record was discarded"
+
+
+def test_reopening_after_a_regression_keeps_the_whole_trail(writer, client):
+    """A rescan can put a closed finding back to open, and chase then reopens
+    the ticket through OPEN_TICKET. That branch used to replace the document,
+    so a finding the fleet had chased for weeks came back looking new: nudges
+    gone, escalation gone, history a single entry, tracker issue number wiped.
+
+    The whole lifecycle has to survive, because the record of what happened is
+    the part that cannot be reconstructed afterwards.
+    """
+    st = state(ticket_open=True)
+    act(writer, ChaseAction.OPEN_TICKET, st, cycle=5)
+    act(writer, ChaseAction.NUDGE, st, cycle=6)
+    client.docs[(COLLECTION, "RZ-1")]["github_issue"] = 42
+    act(writer, ChaseAction.CLOSE_TICKET, st, cycle=7)
+
+    # The regression: the finding is open again, the ticket is not.
+    act(writer, ChaseAction.OPEN_TICKET, state(ticket_open=False), cycle=8)
+
+    ticket = client.docs[(COLLECTION, "RZ-1")]
+    actions = [h["action"] for h in ticket["history"]]
+    assert actions == ["open_ticket", "nudge", "close_ticket", "open_ticket"]
+    assert ticket["github_issue"] == 42, "the tracker link was discarded"
+    assert ticket["opened_cycle"] == 8
+    assert ticket["status"] == "open"
+
+
+def test_reopening_gives_the_owner_a_fresh_nudge_budget(writer, client):
+    """A regression is a new problem, so the counters reset and the owner gets
+    the same three nudges as on any other ticket. Inheriting nudges_sent would
+    trip the MAX_NUDGES gate at once and escalate without ever asking."""
+    st = state(ticket_open=True)
+    act(writer, ChaseAction.OPEN_TICKET, st, cycle=5)
+    act(writer, ChaseAction.NUDGE, st, cycle=6)
+    act(writer, ChaseAction.ESCALATE, st, cycle=7)
+    act(writer, ChaseAction.CLOSE_TICKET, st, cycle=8)
+
+    act(writer, ChaseAction.OPEN_TICKET, state(ticket_open=False), cycle=9)
+
+    ticket = client.docs[(COLLECTION, "RZ-1")]
+    assert ticket["nudges_sent"] == 0
+    assert ticket["escalated"] is False
+
+
+def test_reopening_clears_a_resolution_that_no_longer_holds(writer, client):
+    """A resolved_* stamp sitting beside status "open" is a record that
+    contradicts itself. scan_store.reopen deletes them on the finding; the
+    ticket gets the same treatment."""
+    st = state(ticket_open=True)
+    act(writer, ChaseAction.OPEN_TICKET, st, cycle=5)
+    act(writer, ChaseAction.CLOSE_TICKET, st, cycle=6)
+    assert "resolved_cycle" in client.docs[(COLLECTION, "RZ-1")]
+
+    act(writer, ChaseAction.OPEN_TICKET, state(ticket_open=False), cycle=7)
+
+    ticket = client.docs[(COLLECTION, "RZ-1")]
+    for stale in ("resolved_cycle", "resolved_real_ts",
+                  "resolved_sim_ts", "resolved_by_scan"):
+        assert stale not in ticket, f"{stale} survived the reopen"
 
 
 def test_closing_records_the_scan_that_justified_it(writer, client):
