@@ -145,8 +145,13 @@ c = firestore.Client()
 # matters most -- the chase steps land there and nowhere else, so a picker
 # that skips it hands back a cycle the last rehearsal's chase already spent.
 used = set()
-for coll in ('cycles', 'decisions', 'assignments', 'human_queue', 'reports'):
+for coll in ('cycles', 'decisions', 'assignments', 'human_queue'):
     used |= {d.to_dict().get('cycle') for d in c.collection(coll).stream()}
+# reports are written to their own Firestore database, so the default client
+# cannot see them. Listing 'reports' above returned two stale documents from
+# the default database and silently missed every current report.
+used |= {d.to_dict().get('cycle')
+         for d in firestore.Client(database='reports').collection('reports').stream()}
 used = {v for v in used if isinstance(v, int) and v < 9000}
 print(max(used, default=0) + 20)")
 echo "cycle $C, $((C+2))-$((C+10)) for the chase steps, $((C+11))-$((C+12)) for the rescan"
@@ -448,10 +453,10 @@ only one of them is ever true.
 
 **Run this last, after every other state change.** A report is a snapshot of
 the figures it was handed, so one generated before the chase steps describes a
-fleet that no longer exists. The console prints the report prose directly above
+fleet that no longer exists. The console prints the report prose directly below
 the live counters, which means a stale report contradicts the numbers beside it
 inside a single screenshot — that is how the dry run noticed, with a report
-saying "14 total tickets" sitting above a counter reading 6.
+saying "14 total tickets" sitting under a counter reading 6.
 
 The reporting agent has no model client that can compute and no access to
 write anything but reports. It describes figures it was handed. The console
@@ -529,8 +534,8 @@ correctly and it is a terrible opening shot. Rehearsal hit exactly this.
 Then show the logs. One publish, two workers, each under its own identity:
 
 ```
-tick_started  → tick_finished  cycle=30692  rz-worker-chase      {'wait': 6}
-tick_started  → tick_finished  cycle=30692  rz-worker-exception  {'none': 1}
+tick_started  → tick_finished  cycle=9003  rz-worker-chase      {'wait': 6}
+tick_started  → tick_finished  cycle=9003  rz-worker-exception  {'none': 1}
 ```
 
 The second publish gets `tick_already_ran` from both. The cycle is
@@ -608,7 +613,7 @@ Ending on a named limit is stronger than ending on a claim.
 | `advance() is not available in real mode` | Missing `SIM_CLOCK_MODE=sim` | This is the guard working. Say so, prefix, re-run. |
 | Everything says `skipped` | `$C` already used | Pick a higher number |
 | Console looks like old code | Traffic pinned to an earlier revision | `gcloud run services update-traffic … --to-latest`. The deploy scripts now refuse rather than let this pass. |
-| No GitHub issues appear | `GITHUB_TICKET_REPO` or `GITHUB_TOKEN` unset | The log says `delivery_disabled` and names which. The fleet decides identically without it. |
+| No GitHub issues appear | `GITHUB_TICKET_REPO` or `GITHUB_TOKEN` unset | The log says `delivery_disabled` and names both variables — not which of the two is missing, so check both. The fleet decides identically without it. |
 | Registry search finds nothing | The catalogue lags the create operation | The script already waits and retries; give it a minute |
 
 The 429 is worth keeping if it happens. It is a real capacity failure being

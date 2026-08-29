@@ -451,6 +451,24 @@ Every check performs the action the control is meant to stop and reports what ac
 [PASS] Absence alone never closes a finding
 ```
 
+Two of the six run as Cloud Run jobs, and they have to exist before those
+checks can do anything. Each runs **as** the identity under test — that is the
+whole point, and it is why neither can be replaced by impersonating the
+identity from a laptop — so each is deployed with that service account:
+
+```bash
+gcloud run jobs deploy reporting-write-probe --source . --region=us-central1 \
+  --service-account rz-reporting@$GOOGLE_CLOUD_PROJECT.iam.gserviceaccount.com \
+  --command python --args=-u,ui/control_probe.py
+gcloud run jobs deploy exception-secret-probe --source . --region=us-central1 \
+  --service-account rz-exception@$GOOGLE_CLOUD_PROJECT.iam.gserviceaccount.com \
+  --command python --args=-m,ui.secret_probe
+```
+
+Until they are deployed, `verify-controls.sh` reports both as inconclusive
+rather than as passing or failing, which is the correct answer for a check
+that did not run.
+
 The last one is the newest and the one worth watching, because it changes a
 single variable. It runs the real reconciler against the real findings twice
 with the same empty scan, and only the coverage manifest differs:
@@ -502,6 +520,7 @@ gcloud run services delete rz-worker-chase --region=us-central1
 gcloud run services delete rz-worker-exception --region=us-central1
 gcloud run services delete remediation-zero-console --region=us-central1
 gcloud run jobs delete reporting-write-probe --region=us-central1
+gcloud run jobs delete exception-secret-probe --region=us-central1
 gcloud firestore databases delete --database=reports
 ```
 

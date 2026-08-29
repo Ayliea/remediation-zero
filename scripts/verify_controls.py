@@ -165,7 +165,8 @@ def _run_probe_job(job: str, name: str) -> None:
     )
     if execute.returncode != 0 and job in execute.stderr:
         record(name, False,
-               f"INCONCLUSIVE: the {job} job is not deployed. See the README.",
+               f"INCONCLUSIVE: the {job} job is not deployed. Deploy it with the "
+               f"command in README section 9.",
                inconclusive=True)
         return
 
@@ -208,7 +209,9 @@ def check_reporting_cannot_write_tickets() -> None:
         record(
             "Reporting identity is denied a ticket write",
             False,
-            "INCONCLUSIVE: the probe job is not deployed. See scripts/grant-iam.sh.",
+            "INCONCLUSIVE: the probe job is not deployed. Deploy it with the "
+            "command in README section 9. grant-iam.sh only grants "
+            "the bindings; it creates no jobs.",
             inconclusive=True,
         )
         return
