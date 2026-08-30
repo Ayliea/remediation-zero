@@ -1,0 +1,67 @@
+# Copyright 2026 Daviyon Daniels
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The suite, on every push. No secrets are configured and none are needed:
+# the tests touch no Google Cloud service, which is why this can run at all
+# on a runner that has never authenticated. That is a property worth keeping.
+# The repository rule is that a cloud service is never mocked to make a test
+# pass -- the tests that need the real thing are in verify-controls.sh, which
+# performs the action each control is meant to stop and cannot run here.
+#
+# So a green badge means the logic holds. It does not mean the controls hold;
+# that claim needs the deployment and is made separately.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12.3 locally. ADK requires >=3.10; the constraints file is
+          # generated against 3.12, so the runner matches rather than floats.
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install pinned dependencies
+        # requirements.txt carries the agent framework, requirements-ui.txt
+        # the FastAPI console. Both are needed: the console and worker tests
+        # import fastapi, and httpx reaches the test client transitively
+        # through google-adk. Constraints pin the whole resolved tree.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-ui.txt -c constraints-3.12.txt
+
+      - name: Run the suite
+        # REASONING_MODEL is read at import time by the orchestrator module,
+        # because that is the symbol ADK's loader looks for. conftest supplies
+        # a default; this mirrors it so the job does not depend on that.
+        env:
+          REASONING_MODEL: gemini-3.5-flash
+          SIM_CLOCK_MODE: real
+        run: pytest -q
