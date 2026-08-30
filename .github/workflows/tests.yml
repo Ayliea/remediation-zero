@@ -58,10 +58,8 @@ jobs:
           pip install -r requirements.txt -r requirements-ui.txt -c constraints-3.12.txt
 
       - name: Run the suite
-        # REASONING_MODEL is read at import time by the orchestrator module,
-        # because that is the symbol ADK's loader looks for. conftest supplies
-        # a default; this mirrors it so the job does not depend on that.
-        env:
-          REASONING_MODEL: gemini-3.5-flash
-          SIM_CLOCK_MODE: real
+        # No env and no secrets. conftest seeds the three settings the agent
+        # modules read at import time, so a clean checkout is all the suite
+        # needs. If this step ever requires something here, that is a signal
+        # the suite has grown a dependency on a developer's .env.
         run: pytest -q

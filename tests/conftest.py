@@ -25,9 +25,17 @@ import os
 
 import pytest
 
-# Matches the value in .env.example. Set before collection so that importing
-# agents.orchestrator.agent succeeds.
+# Set before collection so that importing agents.orchestrator.agent succeeds.
+# The orchestrator wraps both sub-agents in AgentTool at module scope, so it
+# needs the reviewer's model named as well as its own -- which is why
+# REVIEWER_MODEL belongs here and not only in .env.
+#
+# All three have to be seeded rather than left to load_dotenv. A developer
+# machine has a .env and never notices the difference; a clean checkout does
+# not, and CI is a clean checkout. Omitting REVIEWER_MODEL broke collection on
+# the first run of the workflow while the same suite passed locally.
 os.environ.setdefault("REASONING_MODEL", "gemini-3.5-flash")
+os.environ.setdefault("REVIEWER_MODEL", "gemma-4-26b-a4b-it-maas")
 os.environ.setdefault("SIM_CLOCK_MODE", "real")
 
 
