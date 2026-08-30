@@ -26,8 +26,9 @@ is worth less than one they can break.
   falls in a specific place. → `./scripts/verify-controls.sh`
 
 - **Every decision is challenged by a reviewer on a different model family, and
-  it disagrees.** 79 rejections across 121 verdicts; 53% of findings ratified;
-  42 of 79 needed a second proposal. The rate is reported rather than tuned
+  it disagrees.** It rejects 65% of proposals and ratifies 53% of findings —
+  two different denominators, both reported, because a rejected proposal is
+  re-proposed once. The rate is reported rather than tuned
   away, because a reviewer that ratifies everything is indistinguishable from
   having no reviewer. → `./scripts/tick.sh --cycle 1 --limit 3`
 
@@ -187,7 +188,7 @@ The remaining five agents hold distinct identities with collection separation en
 
 **Two-layer injection defense, measured rather than assumed.** Untrusted text — scanner comment fields, ticket replies, vendor advisories — passes Model Armor before reaching any reasoning context, on every path including the deployed agent's. Ask the playground to quote the planted finding's scanner text and it returns `[withheld: this scanner comment did not clear the untrusted-content boundary and has not been shown to any model]`; ask it for a benign one and the text comes back intact. Against the planted payload it returns `MATCH_FOUND` on the prompt-injection filter at `MEDIUM_AND_ABOVE`; against a benign scanner comment it returns `NO_MATCH_FOUND`. The boundary fails closed on an unreachable screener, a filter that did not execute, and an unparseable response, because passing unscreened text into a reasoning context on a bad minute is exactly the failure it exists to prevent.
 
-The reviewer is the second layer, and measuring it corrected an overclaim. With Model Armor disabled the reviewer rejected the planted finding every time, but named the injection in only one run out of five: it was finding a sufficient reason to reject on severity grounds and stopping. The injection never succeeded, but "the reviewer independently catches it" was not true as written. The reviewer now assesses the untrusted text first, before the proposal at all. Detection went from one in five to six in six. The assessment reaches the decision record only when it names something — 14 of 121 verdicts carry one — so absence in the record means the reviewer read the text and found nothing, or did not answer, and the two are not distinguishable afterwards.
+The reviewer is the second layer, and measuring it corrected an overclaim. With Model Armor disabled the reviewer rejected the planted finding every time, but named the injection in only one run out of five: it was finding a sufficient reason to reject on severity grounds and stopping. The injection never succeeded, but "the reviewer independently catches it" was not true as written. The reviewer now assesses the untrusted text first, before the proposal at all. Detection went from one in five to six in six. The assessment reaches the decision record only when it names something — about one verdict in ten carries one — so absence in the record means the reviewer read the text and found nothing, or did not answer, and the two are not distinguishable afterwards.
 
 **The fleet runs itself, and says so when it cannot.** Cloud Scheduler publishes one tick a day to a single topic, which fans out to two push subscriptions and two workers — one running as `rz-chase`, one as `rz-exception`. The fan-out is not decoration: a single worker running both agents would need one credential holding both agents' access, which is the shared credential the architecture does not have.
 
@@ -534,7 +535,7 @@ Minimum instances are zero and maximum instances are capped, so idle cost is neg
 
 ## Findings and learnings
 
-**The reviewer disagrees often, and on substance.** Across 121 verdicts recorded so far it issued 79 rejections, and 53% of findings were ratified. Those are two different denominators and both are reported: a rejected proposal is re-proposed once, so one finding can produce two verdicts, and 42 of 79 findings needed that second proposal. The objections fall into three classes, counted over those 79 rejections: 42 (53%) say the proposed severity is not supported by the evidence triage itself cited, 19 (24%) that the remediation names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and 17 (22%) that the proposed SLA exceeds the CISA KEV due date for the same CVE. They overlap, so the shares do not total 100. The last is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
+**The reviewer disagrees often, and on substance.** It rejects 65% of proposals and ratifies 53% of findings. Those are two different denominators and both are reported: a rejected proposal is re-proposed once, so one finding can produce two verdicts, and rather more than half of them do. The objections fall into three classes, as shares of all rejections: 55% say the proposed severity is not supported by the evidence triage itself cited, 23% that the remediation names no version — "apply the vendor security patch" rather than "upgrade to 2.4.39" — and 22% that the proposed SLA exceeds the CISA KEV due date for the same CVE. They overlap, so the shares do not total 100. Ratios rather than counts on purpose: every rehearsal adds decisions and the counts only ever climb, while these proportions have held across the whole build. The last is the one that justifies the cross-family design: it requires holding a regulatory deadline and a proposed deadline in mind at once and noticing they conflict.
 
 **A high disagreement rate is a health metric, not a defect.** A reviewer that ratifies everything is indistinguishable from having no reviewer, so the rate is reported as a headline figure rather than buried.
 

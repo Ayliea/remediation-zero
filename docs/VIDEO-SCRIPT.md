@@ -34,8 +34,8 @@ longer matches the console is worse than no figure.
 
 | Claim in the script | Where it comes from |
 |---|---|
-| 53% of rejections cite unsupported severity | `decisions` collection, verdict reasons |
-| 42 of 79 ratified | console stat strip |
+| 55% of rejections cite unsupported severity | `decisions` collection, verdict reasons |
+| 53% of findings ratified, 65% of proposals rejected | console stat strip |
 | unattended run, cycle 30693 | Cloud Logging, `rz-worker-*`, 2026-08-28T09:01 |
 | `tick_already_ran` ×2 | same, cycles 9003 and 9004 |
 | six controls | `./scripts/verify-controls.sh` |
@@ -109,16 +109,16 @@ interesting part and every second here is taken from the parts that are.
 > out, it is the headline metric, because a reviewer that ratifies everything
 > is indistinguishable from having no reviewer at all.
 >
-> And the disagreement is systematic. Across 79 decisions, **53% of all
-> rejections say the same thing**: triage proposed a severity its own cited
-> CVSS evidence does not support. One model family found a consistent bias in
-> another, and wrote down why, 79 times.
+> And the disagreement is systematic. **55% of all rejections say the same
+> thing**: triage proposed a severity its own cited CVSS evidence does not
+> support. One model family found a consistent bias in another, and wrote down
+> why, every single time.
 >
 > Rejected once, it is re-proposed with the feedback. Five findings were
 > ratified on that second attempt. Rejected twice, it goes to a person.
 
 **Direction:** this is the strongest 45 seconds available. Do not rush it.
-Say "53%" slowly.
+Say "55%" slowly.
 
 ---
 
@@ -231,9 +231,9 @@ and never the Google Cloud proof.** After that:
 
 1. The Model Armor sentences in 2:55 (keep the DENIED/ALLOWED table)
 2. The stack list in 3:30 — the architecture diagram carries it
-3. The re-proposal detail in 0:50 (keep the 53%)
+3. The re-proposal detail in 0:50 (keep the 55%)
 
-Never cut: the cold open, the 53% figure, `tick_already_ran`, the two-clock
+Never cut: the cold open, the 55% figure, `tick_already_ran`, the two-clock
 distinction, the word **Gemma**, the Google Cloud deployment proof, or the
 limitations.
 

@@ -50,13 +50,13 @@ to lose that by rounding for effect.
 >
 > I believed that when I designed it. I had no evidence for it.
 >
-> Then I counted. Across 79 decisions the reviewer rejected 47% of proposals,
-> and **53% of those rejections say the same thing**: the first model inflated
+> Then I counted. The reviewer rejects 65% of proposals, and **55% of those
+> rejections say the same thing**: the first model inflated
 > severity past the CVSS evidence it had itself cited. Verbatim from the
 > record — *"The severity is escalated to critical without evidence supporting
 > such a jump from the CVSS base of 7.8."*
 >
-> A 47% disagreement rate looks like a defect rate. It isn't. A reviewer that
+> A 65% disagreement rate looks like a defect rate. It isn't. A reviewer that
 > ratifies everything is indistinguishable from having no reviewer at all, so
 > the number that should worry you is the one approaching zero.
 >
@@ -73,7 +73,7 @@ to lose that by rounding for effect.
 
 **Notes:** put the repo and blog links in the first comment, not the post body.
 Keep `#AllThingsAgenticHackathon` as the first hashtag. If LinkedIn truncates
-the post at "See more", the cut should fall after the 53% paragraph — that is
+the post at "See more", the cut should fall after the 55% paragraph — that is
 the line worth reading.
 
 ---
@@ -98,12 +98,12 @@ hook; the rest are proof.
 > — the reviewer agent, on the record
 
 ### Slide 3 — the number
-> **53%**
+> **55%**
 > of all rejections say the same thing:
 > the first model inflated severity past
 > its own cited evidence.
 >
-> 79 decisions. Every reason logged.
+> Every decision challenged. Every reason logged.
 
 ### Slide 4 — what it is
 > **Remediation Zero**
@@ -122,9 +122,9 @@ hook; the rest are proof.
 > its own reasoning shares its own blind spots. I believed that when I designed
 > it. I didn't have evidence for it.
 >
-> Then I counted. Across 79 decisions it rejected 47% of proposals, and 53% of
-> those rejections say the same thing: the first model kept inflating severity
-> past the CVSS evidence it had itself cited.
+> Then I counted. It rejects 65% of proposals, and 55% of those rejections say
+> the same thing: the first model kept inflating severity past the CVSS
+> evidence it had itself cited.
 >
 > A high disagreement rate looks like a defect. It isn't. A reviewer that
 > ratifies everything is indistinguishable from having no reviewer at all.
@@ -143,8 +143,7 @@ hook; the rest are proof.
    family rejected it and explained why."
 2. "Quoted rejection from the reviewer agent, objecting that severity was
    escalated to critical without supporting CVSS evidence."
-3. "Large figure: 53 percent of all rejections cite unsupported severity,
-   across 79 decisions."
+3. "Large figure: 55 percent of all rejections cite unsupported severity." 
 4. "Project card: Remediation Zero, an agent fleet for the six weeks after a
    vulnerability scan, built on Google Cloud with ADK 2.8."
 

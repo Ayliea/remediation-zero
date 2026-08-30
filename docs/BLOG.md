@@ -39,7 +39,7 @@ owner who never opened the ticket is not.
 The part worth writing about is not the pipeline. It is a number I did not
 expect and initially misread as a bug.
 
-### 47% disagreement
+### 65% disagreement
 
 Every triage decision in this system is challenged before it becomes state.
 A reasoning agent on Gemini 3.5 Flash proposes a severity, an SLA, and a
@@ -51,9 +51,9 @@ argument for that is easy to state and hard to verify: a model auditing its own
 reasoning shares its own blind spots. I believed it when I designed it. I did
 not have evidence for it.
 
-Across 79 decisions, the reviewer ratified 42 and rejected the rest. My first
-reaction was that something was broken. A 47% disagreement rate looks like a
-defect rate.
+The reviewer rejects 65% of the proposals it sees, and just over half of all
+findings survive to be ratified. My first reaction was that something was
+broken. A 65% disagreement rate looks like a defect rate.
 
 It is not. A reviewer that ratifies everything is indistinguishable from having
 no reviewer at all, so the rate is a health metric — and the direction that
@@ -61,12 +61,12 @@ should worry you is the one approaching zero.
 
 ### The rejections are not random
 
-I categorised all 79 rejection reasons expecting a spread. Instead:
+I categorised every rejection reason expecting a spread. Instead:
 
 | What the reviewer objected to | Share |
 |---|---|
-| Severity escalated beyond what the CVSS evidence supports | **53%** |
-| Remediation text naming no specific version | 24% |
+| Severity escalated beyond what the CVSS evidence supports | **55%** |
+| Remediation text naming no specific version | 23% |
 | Proposed SLA conflicting with the CISA KEV due date | 22% |
 
 More than half of all rejections say the same thing. Verbatim, from the record:
