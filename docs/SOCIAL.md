@@ -143,7 +143,7 @@ hook; the rest are proof.
    family rejected it and explained why."
 2. "Quoted rejection from the reviewer agent, objecting that severity was
    escalated to critical without supporting CVSS evidence."
-3. "Large figure: 55 percent of all rejections cite unsupported severity." 
+3. "Large figure: 55 percent of all rejections cite unsupported severity."
 4. "Project card: Remediation Zero, an agent fleet for the six weeks after a
    vulnerability scan, built on Google Cloud with ADK 2.8."
 
