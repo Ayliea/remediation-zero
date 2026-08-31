@@ -199,6 +199,35 @@ print('READY' if asg and sla else 'NOT READY -- no ticket will open, pick a new 
 #     than reuse it; by the time you read this its chase cycles may be spent.
 ```
 
+# 11. After the report runs, re-read the console and confirm the figures you
+#     are about to say out loud.
+#
+#     The console does not compute the disagreement rate live. ui/app.py
+#     renders the metrics block frozen into the most recent report document,
+#     so the strip shows whatever report.sh last wrote rather than what
+#     Firestore currently holds, and the two diverge the moment any cycle
+#     runs after a report. On 2026-08-31 the strip read 65% from a report at
+#     cycle 1056 while live Firestore was already at 67.3%.
+#
+#     That is the right design -- a report is a snapshot of the figures it
+#     was handed -- and it has a consequence worth planning around: running
+#     report.sh during the demo MOVES the number you are about to quote. Run
+#     it, then read the strip, then say what the strip says.
+curl -s https://remediation-zero-console-978104855285.us-central1.run.app/ \
+  | .venv/bin/python -c "
+import re, sys
+h = sys.stdin.read()
+for k, v in re.findall(r'fig-k\">([^<]+)</span>\s*<span class=\"fig-v\">([^<]+)</span>', h):
+    print(f'  {k.strip():28} {v.strip()}')"
+
+#     Expect three rows: reviewer disagreement, ratified, needing a person.
+#     Compare the first two against the claims table in docs/VIDEO-SCRIPT.md
+#     and the spoken lines at 0:50. If they no longer match, change the
+#     script -- never the console. A figure quoted from a file that no longer
+#     matches the screen is worse than no figure, and this is the one beat
+#     where a judge sees the file's claim and the screen at the same time.
+```
+
 The chase section advances to `$((C+2))` through `$((C+10))` and the rescan
 takes `$((C+11))` and `$((C+12))`, so the
 picker leaves a gap of 20 rather than taking the next integer — enough to clear
