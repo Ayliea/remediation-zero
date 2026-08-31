@@ -97,10 +97,31 @@ Scroll position matters: the human queue leads the page, the two clocks sit
 above it, the rescan card is mid-page, the session footer is at the bottom.
 Warm it twice before recording; cold start is 18 seconds of white screen.
 
-**Tab 2 — Cloud Logging**, pre-filtered to the two workers:
-https://console.cloud.google.com/logs/query;query=resource.labels.service_name%3D~%22rz-worker-.%2A%22?project=remediation-zero
-Set the time range to cover 09:01 UTC on the day of the unattended run before
-you record. Finding the range on camera is twenty wasted seconds.
+**Tab 2 — Cloud Logging**, filtered to the fleet's decisions:
+https://console.cloud.google.com/logs/query;query=resource.labels.service_name%3D~%22rz-worker-.%2A%22%0AjsonPayload.event%3D%28%22tick_started%22%20OR%20%22tick_finished%22%20OR%20%22chase_finished%22%20OR%20%22sweep_finished%22%20OR%20%22tick_already_ran%22%29?project=remediation-zero
+
+Filter on the events, not just the service. Matching only
+`service_name=~"rz-worker-.*"` returns every line those containers emit, and
+what surfaces at the top is uvicorn startup and shutdown chatter, container
+rollout notices, and any `tick_malformed` left over from a poison test. The
+first entries you see are then a deployment from days ago rather than the
+fleet deciding anything. The query above narrows to the five lifecycle events
+and nothing else:
+
+```
+resource.labels.service_name=~"rz-worker-.*"
+jsonPayload.event=("tick_started" OR "tick_finished" OR "chase_finished" OR "sweep_finished" OR "tick_already_ran")
+```
+
+Set the time range before recording. Finding it on camera is twenty wasted
+seconds.
+
+**Pick the freshest unattended run, not the one written down here.** Cloud
+Scheduler fires daily at 09:00 UTC, so there is a new one every morning and
+the most recent is the most convincing: "this morning, with nobody watching"
+lands harder than a date from last week. On 2026-08-31 the run was
+`cycle-30696` at 09:00:21, both workers finishing with no actions taken.
+`cycle-30693` from 2026-08-28T09:01 is still in the logs as a fallback.
 
 **Tab 3 — the tracker.** https://github.com/Ayliea/remediation-zero-tickets/issues
 Filter to `is:issue` so both open and closed are visible; the closure beat
