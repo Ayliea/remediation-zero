@@ -4,7 +4,7 @@ An autonomous agent fleet that owns the vulnerability remediation lifecycle for 
 
 Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
-[![CI](https://github.com/Ayliea/remediation-zero/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayliea/remediation-zero/actions/workflows/ci.yml)
+[![CI](https://github.com/Ayliea/remediation-zero/actions/workflows/tests.yml/badge.svg)](https://github.com/Ayliea/remediation-zero/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **[Open the console](https://remediation-zero-console-978104855285.us-central1.run.app)** ·
