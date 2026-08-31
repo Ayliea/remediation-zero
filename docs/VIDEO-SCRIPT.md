@@ -52,6 +52,50 @@ two Cloud Run job checks, which take 5m23s and must be started first.
 
 ---
 
+## Window plan — set this up before you press record
+
+Everything is driven from **two terminals and four browser tabs**. Open all of
+them, in this order, and leave them open. Switching is the only navigation the
+recording does; nothing is opened from scratch on camera, because a page
+loading live is dead air and a mistyped URL is a retake.
+
+**Terminal A — the one on camera.** Full screen, large font. Widen it past
+200 columns or the DENIED/ALLOWED rows wrap and the pairs split across lines.
+
+```bash
+cd ~/dev/remediation-zero
+export GITHUB_TICKET_REPO="Ayliea/remediation-zero-tickets"
+export GITHUB_TOKEN="$(gh auth token)"
+export C=<the fresh cycle from pre-flight step 9>
+```
+
+**Terminal B — off camera.** Start the slow control run here during pre-flight
+so its result is already on screen when you reach 2:45:
+
+```bash
+./scripts/verify-controls.sh --only probe,secret
+```
+
+**Tab 1 — the console.** https://remediation-zero-console-978104855285.us-central1.run.app/
+Scroll position matters: the human queue leads the page, the two clocks sit
+above it, the rescan card is mid-page, the session footer is at the bottom.
+Warm it twice before recording; cold start is 18 seconds of white screen.
+
+**Tab 2 — Cloud Logging**, pre-filtered to the two workers:
+https://console.cloud.google.com/logs/query;query=resource.labels.service_name%3D~%22rz-worker-.%2A%22?project=remediation-zero
+Set the time range to cover 09:01 UTC on the day of the unattended run before
+you record. Finding the range on camera is twenty wasted seconds.
+
+**Tab 3 — the tracker.** https://github.com/Ayliea/remediation-zero-tickets/issues
+Filter to `is:issue` so both open and closed are visible; the closure beat
+needs a closed issue and the default filter hides it.
+
+**Tab 4 — the Agent Engine.**
+https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero
+The resource ID in the URL is the proof; make sure it is readable on screen.
+
+---
+
 ## The spine
 
 Three claims, in this order, because this is the order that survives a judge
@@ -82,6 +126,11 @@ from the spine.
 >
 > That is not a filter. That is a reviewer.
 
+**Do this:** Terminal A. Start recording, then run
+`./scripts/tick.sh --cycle $C --start 41 --limit 3` and begin talking as the
+first `adjudicated` line with a rejection appears. Do not pre-run it and
+scroll back — the point is that it is happening.
+
 **Direction:** no logo, no name, no "hi, I'm". The rejection text is the first
 thing on screen and the first thing said. Let the quote sit for a beat.
 
@@ -98,6 +147,9 @@ thing on screen and the first thing said. Let the quote sit for a beat.
 >
 > Remediation Zero owns that tail. Seven responsibilities, each with its own
 > service account, running on Google Cloud.
+
+**Do this:** switch to Tab 1. You land on the human queue because it leads the
+page. Do not scroll yet.
 
 **Direction:** twenty-five seconds. Do not elaborate. The problem is not the
 interesting part and every second here is taken from the parts that are.
@@ -124,6 +176,10 @@ interesting part and every second here is taken from the parts that are.
 > Rejected once, it is re-proposed with the feedback. Rejected twice, it goes
 > to a person.
 
+**Do this:** stay in Tab 1. Scroll up to the stat strip for the two rates, then
+down to the decisions table and stop on a rejected row so the reviewer's own
+reason is legible. Read it off the screen rather than from this file.
+
 **Direction:** this is the strongest 40 seconds available. Do not rush it.
 Say "55%" slowly.
 
@@ -144,6 +200,17 @@ Then publish the tick again live so `tick_already_ran` appears on camera.
 > I publish the same tick again: **`tick_already_ran`**. Pub/Sub is at-least-
 > once, but the second delivery cannot advance the authoritative lifecycle a
 > second time.
+
+**Do this:** switch to Tab 2 for the 09:01 entries, then back to Terminal A and
+publish the tick twice, using a cycle nothing has claimed:
+
+```bash
+gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
+gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
+```
+
+Then return to Tab 2 and refresh. `tick_already_ran` appears twice, one per
+worker. Derive `$T` in pre-flight, not here.
 
 **Direction:** point at the literal `tick_already_ran` line. Publishing it
 live is stronger than a captured log, not weaker: it is reproducible on
@@ -166,6 +233,17 @@ with its nudge and escalation comments.
 > owner, and escalate. These are real GitHub issues carrying the ratified
 > severity, deadline, remediation, and the reviewer's own reason.
 
+**Do this:** Terminal A, the stepped loop rather than one jump — one large jump
+escalates everything at once and the nudging never appears:
+
+```bash
+for d in 2 4 6 8 10; do
+  SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((C+d)) --advance-days $d
+done
+```
+
+Then Tab 3, refresh, and open the newest issue to show the nudge comments.
+
 **Direction:** say "simulated" out loud before showing it. The two-clock design
 only counts for something if you draw attention to the distinction yourself.
 
@@ -181,6 +259,19 @@ only counts for something if you draw attention to the distinction yourself.
 > telemetry cannot manufacture success. Issue 24 closes with the scan ID and
 > that coverage reason preserved in the record.
 
+**Do this:** Terminal A — dry run on camera first, then apply, then chase again
+so the ticket and its issue close:
+
+```bash
+./scripts/rescan.sh --cycle $((C+11)) --dry-run
+./scripts/rescan.sh --cycle $((C+11))
+SIM_CLOCK_MODE=sim ./scripts/chase.sh --cycle $((C+12))
+```
+
+Then Tab 1, refresh — the rescan card replaces the "No rescan has run yet"
+empty state, which is why pre-flight clears it. Then Tab 3, refresh, and show
+the issue now closed with its closing comment.
+
 **Direction:** hold 106 and 102 on the same screen. The refusal number is the
 credibility proof; never show 106 alone.
 
@@ -189,6 +280,17 @@ credibility proof; never show 106 alone.
 ## 2:45–3:15 — Claim three. The boundary, performed.
 
 **On screen:** the DENIED / ALLOWED table from `verify-controls`.
+
+**Do this:** Terminal A for the fast four, which run in about 33 seconds:
+
+```bash
+./scripts/verify-controls.sh --only armor,reviewer,resume,coverage
+```
+
+Then switch to **Terminal B**, where `--only probe,secret` has been running
+since pre-flight, and show its DENIED/ALLOWED rows. Those two are Cloud Run
+jobs and take about five minutes; starting them here is four minutes of dead
+air with the camera running.
 
 > Each agent has its own service account. The reporting agent is structurally
 > incapable of writing a ticket — and I do not assert that, I prove it by
@@ -207,6 +309,11 @@ credibility proof; never show 106 alone.
 ## 3:15–3:45 — Deployment proof and close.
 
 **On screen:** the Agent Engine resource, then the console footer.
+
+**Do this:** Tab 4 — let the resource ID `3119663582942330880` sit in the URL
+bar long enough to read. Then Tab 1, scroll to the bottom, and hold on the
+footer where the session's elapsed time is printed. That number is the one
+thing in the demo that cannot be manufactured.
 
 > This is deployed. One Agent Engine instance, updated in place, never
 > recreated. A session created on August 27th remains addressable. Firestore,
