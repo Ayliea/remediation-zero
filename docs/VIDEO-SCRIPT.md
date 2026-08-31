@@ -67,6 +67,22 @@ cd ~/dev/remediation-zero
 export GITHUB_TICKET_REPO="Ayliea/remediation-zero-tickets"
 export GITHUB_TOKEN="$(gh auth token)"
 export C=<the fresh cycle from pre-flight step 9>
+
+# The tick cycle for 1:30. Derive it here, not on camera. An unset $T sends
+# {"cycle":} -- valid shell, invalid JSON -- and both workers answer 400
+# tick_malformed. That is the validation working, but it is not the beat.
+export T=$(.venv/bin/python -c "
+from google.cloud import firestore
+from tools.idempotency import derive_record
+c = firestore.Client()
+for n in range(9001, 9200):
+    if all(not c.collection('idempotency').document(
+            derive_record(finding_id=f'tick-{n}', action=a, cycle=n).key).get().exists
+           for a in ('chase', 'exception')):
+        print(n); break")
+
+# Both must print a number. Neither may be empty.
+echo "C=$C  T=$T"
 ```
 
 **Terminal B — off camera.** Start the slow control run here during pre-flight
@@ -210,7 +226,13 @@ gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
 ```
 
 Then return to Tab 2 and refresh. `tick_already_ran` appears twice, one per
-worker. Derive `$T` in pre-flight, not here.
+worker.
+
+`$T` comes from the window plan. Check it is set before you record: an empty
+`$T` expands to `{"cycle":}`, which is valid shell and invalid JSON, so both
+workers reject it with 400 `tick_malformed` and Pub/Sub retries the bad
+message until it dead-letters. Nothing breaks and nothing is lost, but the
+beat shows a rejection instead of `tick_already_ran`.
 
 **Direction:** point at the literal `tick_already_ran` line. Publishing it
 live is stronger than a captured log, not weaker: it is reproducible on
