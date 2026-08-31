@@ -167,11 +167,24 @@ def _run_probe_job(job: str, name: str) -> None:
          "--project", PROJECT, "--region", "us-central1", "--wait"],
         capture_output=True, text=True, check=False,
     )
-    if execute.returncode != 0 and job in execute.stderr:
-        record(name, False,
-               f"INCONCLUSIVE: the {job} job is not deployed. Deploy it with the "
-               f"command in README section 9.",
-               inconclusive=True)
+    if execute.returncode != 0:
+        # Any non-zero execution means no verdict was obtained, and a check
+        # that could not run is not a check that failed. This guard used to
+        # require the job name in stderr, which caught exactly one reason for
+        # failing -- the job not being deployed -- and treated every other
+        # reason as a verdict. An expired credential therefore printed FAIL
+        # with an empty detail, which on camera reads as the security boundary
+        # being broken rather than as the operator being logged out.
+        #
+        # The file's own argument is that collapsing "could not run" into
+        # "passed" is how a control gets believed on a test that never ran.
+        # Collapsing it into "failed" is the same error mirrored, and it is
+        # the more alarming direction.
+        hint = (f"the {job} job is not deployed. Deploy it with the command in "
+                f"README section 9."
+                if job in execute.stderr
+                else (execute.stderr.strip().splitlines() or ["no stderr"])[0][:160])
+        record(name, False, f"INCONCLUSIVE: {hint}", inconclusive=True)
         return
 
     execution = subprocess.run(
