@@ -50,21 +50,21 @@ to lose that by rounding for effect.
 >
 > I believed that when I designed it. I had no evidence for it.
 >
-> Then I counted. The reviewer rejects 65% of proposals, and **55% of those
-> rejections say the same thing**: the first model inflated
-> severity past the CVSS evidence it had itself cited. Verbatim from the
+> Then I counted. The reviewer rejects **roughly two-thirds of proposals**,
+> and **half of those rejections say the same thing**: the first model
+> inflated severity past the CVSS evidence it had itself cited. Verbatim from the
 > record — *"The severity is escalated to critical without evidence supporting
 > such a jump from the CVSS base of 7.8."*
 >
-> A 65% disagreement rate looks like a defect rate. It isn't. A reviewer that
+> A two-thirds disagreement rate looks like a defect rate. It isn't. A reviewer that
 > ratifies everything is indistinguishable from having no reviewer at all, so
 > the number that should worry you is the one approaching zero.
 >
 > I did not find that bias by reading outputs. The architecture found it, and
-> filed 79 reasons.
+> filed a written reason every single time.
 >
 > Built solo in five days on Google Cloud — ADK 2.8, Vertex AI, Firestore,
-> Pub/Sub, Cloud Run, Model Armor, per-agent service accounts, 623 tests.
+> Pub/Sub, Cloud Run, Model Armor, a service account per agent, 623 tests.
 >
 > Write-up and code in the comments.
 >
@@ -73,8 +73,15 @@ to lose that by rounding for effect.
 
 **Notes:** put the repo and blog links in the first comment, not the post body.
 Keep `#AllThingsAgenticHackathon` as the first hashtag. If LinkedIn truncates
-the post at "See more", the cut should fall after the 55% paragraph — that is
-the line worth reading.
+the post at "See more", the cut should fall after the two-thirds/half
+paragraph — that is the line worth reading.
+
+Figures are stated as proportions rather than exact percentages on purpose. A
+social post cannot be re-measured after it is published, and these move every
+time the system runs: the disagreement rate was 65% on 30 August and 68% on
+31 August, and the severity share fell from 55% to 50% in a single afternoon
+of rehearsals. "Roughly two-thirds" and "half" are true across that whole
+range and will stay true.
 
 ---
 
@@ -98,7 +105,7 @@ hook; the rest are proof.
 > — the reviewer agent, on the record
 
 ### Slide 3 — the number
-> **55%**
+> **HALF**
 > of all rejections say the same thing:
 > the first model inflated severity past
 > its own cited evidence.
@@ -122,9 +129,9 @@ hook; the rest are proof.
 > its own reasoning shares its own blind spots. I believed that when I designed
 > it. I didn't have evidence for it.
 >
-> Then I counted. It rejects 65% of proposals, and 55% of those rejections say
-> the same thing: the first model kept inflating severity past the CVSS
-> evidence it had itself cited.
+> Then I counted. It rejects roughly two-thirds of proposals, and half of
+> those rejections say the same thing: the first model kept inflating severity
+> past the CVSS evidence it had itself cited.
 >
 > A high disagreement rate looks like a defect. It isn't. A reviewer that
 > ratifies everything is indistinguishable from having no reviewer at all.
