@@ -378,7 +378,7 @@ its issue. That is the shortest path from "the fleet decided something" to "a
 person can act on it", and it is worth clicking on camera rather than
 describing.
 
-### 7. The loop closes — TIME ME
+### 7. The loop closes — target 45 seconds
 
 Run this **after** the chase steps above, never before. A finding the rescan
 resolves stops being chased immediately, so resolving first means the nudges
@@ -428,7 +428,7 @@ Re-running the rescan on the same cycle is safe and worth showing if there is
 time — it reports `newly_resolved: 0`, because the guard suppresses the repeat
 and the count reflects what changed rather than what was asked for.
 
-**Timing: not yet measured on camera.** The dry run is 2.1s and the apply is a
+**Timing target: 45 seconds.** The dry run is 2.1s and the apply is a
 one-time write of 106 resolutions plus 12 ingests, which is not what a re-run
 costs. Rehearse it once from a reset state and put the real number in the
 heading and the table below, the way every other number in this file was
@@ -654,7 +654,7 @@ absorbed by a real retry path, which is harder to stage than to encounter.
 | `verify-controls.sh --only coverage` | 2.1s on 2026-08-28 |
 | `verify-controls.sh`, all six | **5-7.5 min.** Two six-check runs on 2026-08-29: 7m30s at `2ad2506` and 4m57s at `a34f1c6`, same machine, all passing both times. A five-check run the day before took 5m40s. `coverage` costs 2.1s, so almost the whole spread is the two Cloud Run job checks. Budget 7.5 minutes and expect less |
 | `register-agent.sh --apply`, including the version-pinned search | 13–19s |
-| `pytest`, 562 tests | 28.0s on 2026-08-29 |
+| `pytest`, 623 tests | 45.0s on 2026-08-30 |
 | `gcloud pubsub topics publish` → both workers | ~4s |
 | `verify-events.sh` (dead-letter round trip) | ~115s · first copy at ~100s on 2026-08-28 |
 | `rescan.sh --dry-run` | 2.1s on 2026-08-28, three runs |

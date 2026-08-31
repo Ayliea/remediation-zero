@@ -4,11 +4,30 @@ An autonomous agent fleet that owns the vulnerability remediation lifecycle for 
 
 Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
+[![CI](https://github.com/Ayliea/remediation-zero/actions/workflows/ci.yml/badge.svg)](https://github.com/Ayliea/remediation-zero/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **[Open the console](https://remediation-zero-console-978104855285.us-central1.run.app)** ·
-**[Talk to the deployed agent](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero)** ·
+**[Agent Engine proof (project access required)](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero)** ·
 [Architecture](docs/architecture.png) · [Who can touch what](docs/identities.png) · [Demo runbook](docs/DEMO.md)
+
+---
+
+## Judge it in 90 seconds
+
+1. **[Open the live evidence ledger](https://remediation-zero-console-978104855285.us-central1.run.app).** The first screen shows the real/scenario clock pair, the latest rescan's 106 confirmed remediations beside 102 findings it refuses to call fixed, and the human queue.
+2. **[Open the strongest tracker exemplar](https://github.com/Ayliea/remediation-zero-tickets/issues/24).** It shows a ratified high-severity decision, two nudges, and evidence-backed closure by `rescan-01`; the remaining linked issues expose the broader trail.
+3. **[Inspect the architecture](docs/architecture.png).** The important edges are the gates: Model Armor before reasoning, Gemma review before commit, coverage evidence before closure, and a read-only reporting boundary proven by a denied write.
+4. **Watch the video for the deployed-agent proof.** The [Agent Engine playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero) requires access to the Google Cloud project; the recording asks for `RZ-0101`, shows cross-family adjudication, and shows what the agent is unable to change.
+
+The committed scenario starts with **400 findings across 60 assets and 12 accountable owners**—the kind of backlog a one-person security team cannot manually re-triage and chase every week. The value is not another vulnerability score. It is continuity: the fleet preserves the evidence, disagreement, ownership, deadlines, exceptions, delivery attempts, and rescan proof while the analyst sees only decisions that genuinely require judgment.
+
+| Proof signal | Measured result | Why it matters |
+|---|---:|---|
+| Starting workload | 400 findings · 60 assets · 12 owners | Large enough that weekly manual re-triage is the failure mode |
+| Adversarial gate | 65% of proposals rejected · 53% of findings ratified | The second model changes outcomes instead of rubber-stamping them |
+| Rescan reconciliation | 106 confirmed resolved · 102 unverifiable kept open | Missing scan coverage cannot manufacture remediation |
+| Regression suite | 623 tests | The safety claims are executable, not presentation-only |
 
 ---
 
@@ -33,7 +52,7 @@ is worth less than one they can break.
   having no reviewer. → `./scripts/tick.sh --cycle 1 --limit 3`
 
 - **The elapsed time is real and cannot be manufactured.** One orchestrator
-  session created `2026-08-27T01:04:38Z` and still running. Every record carries
+  session created `2026-08-27T01:04:38Z` remains addressable in Agent Engine. Every record carries
   both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which
   is scenario. `advance()` raises in real mode and there is no API that sets
   `real_ts`. → the two clocks at the top of the console
@@ -84,6 +103,13 @@ carrying the ratified severity, the deadline, the specific remediation, the
 evidence cited, and the reviewer's own reason for accepting it — then comments
 on that issue as it nudges, escalates, and finally hands the finding to a
 person. [See the tickets it has filed](https://github.com/Ayliea/remediation-zero-tickets/issues?q=is%3Aissue).
+The tracker event is stored as pending beside the ticket before delivery. A
+transient failure is retried on the next chase without freezing authoritative
+Firestore state; if that state advances, the newer, more relevant notification
+supersedes the old pending one. GitHub comments carry persisted, unguessable recovery
+markers, so an accepted request whose acknowledgement was lost can be found
+before retry. Comment delivery remains honestly at-least-once: GitHub exposes
+no atomic idempotency key, so two truly concurrent callers can still race.
 
 That direction is one-way on purpose. Reading replies back would be untrusted
 ingress and would have to pass Model Armor first, which is a second feature and
@@ -146,9 +172,9 @@ The design decisions worth defending:
 
 **Cross-family adversarial review before commit.** A single reasoning agent that is confidently wrong produces a wrong SLA on a real vulnerability. Every triage decision is challenged before it becomes state by a reviewer agent running on Gemma rather than Gemini. Using a different model family is the point: a model auditing its own reasoning shares its own blind spots. Disagreements are logged, rejections are capped at one retry, and anything still contested routes to a human queue.
 
-**Idempotency keys on every side-effecting tool.** A long-running agent that resumes after a crash must not open the same ticket twice or send a fourth nudge as its first. Every mutation carries a deterministic key derived from finding ID, action type, and cycle number.
+**Atomic, leased idempotency on every authoritative state transition.** A long-running agent that resumes after a crash must not advance the same ticket twice or record a fourth nudge as its first. Every state mutation carries a deterministic key derived from finding ID, action type, and cycle number; Firestore atomically grants one bounded lease before the transition, so overlapping Cloud Run deliveries cannot both pass an empty read. External tracker delivery is the separately documented at-least-once projection of that state.
 
-**Injectable clock.** All time reads pass through a `SimClock` service. Every document carries both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which is simulation. This makes a six-week remediation cycle demonstrable in three minutes without fabricating evidence of elapsed time.
+**Injectable clock.** All persisted lifecycle timestamps and lifecycle decisions use a `SimClock` service. Every lifecycle document carries both `real_ts`, which is wall clock and never falsified, and `sim_ts`, which is simulation. Runtime-only cache and network timing is not persisted. This makes a six-week remediation cycle demonstrable in three minutes without fabricating evidence of elapsed time.
 
 **Seven agents, and an honest account of what that word covers here.** Three are ADK `Agent` objects with prompts and model clients: the orchestrator, triage on Gemini, and the reviewer on Gemma. The other four — ownership, chase, exception, reporting — are deterministic drivers with their own service accounts and their own collections. Three of them call no model at all; reporting calls one to write prose over figures it was handed, and has no model client that can compute any of them. That is deliberate rather than unfinished: assigning an owner, counting down an SLA, and reopening a lapsed acceptance are decisions with correct answers, and a model is the wrong instrument for a decision that has one. It also means the scheduled path ships no model client and cannot reach Vertex.
 
@@ -186,7 +212,7 @@ The last two matter as much as the first two. An identity that can write nothing
 
 The remaining five agents hold distinct identities with collection separation enforced in application code. That is a weaker guarantee than IAM enforcement and is named as such here rather than blurred into the same sentence.
 
-**Two-layer injection defense, measured rather than assumed.** Untrusted text — scanner comment fields, ticket replies, vendor advisories — passes Model Armor before reaching any reasoning context, on every path including the deployed agent's. Ask the playground to quote the planted finding's scanner text and it returns `[withheld: this scanner comment did not clear the untrusted-content boundary and has not been shown to any model]`; ask it for a benign one and the text comes back intact. Against the planted payload it returns `MATCH_FOUND` on the prompt-injection filter at `MEDIUM_AND_ABOVE`; against a benign scanner comment it returns `NO_MATCH_FOUND`. The boundary fails closed on an unreachable screener, a filter that did not execute, and an unparseable response, because passing unscreened text into a reasoning context on a bad minute is exactly the failure it exists to prevent.
+**Two-layer injection defense, measured rather than assumed.** Every implemented untrusted ingress — scanner comments and NVD advisory prose — passes Model Armor before reaching any reasoning context, on every path including the deployed agent's. Ticket replies are deliberately not ingested; adding them would require the same boundary. Ask the playground to quote the planted finding's scanner text and it returns `[withheld: this scanner comment did not clear the untrusted-content boundary and has not been shown to any model]`; ask it for a benign one and the text comes back intact. Against the planted payload it returns `MATCH_FOUND` on the prompt-injection filter at `MEDIUM_AND_ABOVE`; against a benign scanner comment it returns `NO_MATCH_FOUND`. The boundary fails closed on an unreachable screener, a disabled production configuration, a filter that did not execute, and an unparseable response, because passing unscreened text into a reasoning context on a bad minute is exactly the failure it exists to prevent.
 
 The reviewer is the second layer, and measuring it corrected an overclaim. With Model Armor disabled the reviewer rejected the planted finding every time, but named the injection in only one run out of five: it was finding a sufficient reason to reject on severity grounds and stopping. The injection never succeeded, but "the reviewer independently catches it" was not true as written. The reviewer now assesses the untrusted text first, before the proposal at all. Detection went from one in five to six in six. The assessment reaches the decision record only when it names something — about one verdict in ten carries one — so absence in the record means the reviewer read the text and found nothing, or did not answer, and the two are not distinguishable afterwards.
 
@@ -392,8 +418,12 @@ SIM_CLOCK_MODE=sim ./scripts/exception.sh --cycle 2 --sweep
 ./scripts/report.sh --cycle 2
 ```
 
-Every one of these is safe to repeat. `--cycle` and the finding id form the
-idempotency key, so a second run of the same cycle skips rather than duplicates.
+Every authoritative state transition here is safe to repeat. `--cycle`, the
+action, and the finding id form its idempotency key, so a second run of the
+same cycle cannot rewrite the decision or advance the lifecycle twice. Tracker
+issue creation has a lookup recovery path; tracker comments use at-least-once
+delivery with persisted recovery markers rather than claiming an atomic
+guarantee the GitHub API does not provide.
 
 [`docs/DEMO.md`](docs/DEMO.md) is the same path as a runbook, with every step
 timed against the live deployment and a table of what to do when one of them
@@ -529,7 +559,7 @@ Deliberately absent: any command that deletes the Agent Engine or its session. T
 
 ### Cost notes
 
-Minimum instances are zero and maximum instances are capped, so idle cost is negligible. The one thing that is not idle is a Cloud Scheduler job that pings the console every five minutes to keep a demonstration off a cold start; pause it with `gcloud scheduler jobs pause console-warm --location=us-central1` when nobody is watching. If Gemma is served from a dedicated endpoint in your region rather than per-token, that endpoint is the only always-on component: deploy it when needed and destroy it immediately after. Set a billing budget alert before running anything.
+Minimum instances are zero and maximum instances are capped, so idle cost is negligible. The one thing that is not idle is a Cloud Scheduler job that pings the console every five minutes to keep a demonstration off a cold start; pause it with `gcloud scheduler jobs pause console-warm --location=us-central1` when nobody is watching. Gemma is the pay-per-token MaaS model named above, with no dedicated endpoint. Set a billing budget alert before running anything.
 
 ---
 
@@ -555,6 +585,9 @@ Out of scope for the hackathon build, kept here so the boundary is explicit:
 - Ticket replies read back into the fleet, which is untrusted ingress and needs
   Model Armor in front of it before it can be trusted at all
 - Email and chat delivery alongside the tracker
+- Cross-asset finding normalization and grouping when one CVE repeats across a fleet
+- A tracker-side idempotency primitive, if the delivery API exposes one, to close
+  the final concurrent-comment race
 - Human approval workflow for escalations above a severity threshold
 - Multi-tenant isolation
 
@@ -562,8 +595,8 @@ Out of scope for the hackathon build, kept here so the boundary is explicit:
 
 Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet category.
 
-- Devpost: `daviyon-daniels `
-- GitHub: `daviyondaniels` (personal account)
+- Devpost: `daviyon-daniels`
+- GitHub: [`Ayliea`](https://github.com/Ayliea)
 - Google Cloud project: `remediation-zero`, under a separate business Google account
 
 The deployment shown in the demo video runs in that Google Cloud project. The GitHub account and the Google Cloud account belong to the same author. Commits are signed with an SSH key registered to the GitHub account; every commit in the history verifies.

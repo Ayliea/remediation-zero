@@ -32,9 +32,10 @@ All vulnerability findings under data/ are synthetic and are dedicated to
 the public domain under CC0 1.0. See data/README.md.
 
 Vulnerability enrichment queries the CISA Known Exploited Vulnerabilities
-catalog, the National Vulnerability Database, and EPSS at runtime. Those
-sources are attributed in the application output and are not redistributed
-in this repository.
+catalog, the National Vulnerability Database, and EPSS when the cache is
+refreshed. Attributed response snapshots are redistributed under data/cache
+solely to make the demonstration reproducible; they are not covered by the
+synthetic corpus's CC0 dedication and are not offered as an independent work.
 
 ------------------------------------------------------------------------
 Trademarks

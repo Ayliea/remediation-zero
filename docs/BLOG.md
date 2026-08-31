@@ -113,7 +113,7 @@ tick_already_ran   cycle=9003
 ```
 
 Pub/Sub delivers at least once, so a redelivered tick is a real possibility
-rather than a hypothetical. The second copy is recognised and does nothing. Every side-effecting
+rather than a hypothetical. The second copy is recognised and does nothing. Every authoritative state-changing
 tool takes a key derived from the finding, the action, and the cycle, so a
 resumed agent cannot open a second ticket or send a second nudge.
 
@@ -178,7 +178,7 @@ is the one that most deserves an adversarial read.
 
 Two gaps that every reviewer found within an hour, so I would rather name them:
 
-There is **no deduplication**: real scanner output repeats one CVE across
+There is **no cross-asset finding normalization**: real scanner output repeats one CVE across
 hundreds of hosts, and the synthetic corpus here has 400 findings with 400
 distinct CVEs, so the problem never arises. That is the next thing.
 
@@ -196,7 +196,7 @@ ADK 2.8 on Vertex AI. Gemini 3.5 Flash for reasoning, Gemma for review,
 Firestore for state, Agent Engine Memory Bank across sessions, Pub/Sub with a
 dead-letter queue proven by poisoning it, Model Armor on untrusted ingress,
 Cloud Run, Cloud Trace, Secret Manager, Terraform. Per-agent service accounts
-throughout. 562 tests.
+throughout. 623 tests.
 
 ### Written for the All Things Agentic Hackathon
 
@@ -207,7 +207,7 @@ synthetic — reserved ranges only, `.invalid` hostnames and `192.0.2.0/24`
 addresses — with real CVE identifiers.
 
 Code, architecture diagram, and a runbook with every step timed:
-**github.com/daviyondaniels/remediation-zero**
+**github.com/Ayliea/remediation-zero**
 
 #AllThingsAgenticHackathon
 

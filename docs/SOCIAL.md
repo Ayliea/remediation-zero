@@ -64,7 +64,7 @@ to lose that by rounding for effect.
 > filed 79 reasons.
 >
 > Built solo in five days on Google Cloud — ADK 2.8, Vertex AI, Firestore,
-> Pub/Sub, Cloud Run, Model Armor, per-agent service accounts, 562 tests.
+> Pub/Sub, Cloud Run, Model Armor, per-agent service accounts, 623 tests.
 >
 > Write-up and code in the comments.
 >

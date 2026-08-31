@@ -30,8 +30,8 @@
 
   <rect x="40" y="234" width="212" height="76" rx="2" fill="#fff" stroke="#C7CBD1" stroke-width="1.5"/>
   <text x="56" y="260" font-family="IBM Plex Mono, monospace" font-size="15" fill="#16181D">KEV · NVD · EPSS</text>
-  <text x="56" y="281" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">cached to disk; the demo</text>
-  <text x="56" y="299" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">never calls them live</text>
+  <text x="56" y="281" font-family="Source Sans 3, sans-serif" font-size="14" fill="#4A5058">structured scores → Triage</text>
+  <text x="56" y="299" font-family="Source Sans 3, sans-serif" font-size="14" fill="#A33A2A">NVD prose → Model Armor</text>
 
   <!-- ============ the boundary ============ -->
   <line x1="330" y1="40" x2="330" y2="360" stroke="#A33A2A" stroke-width="1.5" stroke-dasharray="7 6"/>
@@ -42,6 +42,7 @@
   <text x="331" y="114" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="14" fill="#fff">Armor</text>
 
   <line x1="252" y1="101" x2="282" y2="101" stroke="#A33A2A" stroke-width="2" marker-end="url(#ar)"/>
+  <path d="M252,298 L272,298 L272,120 L282,120" fill="none" stroke="#A33A2A" stroke-width="2" marker-end="url(#ar)"/>
   <path d="M376,101 L572,101 L572,148" fill="none" stroke="#A33A2A" stroke-width="2" marker-end="url(#ar)"/>
   <text x="392" y="76" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#A33A2A">passed, or withheld</text>
   <text x="392" y="92" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#A33A2A">never truncated or quoted</text>
@@ -49,7 +50,7 @@
   <path d="M252,183 L496,183" fill="none" stroke="#16181D" stroke-width="1.6" marker-end="url(#a)"/>
   <path d="M252,272 L432,272 L432,212 L496,212" fill="none" stroke="#16181D" stroke-width="1.6" marker-end="url(#a)"/>
   <text x="268" y="176" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">no boundary needed</text>
-  <text x="268" y="265" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">cited as evidence</text>
+  <text x="268" y="265" font-family="Source Sans 3, sans-serif" font-size="13.5" fill="#4A5058">structured evidence</text>
 
   <!-- ============ adversarial pair ============ -->
   <text x="500" y="52" font-family="IBM Plex Mono, monospace" font-size="13" fill="#767D87" letter-spacing="1.6">ADVERSARIAL ADJUDICATION</text>

@@ -38,6 +38,7 @@ longer matches the console is worse than no figure.
 | 53% of findings ratified, 65% of proposals rejected | console stat strip |
 | unattended run, cycle 30693 | Cloud Logging, `rz-worker-*`, 2026-08-28T09:01 |
 | `tick_already_ran` ×2 | same, cycles 9003 and 9004 |
+| 106 resolved · 102 unverifiable | latest rescan card in the console |
 | six controls | `./scripts/verify-controls.sh` |
 
 Pre-flight is in `DEMO.md`. Run it. In particular the credential step and the
@@ -97,7 +98,7 @@ interesting part and every second here is taken from the parts that are.
 
 ---
 
-## 0:50–1:35 — Claim one, with its denominator.
+## 0:50–1:30 — Claim one, with its denominator.
 
 **On screen:** the console stat strip, then the decisions table.
 
@@ -114,41 +115,29 @@ interesting part and every second here is taken from the parts that are.
 > support. One model family found a consistent bias in another, and wrote down
 > why, every single time.
 >
-> Rejected once, it is re-proposed with the feedback. Five findings were
-> ratified on that second attempt. Rejected twice, it goes to a person.
+> Rejected once, it is re-proposed with the feedback. Rejected twice, it goes
+> to a person.
 
-**Direction:** this is the strongest 45 seconds available. Do not rush it.
+**Direction:** this is the strongest 40 seconds available. Do not rush it.
 Say "55%" slowly.
 
 ---
 
-## 1:35–2:20 — Claim two. Autonomy, stated honestly.
+## 1:30–1:55 — Claim two. Autonomy, stated honestly.
 
 **On screen:** Cloud Logging, filtered to `rz-worker-chase` and
 `rz-worker-exception`. Show the 09:01 `chase_finished` / `sweep_finished`
 entries for cycle 30693 — the actions field is empty, which is the point.
 Then publish the tick again live so `tick_already_ran` appears on camera.
 
-> At 9:01 UTC, with nobody watching, Cloud Scheduler published a tick. Pub/Sub
-> fanned it to two workers, each running as its own service account. They
-> walked the fleet and did nothing — no ticket, no nudge, no escalation —
-> because in real elapsed time nothing was due yet.
+> At 9:01 UTC, with nobody watching, Cloud Scheduler published a tick through
+> Pub/Sub to two workers. Nothing was due, so the correct autonomous answer was
+> *not yet*. The workers ship no model client, so this unattended path cannot
+> spend model tokens.
 >
-> I want to be precise about that, because it is the honest version. The
-> autonomous loop's correct answer that morning was *not yet*. That is
-> judgment, not inaction, and a system that manufactures activity to look busy
-> is worse than one that waits.
->
-> And these two workers ship no model client at all. The container has no
-> Vertex SDK in it, so the unattended path structurally cannot reach a model
-> or spend money while nobody is watching. That is a decision, not an
-> omission.
->
-> Now let me provoke the thing production has not yet handed me. I publish the
-> same tick a second time — **`tick_already_ran`**. Pub/Sub delivers at least
-> once, so a redelivered tick is a real possibility rather than a
-> hypothetical, and the second copy does nothing. No duplicate ticket, no
-> duplicate nudge.
+> I publish the same tick again: **`tick_already_ran`**. Pub/Sub is at-least-
+> once, but the second delivery cannot advance the authoritative lifecycle a
+> second time.
 
 **Direction:** point at the literal `tick_already_ran` line. Publishing it
 live is stronger than a captured log, not weaker: it is reproducible on
@@ -157,28 +146,41 @@ costs nothing to show because it already happened.
 
 ---
 
-## 2:20–2:55 — The six weeks, in simulated time, labelled as such.
+## 1:55–2:20 — The six weeks, in simulated time, labelled as such.
 
 **On screen:** `./scripts/chase.sh --advance-days ...`, then the GitHub issue
 with its nudge and escalation comments.
 
-> To show the full arc I advance simulated time. Every record carries two
-> stamps: `real_ts`, wall clock, never falsified — there is no API in this
-> system that can write it — and `sim_ts`, scenario time. The console prints
-> both, colour-coded, side by side, so you can always see which one a claim
+> To show the full arc I advance simulated time. Every lifecycle record carries
+> `real_ts`, wall clock, never falsified, and `sim_ts`, scenario time. The
+> console prints both side by side, so you can see which clock every claim
 > rests on.
 >
 > Advancing the scenario clock, the same agents open a ticket, nudge the
-> owner, nudge again, and escalate. These are real GitHub issues in a real
-> tracker, carrying the ratified severity, the deadline, the specific
-> remediation, and the reviewer's own reason for accepting it.
+> owner, and escalate. These are real GitHub issues carrying the ratified
+> severity, deadline, remediation, and the reviewer's own reason.
 
 **Direction:** say "simulated" out loud before showing it. The two-clock design
 only counts for something if you draw attention to the distinction yourself.
 
 ---
 
-## 2:55–3:30 — Claim three. The boundary, performed.
+## 2:20–2:45 — Closure must earn its name.
+
+**On screen:** the latest rescan card, then tracker issue 24 closing.
+
+> Here is the outcome that matters: the rescan confirms **106 remediations**,
+> while refusing to call **102 findings** fixed. Absence counts only when the
+> scanner's coverage manifest says it actually examined that asset. Missing
+> telemetry cannot manufacture success. Issue 24 closes with the scan ID and
+> that coverage reason preserved in the record.
+
+**Direction:** hold 106 and 102 on the same screen. The refusal number is the
+credibility proof; never show 106 alone.
+
+---
+
+## 2:45–3:15 — Claim three. The boundary, performed.
 
 **On screen:** the DENIED / ALLOWED table from `verify-controls`.
 
@@ -187,33 +189,29 @@ only counts for something if you draw attention to the distinction yourself.
 > doing it. A Cloud Run job whose identity *is* the reporting agent attempts
 > the write and reports the denial.
 >
-> Half of these checks expect ALLOWED. An identity that can do nothing proves
-> only that it is broken. The control is that the boundary falls in a specific
-> place.
+> Half of the checks expect ALLOWED; the boundary has to fall in a specific
+> place, not merely break every write.
 >
-> There is also a guardrail on untrusted input. Scanner comments are attacker-
-> controlled text, so they pass Model Armor before reaching any reasoning
-> context — and with that boundary deliberately switched off, the reviewer
-> still catches the injection on its own. Two layers, each tested without the
-> other.
+> Scanner comments and NVD prose pass Model Armor before any reasoning context.
+> In a separately authorized control run, the reviewer still catches the
+> planted injection with Armor bypassed. Two layers, tested independently.
 
 ---
 
-## 3:30–4:00 — Deployment proof and close.
+## 3:15–3:45 — Deployment proof and close.
 
 **On screen:** the Agent Engine resource, then the console footer.
 
 > This is deployed. One Agent Engine instance, updated in place, never
-> recreated. A session created on August 27th that is still there. Firestore,
+> recreated. A session created on August 27th remains addressable. Firestore,
 > Pub/Sub with a dead-letter queue proven by poisoning it, Cloud Run, Cloud
 > Trace, Secret Manager, Terraform.
 >
 > What it does not do yet, and I would rather say it than have you find it:
-> no deduplication — real scanner output repeats one CVE across hundreds of
-> hosts and this corpus does not. And the rescan trusts the coverage manifest
-> it is handed; it checks that a scan cannot report a host it claims not to
-> have examined, but it cannot check that the claim was true. Those are the
-> next two things, and they are named in the README.
+> no cross-asset finding normalization — real scanner output repeats one CVE
+> across hundreds of hosts. And the rescan validates the internal consistency
+> of its coverage manifest, but cannot independently prove the scanner's
+> coverage claim. Both limits are named in the README.
 >
 > Remediation Zero. It does the six weeks after the scan, and it shows its
 > work.
@@ -229,13 +227,13 @@ and every reviewer of this project found those two gaps within an hour.
 The plan's rule first: **cut the exception-expiry beat before anything else,
 and never the Google Cloud proof.** After that:
 
-1. The Model Armor sentences in 2:55 (keep the DENIED/ALLOWED table)
-2. The stack list in 3:30 — the architecture diagram carries it
+1. The Model Armor sentences in 2:45 (keep the DENIED/ALLOWED table)
+2. The stack list in 3:15 — the architecture diagram carries it
 3. The re-proposal detail in 0:50 (keep the 55%)
 
-Never cut: the cold open, the 55% figure, `tick_already_ran`, the two-clock
-distinction, the word **Gemma**, the Google Cloud deployment proof, or the
-limitations.
+Never cut: the cold open, the 55% figure, the paired 106/102 outcome,
+`tick_already_ran`, the two-clock distinction, the word **Gemma**, the Google
+Cloud deployment proof, or the limitations.
 
 ## Do not say
 
