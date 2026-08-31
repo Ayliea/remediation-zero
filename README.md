@@ -595,11 +595,12 @@ Out of scope for the hackathon build, kept here so the boundary is explicit:
 
 Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet category.
 
+- Submitting organization: **Ayliea LLC**
 - Devpost: `daviyon-daniels`
 - GitHub: [`Ayliea`](https://github.com/Ayliea)
-- Google Cloud project: `remediation-zero`, under a separate business Google account
+- Google Cloud project: `remediation-zero`, under the company's Google account
 
-The deployment shown in the demo video runs in that Google Cloud project. The GitHub account and the Google Cloud account belong to the same author. Commits are signed with an SSH key registered to the GitHub account; every commit in the history verifies.
+The work was performed by Daviyon Daniels on behalf of Ayliea LLC, and the deployment shown in the demo video runs in that Google Cloud project. One detail is worth stating rather than leaving to be noticed: commits are authored under a personal address, while the GitHub organization, the Google Cloud project and the corporate contact address all sit under the company. Both identities are the same person. Commits are signed with an SSH key registered to the GitHub account; every commit in the history verifies.
 
 ## Disclosure
 
