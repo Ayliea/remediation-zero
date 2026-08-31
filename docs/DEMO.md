@@ -156,6 +156,47 @@ used |= {d.to_dict().get('cycle')
 used = {v for v in used if isinstance(v, int) and v < 9000}
 print(max(used, default=0) + 20)")
 echo "cycle $C, $((C+2))-$((C+10)) for the chase steps, $((C+11))-$((C+12)) for the rescan"
+
+# 10. GATE: the cycle has to actually ratify something. Run it now, in
+#     pre-flight, and read the outcomes before trusting it.
+#
+#     The models are not deterministic. RZ-0041 through RZ-0043 have produced
+#     three different splits across three cycles on the same evidence, and on
+#     2026-08-31 a cycle came back {"human_queue": 3} with nothing ratified.
+#     A finding routed to the human queue is deliberately not assigned -- see
+#     the comment at scripts/cycle.py -- so it starts no SLA clock, opens no
+#     ticket, and leaves the chase arc at 1:55 and the closing beat at 2:20
+#     with nothing to act on. Nothing is broken when that happens. There is
+#     simply no ticket, and you find out on camera.
+./scripts/tick.sh --cycle $C --start 41 --limit 3
+
+#     Read the last line. Proceed only if it contains "ratified":
+#       {"outcomes": {"ratified": 2, "human_queue": 1}}   -> good
+#       {"outcomes": {"human_queue": 3}}                  -> derive a new $C
+#                                                            and roll again
+#     Two empty rolls in a row: raise --limit to 5 or 6. More findings
+#     triaged, better odds one survives review. The narration barely changes.
+#
+#     Confirm the chain actually formed rather than trusting the summary:
+.venv/bin/python -c "
+from google.cloud import firestore
+import os
+c = firestore.Client(); C = int(os.environ['C'])
+asg = [d.to_dict() for d in c.collection('assignments').stream()
+       if d.to_dict().get('cycle') == C]
+sla = [d.to_dict() for d in c.collection('sla_clocks').stream()]
+print(f'assignments {len(asg)} | sla_clocks {len(sla)}')
+print('READY' if asg and sla else 'NOT READY -- no ticket will open, pick a new cycle')"
+
+#     Note this consumes $C for the opening beat: re-running it later prints
+#     skipped_already_adjudicated, which is the idempotency beat at 0:50 and
+#     not the fresh decision you want at 0:00. Derive a second cycle for the
+#     cold open and keep the gated one for everything downstream.
+#
+#     Known good at the time of writing: C=1096 ratified RZ-0042 (high, 14d),
+#     which rescan-01 resolves because ast-046 is inside its coverage
+#     manifest -- so the closing beat has a ticket to close. Verify rather
+#     than reuse it; by the time you read this its chase cycles may be spent.
 ```
 
 The chase section advances to `$((C+2))` through `$((C+10))` and the rescan
