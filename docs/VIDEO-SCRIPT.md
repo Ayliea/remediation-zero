@@ -27,10 +27,16 @@ Two things must be said out loud or the bonus is not credited. **Gemma**, by
 name, as the reviewer model — a bonus the judges do not notice is a bonus you
 did not get. And which clock is which, every time simulated time is on screen.
 
-**Every number below was measured on 2026-08-28 and is reproducible with the
-command in the right-hand column.** Re-run them the morning of the recording
-and change the script if they moved. A figure quoted from this file that no
-longer matches the console is worse than no figure.
+**Every number below was re-measured on 2026-08-31 at `cf23468` and is
+reproducible with the command in the right-hand column.** Re-run them the
+morning of the recording and change the script if they moved. A figure quoted
+from this file that no longer matches the console is worse than no figure.
+
+The three reviewer figures are ratios rather than counts on purpose. Every
+rehearsal adds decisions and `reset-derived` preserves them deliberately, so
+counts only ever climb while these proportions have held across the whole
+build -- 86 decisions and 133 verdicts today against 79 and 121 three days
+ago, with all three ratios unmoved.
 
 | Claim in the script | Where it comes from |
 |---|---|
@@ -38,7 +44,7 @@ longer matches the console is worse than no figure.
 | 53% of findings ratified, 65% of proposals rejected | console stat strip |
 | unattended run, cycle 30693 | Cloud Logging, `rz-worker-*`, 2026-08-28T09:01 |
 | `tick_already_ran` ×2 | same, cycles 9003 and 9004 |
-| 106 resolved · 102 unverifiable | latest rescan card in the console |
+| 106 resolved · 102 unverifiable | produced by section 7 on camera, not before it. `reset-derived --confirm` clears the scan so the beat has something to do, which means the console shows no rescan card until you run it. Confirmed by `rescan.sh --dry-run` (writes nothing) on 2026-08-31 |
 | six controls | `./scripts/verify-controls.sh` |
 
 Pre-flight is in `DEMO.md`. Run it. In particular the credential step and the
