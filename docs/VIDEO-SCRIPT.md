@@ -106,6 +106,19 @@ you record. Finding the range on camera is twenty wasted seconds.
 Filter to `is:issue` so both open and closed are visible; the closure beat
 needs a closed issue and the default filter hides it.
 
+**Warm the two workers**, not just the console. They scale to zero like
+everything else, and a publish into cold workers takes about **40 seconds**
+before the first log line appears — measured on 2026-08-31, and long enough on
+camera to look like the tick was lost. A throwaway publish in pre-flight warms
+both; use a cycle you do not mind spending, because the idempotency ledger
+will remember it:
+
+```bash
+gcloud pubsub topics publish remediation-tick --message="{\"cycle\":$T}"
+# wait for tick_finished from both workers, THEN start recording.
+# On camera, publish $T again: that second delivery is the tick_already_ran beat.
+```
+
 **Tab 4 — the Agent Engine.**
 https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero
 The resource ID in the URL is the proof; make sure it is readable on screen.
