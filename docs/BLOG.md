@@ -25,7 +25,10 @@ Written to stand on its own as a technical post rather than as a project
 announcement, because a post that is only an announcement is worth nothing to a
 reader who has never heard of the project.
 
-Figures were measured on 2026-08-28. Re-check them before publishing.
+Figures were re-measured against live Firestore on 2026-08-31: 107 decisions,
+169 verdicts, 115 rejections. They move every time the system runs, so they
+are stated with their date and their denominators rather than as standing
+facts. Re-check before publishing if any time has passed.
 
 ---
 
@@ -39,7 +42,7 @@ owner who never opened the ticket is not.
 The part worth writing about is not the pipeline. It is a number I did not
 expect and initially misread as a bug.
 
-### 65% disagreement
+### 68% disagreement
 
 Every triage decision in this system is challenged before it becomes state.
 A reasoning agent on Gemini 3.5 Flash proposes a severity, an SLA, and a
@@ -51,9 +54,18 @@ argument for that is easy to state and hard to verify: a model auditing its own
 reasoning shares its own blind spots. I believed it when I designed it. I did
 not have evidence for it.
 
-The reviewer rejects 65% of the proposals it sees, and just over half of all
-findings survive to be ratified. My first reaction was that something was
-broken. A 65% disagreement rate looks like a defect rate.
+The reviewer rejects **68% of the proposals it sees** — 115 rejections across
+169 verdicts, measured on 31 August 2026. About half of the findings that
+reach a decision are ratified.
+
+Those denominators matter and I will not blur them. A rejected proposal is
+re-proposed once with the feedback attached, so one finding can produce more
+than one verdict: 68% is against verdicts, and the roughly-half figure is
+against decisions. Reporting only the friendlier of the two would have been
+the easier thing to do.
+
+My first reaction was that something was broken. A 68% disagreement rate looks
+like a defect rate.
 
 It is not. A reviewer that ratifies everything is indistinguishable from having
 no reviewer at all, so the rate is a health metric — and the direction that
@@ -63,13 +75,17 @@ should worry you is the one approaching zero.
 
 I categorised every rejection reason expecting a spread. Instead:
 
-| What the reviewer objected to | Share |
+| What the reviewer objected to | Share of rejections |
 |---|---|
-| Severity escalated beyond what the CVSS evidence supports | **55%** |
-| Remediation text naming no specific version | 23% |
-| Proposed SLA conflicting with the CISA KEV due date | 22% |
+| Severity escalated beyond what the CVSS evidence supports | **50%** |
+| Remediation text naming no specific version | 32% |
+| Proposed SLA conflicting with the CISA KEV due date | 20% |
+| Prompt-injection text inside the scanner's own comment field | 12% |
 
-More than half of all rejections say the same thing. Verbatim, from the record:
+A rejection can cite more than one of these, so the shares total more than
+100%. The last row was not a category I went looking for.
+
+Half of all rejections say the same thing. Verbatim, from the record:
 
 > *"The severity is escalated to critical without evidence supporting such a
 > jump from the CVSS base of 7.8, and the remediation is vague."*
@@ -80,13 +96,14 @@ More than half of all rejections say the same thing. Verbatim, from the record:
 
 The triage model has a consistent bias toward inflating severity past its own
 cited evidence. The split confirms it: rejected proposals skew critical (24
-critical to 13 high), ratified ones do not (21 to 21).
+critical to 24 high — 55% critical), ratified ones lean the other way (22 to
+32 — 41% critical).
 
 This is the part I want to be careful about, because it is easy to overclaim.
 I cannot prove a same-family reviewer would have missed it — that experiment is
 one I did not run. What I can say is narrower and still worth something: the
 cross-family reviewer *did* catch it, it caught it systematically rather than
-occasionally, and it wrote down its reasoning 79 times in a form I could count.
+occasionally, and it wrote down its reasoning every time in a form I could count.
 I did not find this bias by reading outputs. The architecture found it and
 filed it.
 
@@ -95,21 +112,31 @@ filed it.
 The system runs itself on a schedule. Cloud Scheduler publishes a tick, Pub/Sub
 fans it to two workers, each executing as its own service account.
 
-At 09:01 UTC on August 28th, unattended, both workers woke on cycle 30693,
-walked the fleet, and did nothing. No ticket, no nudge, no escalation — in real
-elapsed time nothing was due yet, because the SLA windows are 7 to 30 days and
-the fleet was under two days old.
+At 09:01 UTC on August 28th, unattended, both workers woke on cycle 30693 and
+did nothing. No ticket, no nudge, no escalation.
 
-I could dress that up. I would rather report it accurately: **the autonomous
-loop's correct answer that morning was "not yet."** That is judgment, and a
-system that manufactures activity to look busy is worse than one that waits.
+Being precise about why, because the honest version is less tidy than the one
+I first wrote: the exception agent swept its acceptances and correctly found
+none to act on. The chase agent had an empty set of SLA clocks to walk, so its
+restraint that morning was trivial rather than considered. When there is
+something to weigh it does log the weighing — cycle 9003 logged `wait=9`, nine
+findings evaluated and nine deliberately left alone because their deadlines
+had not arrived.
+
+I could have dressed the first version up and left it. The point survives the
+correction and is better for it: **on the mornings there is something to
+weigh, the autonomous loop's answer is "not yet," and it says so rather than
+manufacturing activity.** A system that invents work to look busy is worse
+than one that waits — but a write-up that invents judgment where there was
+only an empty queue is worse than both.
 
 The duplicate-delivery guard I did have to go and provoke, because production
-had not obliged. Publishing the same tick a second time gets this:
+had not obliged. Publishing the same tick a second time gets this — one line
+per worker, both from the same cycle:
 
 ```
-tick_already_ran   cycle=9004
-tick_already_ran   cycle=9003
+tick_already_ran   cycle=9004   rz-worker-chase
+tick_already_ran   cycle=9004   rz-worker-exception
 ```
 
 Pub/Sub delivers at least once, so a redelivered tick is a real possibility
@@ -127,8 +154,17 @@ contradictory one.
 
 ### Proving a boundary by crossing it
 
-Each agent has its own service account, scoped to its own Firestore
-collections. The reporting agent is structurally incapable of writing a ticket.
+Each agent has its own service account. What that buys is worth stating
+precisely, because the obvious version of the claim is not true: Firestore
+Native has no collection-scoped IAM permission, and Security Rules are bypassed
+entirely by a server SDK authenticating as a service account. Per-collection
+separation cannot be enforced by IAM here, and claiming it would be claiming a
+control that does not exist.
+
+What *is* enforceable is a per-database boundary, and that is where the
+reporting agent's limit lives: read-only on the operational database, write
+access conditioned to a separate reports database. It is structurally
+incapable of writing a ticket.
 
 Asserting that in a README is free. So the check performs the forbidden action:
 a Cloud Run job whose identity *is* the reporting agent attempts the write and
@@ -195,16 +231,20 @@ about a feature that is four days old.
 ADK 2.8 on Vertex AI. Gemini 3.5 Flash for reasoning, Gemma for review,
 Firestore for state, Agent Engine Memory Bank across sessions, Pub/Sub with a
 dead-letter queue proven by poisoning it, Model Armor on untrusted ingress,
-Cloud Run, Cloud Trace, Secret Manager, Terraform. Per-agent service accounts
-throughout. 623 tests.
+Cloud Run, Cloud Trace, Secret Manager, Terraform. Seven service accounts, of
+which the two scheduled workers genuinely execute as their own identity; the
+reasoning graph currently runs under a single client, and the remaining
+boundaries are proven by running the checks *as* those identities rather than
+assumed at runtime. 623 tests.
 
 ### Written for the All Things Agentic Hackathon
 
 I built Remediation Zero for the **All Things Agentic Hackathon**, in the
 Fortified Enterprise Fleet track, over five days in August 2026. Everything in
 the repository was written during the submission period. The corpus is entirely
-synthetic — reserved ranges only, `.invalid` hostnames and `192.0.2.0/24`
-addresses — with real CVE identifiers.
+synthetic — reserved ranges only, `.invalid` hostnames and addresses drawn
+from `192.0.2.0/24`, `198.51.100.0/24` and `203.0.113.0/24` — with real CVE
+identifiers.
 
 Code, architecture diagram, and a runbook with every step timed:
 **github.com/Ayliea/remediation-zero**
