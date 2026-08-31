@@ -16,7 +16,7 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 ## Judge it in 90 seconds
 
 1. **[Open the live evidence ledger](https://remediation-zero-console-978104855285.us-central1.run.app).** The first screen shows the real/scenario clock pair, the latest rescan's 106 confirmed remediations beside 102 findings it refuses to call fixed, and the human queue.
-2. **[Open the strongest tracker exemplar](https://github.com/Ayliea/remediation-zero-tickets/issues/24).** It shows a ratified high-severity decision, two nudges, and evidence-backed closure by `rescan-01`; the remaining linked issues expose the broader trail.
+2. **[Open the strongest tracker exemplar](https://github.com/Ayliea/remediation-zero-tickets/issues/24).** The title carries the scanner's own rating — *medium* — while the body carries the severity the fleet ratified after review: **high**, with the cited reasoning beneath it. That gap is the product. It also shows two nudges and evidence-backed closure by `rescan-01`; the remaining linked issues expose the broader trail.
 3. **[Inspect the architecture](docs/architecture.png).** The important edges are the gates: Model Armor before reasoning, Gemma review before commit, coverage evidence before closure, and a read-only reporting boundary proven by a denied write.
 4. **Watch the video for the deployed-agent proof.** The [Agent Engine playground](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero) requires access to the Google Cloud project; the recording asks for `RZ-0101`, shows cross-family adjudication, and shows what the agent is unable to change.
 
