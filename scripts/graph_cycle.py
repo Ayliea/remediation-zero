@@ -28,6 +28,7 @@ import logging
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -87,9 +88,16 @@ def build_handlers(clients: dict) -> dict:
         enrichment = cache.enrich(finding.get("cve_id", ""))
 
         raw = finding.get("scanner_comment") or ""
-        verdict = armor.screen(raw, armor_token)
+        raw_description = enrichment.description or ""
+        verdict = armor.screen(
+            f"SCANNER COMMENT\n{raw}\n\nNVD DESCRIPTION\n{raw_description}",
+            armor_token,
+        )
         finding = dict(finding)
         finding["scanner_comment"] = apply_verdict(raw, verdict)
+        enrichment = replace(
+            enrichment, description=apply_verdict(raw_description, verdict)
+        )
 
         scratch["rendered"] = rm.render_finding(finding, asset, enrichment)
         scratch["finding"] = finding
@@ -118,7 +126,10 @@ def build_handlers(clients: dict) -> dict:
         rendered = scratch["rendered"]
         result = adjudicate(
             scratch["finding"],
-            triage=lambda _f: rm.propose(rendered, clients["reasoning_model"], genai_client),
+            triage=lambda _f: rm.propose(
+                rendered, clients["reasoning_model"], genai_client,
+                finding_id=finding_id,
+            ),
             review=lambda _f, p: rm.review(
                 rendered + "\n\nPROPOSAL\n" + json.dumps(
                     {"severity": p.severity, "sla_days": p.sla_days,

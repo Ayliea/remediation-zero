@@ -212,6 +212,28 @@ def test_it_matches_the_finding_id_in_a_listed_title():
     assert GitHubTickets(repo="o/r", token="t", http=http).find_issue("RZ-0101") == 42
 
 
+def test_a_same_title_issue_without_the_managed_label_is_not_adopted():
+    forged = {
+        "number": 42,
+        "title": "[RZ-0101] CVE-2015-2502 on x",
+        "labels": [],
+    }
+    http = PagedHTTP([[forged]])
+
+    assert GitHubTickets(repo="o/r", token="t", http=http).find_issue("RZ-0101") is None
+
+
+def test_a_managed_label_and_exact_marker_are_both_required():
+    managed = {
+        "number": 42,
+        "title": "[RZ-0101] CVE-2015-2502 on x",
+        "labels": [{"name": "remediation-zero"}],
+    }
+    http = PagedHTTP([[managed]])
+
+    assert GitHubTickets(repo="o/r", token="t", http=http).find_issue("RZ-0101") == 42
+
+
 def test_a_similar_finding_id_does_not_match():
     """RZ-0101 must not match RZ-01010. The bracket is what makes it exact."""
     http = PagedHTTP([[{"number": 42, "title": "[RZ-01010] CVE-x on y"}]])
@@ -368,3 +390,38 @@ def test_closing_is_the_mirror_of_reopening():
     assert closed[1] == reopened[1]
     assert closed[2]["state"] == "closed"
     assert reopened[2]["state"] == "open"
+
+
+# --- recovering a comment whose acknowledgement was lost ------------------
+
+class CommentHTTP:
+    def __init__(self, comments):
+        self.comments, self.calls = comments, []
+
+    def request(self, method, url, body=None):
+        self.calls.append((method, url, body))
+        if method == "GET":
+            return self.comments
+        return {"id": 1}
+
+
+def test_a_marked_comment_is_not_reposted_after_a_lost_acknowledgement():
+    marker = "<!-- remediation-zero:RZ-0101:nudge:cycle-005 -->"
+    http = CommentHTTP([{"body": f"already delivered\n\n{marker}"}])
+    gh = GitHubTickets(repo="Ayliea/x", token="t", http=http)
+
+    gh.comment_once(42, "new body", marker)
+
+    assert [call for call in http.calls if call[0] == "POST"] == []
+
+
+def test_a_new_marked_comment_is_posted_with_its_recovery_marker():
+    marker = "<!-- remediation-zero:RZ-0101:escalate:cycle-006 -->"
+    http = CommentHTTP([])
+    gh = GitHubTickets(repo="Ayliea/x", token="t", http=http)
+
+    gh.comment_once(42, "Escalated", marker)
+
+    posts = [call for call in http.calls if call[0] == "POST"]
+    assert len(posts) == 1
+    assert marker in posts[0][2]["body"]

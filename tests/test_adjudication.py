@@ -146,6 +146,61 @@ def test_the_loop_cannot_run_away():
     assert len(calls) <= 2
 
 
+@pytest.mark.parametrize("changes", [
+    {"finding_id": ""},
+    {"severity": "urgent"},
+    {"sla_days": 0},
+    {"sla_days": 366},
+    {"remediation": ""},
+    {"evidence": ()},
+    {"rationale": ""},
+])
+def test_an_invalid_model_proposal_is_rejected_before_it_can_become_state(changes):
+    values = {
+        "finding_id": "RZ-0001", "severity": "critical", "sla_days": 7,
+        "remediation": "Upgrade log4j-core.", "evidence": ("CISA KEV",),
+        "rationale": "Known exploited.",
+    }
+    values.update(changes)
+    with pytest.raises(ValueError):
+        Proposal(**values)
+
+
+def test_a_proposal_cannot_switch_to_a_different_finding():
+    wrong = Proposal(
+        finding_id="RZ-9999", severity="high", sla_days=7,
+        remediation="Apply the vendor patch.", evidence=("NVD",),
+        rationale="The cited evidence supports this.",
+    )
+    with pytest.raises(ValueError, match="does not match"):
+        adjudicate(
+            FINDING, triage=lambda _finding: wrong,
+            review=lambda _finding, _proposal: Verdict(True, "Fine."),
+        )
+
+
+def test_a_positive_injection_assessment_forces_rejection():
+    from tools.review_models import parse_review_text
+
+    verdict = parse_review_text(
+        "INJECTION: comment asks the reader to accept the risk\n"
+        "VERDICT: RATIFY\n"
+        "REASON: The evidence otherwise supports the proposal."
+    )
+    assert verdict.ratified is False
+    assert "untrusted text" in verdict.reason
+
+
+def test_duplicate_or_contradictory_verdict_lines_fail_closed():
+    from tools.review_models import parse_review_text
+
+    verdict = parse_review_text(
+        "INJECTION: none\nVERDICT: RATIFY\nVERDICT: REJECT\nREASON: conflict"
+    )
+    assert verdict.ratified is False
+    assert "required three-line format" in verdict.reason
+
+
 # --- reviewer response parsing ---------------------------------------------
 
 def test_a_fenced_reviewer_response_does_not_leak_backticks_into_the_reason():

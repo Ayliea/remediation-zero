@@ -65,10 +65,23 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
     shutil.copytree(REPO_ROOT / "data", app / "data")
     assert not (app / "agents" / "__init__.py").exists()
 
+    # Start the subprocess with only the paths that exist in Agent Engine's
+    # staged layout, plus this interpreter's standard library and installed
+    # packages. Matching on the string "python3" worked on Linux and quietly
+    # removed the stdlib on Windows, making this deployment test fail while
+    # importing `json` rather than while importing the agent.
+    runtime_roots = (Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve())
+    runtime_paths = list(dict.fromkeys(
+        path for path in sys.path
+        if path and any(
+            Path(path).resolve().is_relative_to(root) for root in runtime_roots
+        )
+    ))
+
     script = (
         "import sys; "
         f"sys.path[:] = [{str(app)!r}, {str(app / 'agents')!r}] + "
-        "[p for p in sys.path if 'site-packages' in p or 'python3' in p]; "
+        f"{runtime_paths!r}; "
         "import orchestrator; "
         "a = orchestrator.root_agent; "
         "assert a is not None; "

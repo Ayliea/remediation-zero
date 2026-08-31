@@ -36,6 +36,7 @@ can reach holds no credential that can change the record it displays.
 """
 
 import os
+from dataclasses import replace
 from typing import Any, Optional
 
 from tools.enrichment import EnrichmentCache
@@ -172,11 +173,15 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     ).get()
     asset = (asset_snapshot.to_dict() or {}) if asset_snapshot.exists else {}
 
-    # The scanner comment is the only field here that came from outside this
-    # system. It is screened before the rendering that a model will read.
+    # Scanner prose and cached NVD prose both came from outside this system.
+    # Both are screened before the rendering that a model will read.
     finding = dict(finding)
     finding["scanner_comment"] = _screen_comment(
         finding.get("scanner_comment") or "")
 
     enrichment = _enrichment_cache().enrich(finding.get("cve_id", ""))
+    enrichment = replace(
+        enrichment,
+        description=_screen_comment(enrichment.description or ""),
+    )
     return render_finding(finding, asset, enrichment)

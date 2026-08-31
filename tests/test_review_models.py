@@ -23,7 +23,11 @@ pass screening on its own merits.
 """
 
 from tools.enrichment import Enrichment
-from tools.review_models import FENCE_BEGIN, FENCE_END, render_finding
+import pytest
+
+from tools.review_models import (
+    FENCE_BEGIN, FENCE_END, parse_proposal_payload, render_finding,
+)
 
 ASSET = {"asset_id": "ast-01", "hostname": "h.corp.invalid"}
 ENRICHMENT = Enrichment(cve_id="CVE-2024-1")
@@ -85,3 +89,37 @@ def test_an_empty_comment_is_still_fenced():
     structure of the prompt changes shape depending on the input."""
     out = render("")
     assert out.count(FENCE_BEGIN) == 1 and out.count(FENCE_END) == 1
+
+
+def valid_proposal():
+    return {
+        "severity": "high", "sla_days": 14,
+        "remediation": "Apply the vendor patch.",
+        "evidence": ["NVD", "EPSS"],
+        "rationale": "CVSS and exposure support this priority.",
+    }
+
+
+def test_a_strict_model_payload_becomes_a_proposal():
+    proposal = parse_proposal_payload(valid_proposal(), finding_id="RZ-1")
+    assert proposal.finding_id == "RZ-1"
+    assert proposal.evidence == ("NVD", "EPSS")
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("severity", {"high": True}),
+        ("sla_days", True),
+        ("sla_days", "14"),
+        ("remediation", {"instruction": "patch"}),
+        ("evidence", "NVD"),
+        ("evidence", ["NVD", {"source": "EPSS"}]),
+        ("rationale", ["because"]),
+    ],
+)
+def test_model_payload_types_are_rejected_before_coercion(field, invalid):
+    payload = valid_proposal()
+    payload[field] = invalid
+    with pytest.raises(ValueError):
+        parse_proposal_payload(payload, finding_id="RZ-1")

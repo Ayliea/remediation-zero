@@ -28,6 +28,7 @@ could not process ends up somewhere a person can still find it.
 import base64
 import binascii
 import json
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -81,17 +82,27 @@ def _optional_float(payload: Mapping[str, Any], field: str) -> float:
     value = payload.get(field, 0)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise MalformedTick(f"{field} must be a number, got {value!r}")
+    if not math.isfinite(value):
+        raise MalformedTick(f"{field} must be finite, got {value!r}")
     if value < 0:
         # Simulated time moves forward or not at all. Nothing in the system
         # reads a negative advance as anything, and silently clamping it to
         # zero would hide a scheduler misconfiguration.
         raise MalformedTick(f"{field} must not be negative, got {value!r}")
+    if value > MAX_ADVANCE_DAYS:
+        raise MalformedTick(
+            f"{field} must not exceed {MAX_ADVANCE_DAYS}, got {value!r}"
+        )
     return float(value)
 
 
 #: Manual cycles are small integers chosen by a person. A derived cycle is
 #: days-since-epoch, which is five figures and cannot collide with them.
 SCHEDULED_CYCLE_FLOOR = 10_000
+
+# Large enough for the six-week compressed demo, small enough that a typo or
+# hostile publish cannot jump every SLA and exception through years at once.
+MAX_ADVANCE_DAYS = 365
 
 
 def cycle_for_day(real_ts: float) -> int:

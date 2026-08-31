@@ -60,6 +60,8 @@ withheld everywhere else until real findings justify it:
 
 import functools
 import hashlib
+import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
 
@@ -198,6 +200,15 @@ class IdempotencyStore(Protocol):
     def put(self, completed: "CompletedCall") -> None:
         """Record a completed call. Called only after the effect succeeded."""
 
+    def acquire(self, record: IdempotencyRecord) -> "CallClaim":
+        """Atomically claim `record`, or return its completed result/busy state."""
+
+    def complete(self, claim: "CallClaim", completed: "CompletedCall") -> None:
+        """Commit a result only for the caller that owns `claim`."""
+
+    def abandon(self, claim: "CallClaim") -> None:
+        """Release a failed claim so a redelivery can try again."""
+
 
 @dataclass(frozen=True)
 class CompletedCall:
@@ -223,17 +234,57 @@ class CompletedCall:
         return self.record.cycle
 
 
+@dataclass(frozen=True)
+class CallClaim:
+    """The atomic right to perform one effect."""
+
+    record: IdempotencyRecord
+    acquired: bool
+    token: Optional[str] = None
+    existing: Optional[CompletedCall] = None
+
+
+class IdempotencyInProgress(RuntimeError):
+    """Another live worker already owns this effect's lease."""
+
+
 class InMemoryIdempotencyStore:
     """A dict-backed store, for tests and local runs."""
 
     def __init__(self) -> None:
         self._calls: dict[str, CompletedCall] = {}
+        self._claims: dict[str, str] = {}
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[CompletedCall]:
-        return self._calls.get(key)
+        with self._lock:
+            return self._calls.get(key)
 
     def put(self, completed: CompletedCall) -> None:
-        self._calls[completed.key] = completed
+        with self._lock:
+            self._calls[completed.key] = completed
+
+    def acquire(self, record: IdempotencyRecord) -> CallClaim:
+        with self._lock:
+            if existing := self._calls.get(record.key):
+                return CallClaim(record=record, acquired=False, existing=existing)
+            if record.key in self._claims:
+                return CallClaim(record=record, acquired=False)
+            token = uuid.uuid4().hex
+            self._claims[record.key] = token
+            return CallClaim(record=record, acquired=True, token=token)
+
+    def complete(self, claim: CallClaim, completed: CompletedCall) -> None:
+        with self._lock:
+            if not claim.acquired or self._claims.get(completed.key) != claim.token:
+                raise IdempotencyInProgress("idempotency claim is no longer owned")
+            self._calls[completed.key] = completed
+            self._claims.pop(completed.key, None)
+
+    def abandon(self, claim: CallClaim) -> None:
+        with self._lock:
+            if claim.acquired and self._claims.get(claim.record.key) == claim.token:
+                self._claims.pop(claim.record.key, None)
 
 
 class IdempotencyGuard:
@@ -258,23 +309,30 @@ class IdempotencyGuard:
                     finding_id=finding_id, action=action, cycle=cycle
                 )
 
-                existing = self._store.get(record.key)
-                if existing is not None:
+                claim = self._store.acquire(record)
+                if claim.existing is not None:
                     # Already happened. Return what it returned the first time,
                     # so the caller cannot tell it was suppressed.
-                    return existing.result
+                    return claim.existing.result
+                if not claim.acquired:
+                    raise IdempotencyInProgress(
+                        f"effect {record.key} is already in progress"
+                    )
 
-                result = fn(
-                    *args,
-                    finding_id=record.finding_id,
-                    cycle=record.cycle,
-                    **kwargs,
+                try:
+                    result = fn(
+                        *args,
+                        finding_id=record.finding_id,
+                        cycle=record.cycle,
+                        **kwargs,
+                    )
+                except BaseException:
+                    self._store.abandon(claim)
+                    raise
+
+                self._store.complete(
+                    claim, CompletedCall(record=record, result=result)
                 )
-
-                # Recorded only after the effect succeeded. Recording on entry
-                # would let one transient failure permanently suppress an
-                # action that never actually happened.
-                self._store.put(CompletedCall(record=record, result=result))
                 return result
 
             return wrapper

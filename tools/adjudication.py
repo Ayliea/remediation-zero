@@ -69,6 +69,25 @@ class Proposal:
     evidence: tuple[str, ...]
     rationale: str
 
+    def __post_init__(self) -> None:
+        if not self.finding_id.strip() or len(self.finding_id) > 128:
+            raise ValueError("proposal finding_id must be non-empty and at most 128 characters")
+        if self.severity not in {"critical", "high", "medium", "low"}:
+            raise ValueError(f"unsupported proposal severity: {self.severity!r}")
+        if isinstance(self.sla_days, bool) or not isinstance(self.sla_days, int):
+            raise ValueError("proposal sla_days must be an integer")
+        if not 1 <= self.sla_days <= 365:
+            raise ValueError("proposal sla_days must be between 1 and 365")
+        if not self.remediation.strip() or len(self.remediation) > 2_000:
+            raise ValueError("proposal remediation must be non-empty and at most 2000 characters")
+        if not self.evidence or len(self.evidence) > 20:
+            raise ValueError("proposal evidence must contain between 1 and 20 entries")
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 500
+               for item in self.evidence):
+            raise ValueError("every proposal evidence entry must be non-empty and at most 500 characters")
+        if not self.rationale.strip() or len(self.rationale) > 2_000:
+            raise ValueError("proposal rationale must be non-empty and at most 2000 characters")
+
 
 @dataclass(frozen=True)
 class Verdict:
@@ -126,6 +145,11 @@ def adjudicate(
 
     for attempt in range(1, MAX_REVIEW_ATTEMPTS + 1):
         proposal = triage(finding)
+        expected_finding_id = str(finding.get("finding_id", "")).strip()
+        if proposal.finding_id != expected_finding_id:
+            raise ValueError(
+                "proposal finding_id does not match the finding being adjudicated"
+            )
 
         verdict = None
         for capacity_attempt in range(1, max_capacity_retries + 1):

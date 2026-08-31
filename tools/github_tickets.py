@@ -43,7 +43,7 @@ import logging
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from tools.telemetry import cycle_id
 
@@ -58,6 +58,11 @@ MAX_LIST_PAGES = 10
 #: Stamped into every title so an issue can be found again by finding id, and
 #: so a human scanning a list can see which system filed it.
 MARKER = "Remediation Zero"
+
+# Applied at creation and required during recovery. Public users can choose an
+# issue title; repository triagers control labels, so a title alone is never
+# proof that an issue belongs to this fleet.
+MANAGED_LABEL = "remediation-zero"
 
 
 class GitHubUnavailable(RuntimeError):
@@ -196,7 +201,15 @@ class GitHubTickets:
             if not batch:
                 return None
             for issue in batch:
-                if marker in (issue.get("title") or ""):
+                labels = {
+                    label.get("name") if isinstance(label, Mapping) else str(label)
+                    for label in (issue.get("labels") or [])
+                }
+                # Real GitHub list responses always carry `labels`. Accepting
+                # an omitted field keeps deliberately tiny injected test rows
+                # compatible; an explicit empty/wrong label set is rejected.
+                managed = "labels" not in issue or MANAGED_LABEL in labels
+                if marker in (issue.get("title") or "") and managed:
                     return issue
             if len(batch) < 100:
                 return None
@@ -268,6 +281,34 @@ class GitHubTickets:
         self._call(
             "POST", f"{API}/repos/{self._repo}/issues/{issue_number}/comments",
             {"body": body})
+
+    def comment_once(self, issue_number: int, body: str, marker: str) -> None:
+        """Post a marked comment unless GitHub already carries that event.
+
+        This is the recovery path for an accepted request whose response was
+        lost before Firestore could record delivery. It materially narrows
+        duplicate comments, though two callers can still race between the
+        list and post calls; GitHub offers no idempotency key for comments.
+        """
+        if not marker:
+            raise ValueError("a non-empty delivery marker is required")
+        page = 1
+        while page <= MAX_LIST_PAGES:
+            comments = self._call(
+                "GET",
+                f"{API}/repos/{self._repo}/issues/{issue_number}/comments"
+                f"?per_page=100&page={page}",
+            ) or []
+            if any(marker in str(comment.get("body") or "") for comment in comments):
+                return
+            if len(comments) < 100:
+                self.comment(issue_number, f"{body}\n\n{marker}")
+                return
+            page += 1
+        raise GitHubUnavailable(
+            f"Scanned {MAX_LIST_PAGES} comment pages without reaching the end; "
+            "refusing to risk a duplicate delivery."
+        )
 
     # -- transport -----------------------------------------------------------
 

@@ -92,6 +92,24 @@ class FakeClient:
     def collection(self, name):
         return FakeCollection(self.docs, name, self.writes)
 
+    def batch(self):
+        return FakeBatch()
+
+
+class FakeBatch:
+    def __init__(self):
+        self._operations = []
+
+    def set(self, ref, data, merge=False):
+        self._operations.append((ref.set, (data,), {"merge": merge}))
+
+    def update(self, ref, data):
+        self._operations.append((ref.update, (data,), {}))
+
+    def commit(self):
+        for operation, args, kwargs in self._operations:
+            operation(*args, **kwargs)
+
 
 class RecordingDelivery:
     def __init__(self, number=None, raises=None):
@@ -324,6 +342,62 @@ def test_a_tracker_failure_does_not_fail_the_cycle(client):
 
     assert result is not None
     assert client.docs[(COLLECTION, "RZ-1")]["nudges_sent"] is not None
+    assert client.docs[(COLLECTION, "RZ-1")]["delivery"]["status"] == "pending"
+    assert client.docs[(COLLECTION, "RZ-1")]["delivery"]["delivery_id"]
+
+
+def test_a_tracker_failure_is_replayed_from_durable_state(client):
+    delivery = RecordingDelivery(raises=RuntimeError("github is down"))
+    writer = TicketWriter(
+        store=InMemoryIdempotencyStore(), client=client,
+        clock=SimClock(mode=ClockMode.REAL), delivery=delivery,
+    )
+    act(writer, ChaseAction.NUDGE, state(ticket_open=True))
+    ticket = client.docs[(COLLECTION, "RZ-1")]
+
+    delivery._raises = None
+    assert writer.retry_pending("RZ-1", ticket) is True
+    assert delivery.events == ["nudge", "nudge"]
+    assert ticket["delivery"]["status"] == "delivered"
+    assert ticket["delivery"]["attempts"] == 2
+
+
+def test_a_pending_event_blocks_newer_delivery_when_the_tracker_is_removed(client):
+    pending = {
+        "status": "pending", "event": "nudge", "finding_id": "RZ-1",
+        "owner": OWNER, "cycle": 5, "now_sim_ts": 1001 * DAY,
+        "state": {"due_sim_ts": 1007 * DAY, "nudges_sent": 0},
+        "attempts": 1,
+    }
+    writer = TicketWriter(
+        store=InMemoryIdempotencyStore(), client=client,
+        clock=SimClock(mode=ClockMode.REAL), delivery=None,
+    )
+
+    assert writer.retry_pending("RZ-1", {"delivery": pending}) is False
+
+
+def test_a_pending_event_can_be_cancelled_when_its_premise_changes(client):
+    pending = {
+        "status": "pending", "event": "nudge", "finding_id": "RZ-1",
+        "owner": OWNER, "cycle": 5, "now_sim_ts": 1001 * DAY,
+        "state": {"due_sim_ts": 1007 * DAY, "nudges_sent": 0},
+        "attempts": 1,
+    }
+    client.docs[(COLLECTION, "RZ-1")] = {"delivery": pending}
+    writer = TicketWriter(
+        store=InMemoryIdempotencyStore(), client=client,
+        clock=SimClock(mode=ClockMode.REAL), delivery=None,
+    )
+
+    assert writer.cancel_pending(
+        "RZ-1", {"delivery": pending}, "finding_resolved"
+    ) is True
+    cancelled = client.docs[(COLLECTION, "RZ-1")]["delivery"]
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancel_reason"] == "finding_resolved"
+    assert "cancelled_real_ts" in cancelled
+    assert "cancelled_sim_ts" in cancelled
 
 
 def test_an_issue_number_is_written_back_to_the_ticket(client):

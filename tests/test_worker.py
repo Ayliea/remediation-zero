@@ -32,6 +32,7 @@ from worker.envelope import (
     cycle_for_day,
     parse_push_request,
 )
+from tools.idempotency import InMemoryIdempotencyStore
 
 
 def push_body(payload: dict, message_id: str = "m-1") -> dict:
@@ -73,6 +74,9 @@ def test_advance_days_defaults_to_zero_rather_than_being_required():
     {"cycle": True},                     # bool is a subclass of int
     {"cycle": 7, "advance_days": "two"},
     {"cycle": 7, "advance_days": -3},    # time never moves backwards
+    {"cycle": 7, "advance_days": float("nan")},
+    {"cycle": 7, "advance_days": float("inf")},
+    {"cycle": 7, "advance_days": 366},   # bounded demo control, not a time machine
 ])
 def test_an_unusable_payload_is_refused(payload):
     with pytest.raises(MalformedTick):
@@ -150,17 +154,18 @@ import worker.app as worker_app
 from fastapi.testclient import TestClient
 
 
-class FakeStore:
+class FakeStore(InMemoryIdempotencyStore):
     def __init__(self):
+        super().__init__()
         self.puts = []
-        self._by_key = {}
-
-    def get(self, key):
-        return self._by_key.get(key)
 
     def put(self, completed):
         self.puts.append(completed)
-        self._by_key[completed.key] = completed
+        super().put(completed)
+
+    def complete(self, claim, completed):
+        self.puts.append(completed)
+        super().complete(claim, completed)
 
 
 @pytest.fixture

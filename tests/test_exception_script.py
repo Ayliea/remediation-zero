@@ -26,6 +26,8 @@ it actually takes.
 """
 
 import pytest
+from google.api_core.exceptions import AlreadyExists
+from google.cloud import firestore
 
 import scripts.exception as sweep_module
 from scripts.exception import run_sweep
@@ -40,6 +42,8 @@ class FakeSnapshot:
 
     def to_dict(self):
         return self._data
+
+    update_time = None
 
 
 class FakeDoc:
@@ -57,6 +61,22 @@ class FakeDoc:
             self._docs.setdefault(self._key, {}).update(data)
         else:
             self._docs[self._key] = dict(data)
+
+    def create(self, data):
+        if self._key in self._docs:
+            raise AlreadyExists("already exists")
+        self._docs[self._key] = dict(data)
+
+    def update(self, data, option=None):
+        current = self._docs.setdefault(self._key, {})
+        for key, value in data.items():
+            if value is firestore.DELETE_FIELD:
+                current.pop(key, None)
+            else:
+                current[key] = value
+
+    def delete(self, option=None):
+        self._docs.pop(self._key, None)
 
 
 class FakeCollection:

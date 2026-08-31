@@ -21,7 +21,7 @@ guardrail's behaviour on its bad day is the only part of it that matters.
 import pytest
 
 from tools.model_armor import (
-    ArmorVerdict,
+    ArmorVerdict, ModelArmor,
     WITHHELD_NOTICE,
     apply_verdict,
     parse_sanitize_response,
@@ -125,6 +125,41 @@ def test_a_filter_that_failed_to_execute_is_not_read_as_clean():
     assert any("did not run" in r for r in verdict.reasons)
 
 
+def test_an_unrelated_successful_filter_cannot_substitute_for_injection_screening():
+    partial = {
+        "sanitizationResult": {
+            "filterMatchState": "NO_MATCH_FOUND",
+            "filterResults": {
+                "rai": {
+                    "raiFilterResult": {
+                        "executionState": "EXECUTION_SUCCESS",
+                        "matchState": "NO_MATCH_FOUND",
+                    }
+                }
+            },
+        }
+    }
+
+    verdict = parse_sanitize_response(partial)
+    assert verdict.blocked is True
+    assert verdict.screened is False
+    assert "pi_and_jailbreak" in verdict.reasons[0]
+
+
+@pytest.mark.parametrize("unknown", [None, "UNKNOWN", "FILTER_MATCH_STATE_UNSPECIFIED"])
+def test_an_unknown_match_state_fails_closed(unknown):
+    payload = {
+        "sanitizationResult": {
+            "filterMatchState": unknown,
+            "filterResults": CLEAN["sanitizationResult"]["filterResults"],
+        }
+    }
+
+    verdict = parse_sanitize_response(payload)
+    assert verdict.blocked is True
+    assert verdict.screened is False
+
+
 def test_an_unparseable_response_is_not_read_as_clean():
     verdict = parse_sanitize_response({"unexpected": "shape"})
 
@@ -136,3 +171,18 @@ def test_empty_text_needs_no_screening():
     """An empty comment carries nothing, so it is not a boundary crossing."""
     verdict = parse_sanitize_response(CLEAN)
     assert apply_verdict("", verdict) == ""
+
+
+def test_disabling_armor_without_control_authorization_fails_closed(monkeypatch):
+    monkeypatch.delenv("ALLOW_UNSCREENED_REVIEW_CONTROL", raising=False)
+    verdict = ModelArmor(enabled=False).screen("untrusted", token="unused")
+    assert verdict.blocked is True
+    assert apply_verdict("untrusted", verdict) == WITHHELD_NOTICE
+
+
+def test_the_reviewer_control_requires_an_explicit_second_switch(monkeypatch):
+    monkeypatch.setenv("ALLOW_UNSCREENED_REVIEW_CONTROL", "true")
+    verdict = ModelArmor(enabled=False).screen("untrusted", token="unused")
+    assert verdict.blocked is False
+    assert verdict.screened is False
+    assert apply_verdict("untrusted", verdict) == "untrusted"

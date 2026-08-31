@@ -94,7 +94,10 @@ def test_the_scanner_comment_is_screened_before_anything_renders():
     built, _, armor = handlers(ArmorVerdict(blocked=False, screened=True))
     built["screen"]("RZ-1", 1)
 
-    assert armor.screened_texts == [PAYLOAD]
+    assert len(armor.screened_texts) == 1
+    assert PAYLOAD in armor.screened_texts[0]
+    assert "SCANNER COMMENT" in armor.screened_texts[0]
+    assert "NVD DESCRIPTION" in armor.screened_texts[0]
 
 
 def test_blocked_text_never_reaches_the_rendered_context():

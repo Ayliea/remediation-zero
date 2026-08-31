@@ -26,6 +26,7 @@ import argparse
 import json
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -131,14 +132,22 @@ def main() -> int:
         asset = assets.get(finding["asset_id"], {})
         enrichment = cache.enrich(finding["cve_id"])
 
-        # The untrusted-content boundary. The scanner comment is the only field
-        # here that originated outside this system, and it is screened before
-        # either model sees it. Everything else is trusted metadata written by
-        # the seed script.
+        # The untrusted-content boundary. Both scanner prose and cached vendor
+        # advisory prose originated outside this system. Screen them together
+        # before either model sees either one; structured scores and booleans
+        # remain typed data rather than instructions.
         raw_comment = finding.get("scanner_comment") or ""
-        verdict = armor.screen(raw_comment, armor_token)
+        raw_description = enrichment.description or ""
+        boundary_text = (
+            f"SCANNER COMMENT\n{raw_comment}\n\n"
+            f"NVD DESCRIPTION\n{raw_description}"
+        )
+        verdict = armor.screen(boundary_text, armor_token)
         finding = dict(finding)
         finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
+        enrichment = replace(
+            enrichment, description=apply_verdict(raw_description, verdict)
+        )
         if verdict.blocked or not verdict.screened:
             _log("untrusted_text_screened", cycle_id, finding_id,
                  blocked=verdict.blocked, screened=verdict.screened,
@@ -152,7 +161,10 @@ def main() -> int:
         try:
             adjudication = adjudicate(
                 finding,
-                triage=lambda _f: rm.propose(rendered, reasoning_model, genai_client),
+                triage=lambda _f: rm.propose(
+                    rendered, reasoning_model, genai_client,
+                    finding_id=finding_id,
+                ),
                 review=lambda _f, p: rm.review(
                     rendered + "\n\nPROPOSAL\n" + json.dumps(
                         {"severity": p.severity, "sla_days": p.sla_days,

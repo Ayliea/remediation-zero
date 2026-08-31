@@ -29,13 +29,15 @@ import logging
 from typing import Any, Optional
 
 from tools.chase import MAX_NUDGES
-from tools.github_tickets import GitHubTickets, issue_body, issue_title
+from tools.github_tickets import (
+    MANAGED_LABEL, GitHubTickets, issue_body, issue_title,
+)
 from tools.telemetry import cycle_id
 
 logger = logging.getLogger("remediation_zero.delivery")
 
 #: Applied to every issue this fleet files, so a human can filter them out.
-LABELS = ["remediation-zero"]
+LABELS = [MANAGED_LABEL]
 
 
 class GitHubDelivery:
@@ -52,7 +54,7 @@ class GitHubDelivery:
 
     def deliver(
         self, event: str, finding_id: str, owner: Any, cycle: int,
-        now_sim_ts: float, state: Any,
+        now_sim_ts: float, state: Any, delivery_id: Optional[str] = None,
     ) -> Optional[int]:
         """Deliver one action. Returns an issue number when one was created."""
         ticket = (self._db.collection("tickets").document(finding_id)
@@ -62,37 +64,32 @@ class GitHubDelivery:
         if event == "open_ticket":
             if number:
                 return None  # already filed; nothing to do
-            finding = (self._db.collection("findings").document(finding_id)
-                       .get().to_dict() or {"finding_id": finding_id})
-            decision = self._latest_decision(finding_id)
-            created = self._gh.open_issue(
-                finding_id,
-                issue_title(finding),
-                issue_body(
-                    finding, owner or {},
-                    due=_day(getattr(state, "due_sim_ts", None)),
-                    sla_days=decision.get("sla_days") or _sla_days(state),
-                    severity=decision.get("severity", "unrated"),
-                    remediation=decision.get("remediation", ""),
-                    rationale=decision.get("rationale", ""),
-                    evidence=decision.get("evidence", ""),
-                    reviewer=decision.get("reviewer", ""),
-                    attempts=decision.get("attempts"),
-                ),
-                labels=LABELS,
-                cycle=cycle,
-            )
+            created = self._open_issue(finding_id, owner, cycle, state)
             logger.info(json.dumps({
                 "event": "issue_filed", "finding_id": finding_id,
                 "cycle_id": cycle_id(cycle), "issue": created}, sort_keys=True))
             return created
 
         if not number:
-            # A nudge with nowhere to land. Not an error: the issue may have
-            # failed to file earlier and the next open_ticket reconciles it.
-            return None
+            if event == "close_ticket":
+                # If the opening delivery never succeeded, there is no tracker
+                # artefact to close. Firestore still records the resolution.
+                return None
+            # A failed opening must not be lost merely because the state
+            # machine continued. Bootstrap or recover the issue before the
+            # newer nudge/escalation/handoff is posted.
+            number = self._open_issue(finding_id, owner, cycle, state)
+            recovered_number = number
+        else:
+            recovered_number = None
 
-        self._gh.comment(number, _comment(event, cycle, now_sim_ts, state, owner))
+        marker_id = delivery_id or f"legacy-{finding_id}-{event}-c{cycle:03d}"
+        marker = f"<!-- remediation-zero-delivery:{marker_id} -->"
+        self._gh.comment_once(
+            number,
+            _comment(event, cycle, now_sim_ts, state, owner),
+            marker,
+        )
 
         # Comment first, then close. The reverse posts into an issue that is
         # already out of every triage view, so the reason a person most wants
@@ -102,7 +99,31 @@ class GitHubDelivery:
             logger.info(json.dumps({
                 "event": "issue_closed", "finding_id": finding_id,
                 "cycle_id": cycle_id(cycle), "issue": number}, sort_keys=True))
-        return None
+        return recovered_number
+
+    def _open_issue(
+        self, finding_id: str, owner: Any, cycle: int, state: Any
+    ) -> int:
+        finding = (self._db.collection("findings").document(finding_id)
+                   .get().to_dict() or {"finding_id": finding_id})
+        decision = self._latest_decision(finding_id)
+        return self._gh.open_issue(
+            finding_id,
+            issue_title(finding),
+            issue_body(
+                finding, owner or {},
+                due=_day(getattr(state, "due_sim_ts", None)),
+                sla_days=decision.get("sla_days") or _sla_days(state),
+                severity=decision.get("severity", "unrated"),
+                remediation=decision.get("remediation", ""),
+                rationale=decision.get("rationale", ""),
+                evidence=decision.get("evidence", ""),
+                reviewer=decision.get("reviewer", ""),
+                attempts=decision.get("attempts"),
+            ),
+            labels=LABELS,
+            cycle=cycle,
+        )
 
     def _latest_decision(self, finding_id: str) -> dict:
         """The ratified decision behind this ticket.

@@ -9,7 +9,9 @@ WORKDIR /app
 COPY requirements-ui.txt .
 RUN pip install --no-cache-dir -r requirements-ui.txt
 
-COPY ui/ ./ui/
+# Ship only the application. Development probes and local verification helpers
+# do not belong in the public, read-only console image.
+COPY ui/app.py ./ui/app.py
 
 # Cloud Run supplies PORT. Single worker: the console is read-mostly and
 # scaling out costs more than it saves at this traffic.

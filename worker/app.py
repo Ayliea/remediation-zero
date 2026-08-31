@@ -143,23 +143,40 @@ def _run(parsed: Tick) -> Response:
     try:
         store = _store_for(clock)
 
-        # Checked before the work rather than around the write. Pub/Sub
-        # redelivers on any non-2xx, including a response lost after the work
-        # completed, so the second delivery has to be cheap as well as correct.
-        if store.get(record.key) is not None:
+        # Claim before work. Firestore creates the first lease atomically, so
+        # two Cloud Run instances cannot both pass an empty read and run the
+        # same tick concurrently.
+        claim = store.acquire(record)
+        if claim.existing is not None:
             _log("tick_already_ran", cycle=parsed.cycle, message_id=parsed.message_id)
             return Response(status_code=204)
+        if not claim.acquired:
+            _log("tick_in_progress", cycle=parsed.cycle,
+                 message_id=parsed.message_id)
+            # Keep this delivery unacknowledged. The current owner should
+            # finish first; if it does not, the bounded lease can be reclaimed.
+            return Response(status_code=500)
 
         _log("tick_started", cycle=parsed.cycle, message_id=parsed.message_id,
              advance_days=parsed.advance_days, clock_mode=clock.mode.value)
 
-        if parsed.advance_days:
-            clock.advance(seconds=parsed.advance_days * 86400)
+        try:
+            if parsed.advance_days:
+                clock.advance(seconds=parsed.advance_days * 86400)
 
-        actions = RUNNERS[AGENT](cycle=parsed.cycle, clock=clock)
+            actions = RUNNERS[AGENT](cycle=parsed.cycle, clock=clock)
+        except BaseException:
+            # Nothing completed owns no permanent claim. Pub/Sub can retry the
+            # same deterministic key instead of waiting for the lease timeout.
+            store.abandon(claim)
+            raise
 
-        store.put(CompletedCall(record=record,
-                                result={"agent": AGENT, "actions": actions}))
+        store.complete(
+            claim,
+            CompletedCall(
+                record=record, result={"agent": AGENT, "actions": actions}
+            ),
+        )
         _log("tick_finished", cycle=parsed.cycle, actions=actions)
         return Response(status_code=204)
 

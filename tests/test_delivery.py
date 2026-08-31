@@ -143,7 +143,12 @@ class RecordingTracker:
     def __init__(self):
         self.calls = []
 
-    def comment(self, number, body):
+    def open_issue(self, finding_id, title, body, labels, cycle):
+        self.calls.append(("open_issue", 42, finding_id))
+        return 42
+
+    def comment_once(self, number, body, marker):
+        assert marker.startswith("<!-- remediation-zero-delivery:")
         self.calls.append(("comment", number, body))
 
     def close_issue(self, number):
@@ -213,3 +218,17 @@ def test_a_closure_with_no_filed_issue_touches_the_tracker_at_all():
                      state=ResolvedState(due_sim_ts=now))
 
     assert tracker.calls == []
+
+
+def test_a_later_nudge_recovers_an_issue_whose_opening_delivery_failed():
+    delivery, tracker = _delivery({})
+    delivery._latest_decision = lambda _finding_id: {}
+    now = 1000 * DAY
+
+    recovered = delivery.deliver(
+        event="nudge", finding_id="RZ-1", owner=OWNER, cycle=6,
+        now_sim_ts=now, state=State(due_sim_ts=now + DAY),
+    )
+
+    assert recovered == 42
+    assert [call[0] for call in tracker.calls] == ["open_issue", "comment"]

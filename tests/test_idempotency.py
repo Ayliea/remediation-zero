@@ -19,6 +19,7 @@ It is demonstrated on camera, so it cannot be discovered broken late.
 """
 
 import pytest
+import threading
 
 from tools.idempotency import (
     KEY_SCHEME,
@@ -247,6 +248,41 @@ def test_a_failed_call_is_not_recorded_and_can_be_retried():
 
     assert escalate(finding_id="CVE-2024-1234", cycle=1) == "ESCALATED"
     assert len(attempts) == 2
+
+
+def test_two_overlapping_callers_can_produce_only_one_effect():
+    """The old get/act/put sequence let both threads pass the empty read."""
+    guard = IdempotencyGuard(InMemoryIdempotencyStore())
+    entered = threading.Event()
+    release = threading.Event()
+    effects = []
+    failures = []
+
+    @guard.protects(action="ticket")
+    def open_ticket(*, finding_id, cycle):
+        effects.append((finding_id, cycle))
+        entered.set()
+        release.wait(timeout=2)
+        return "TICKET-1"
+
+    first = threading.Thread(
+        target=lambda: open_ticket(finding_id="RZ-1", cycle=7)
+    )
+    first.start()
+    assert entered.wait(timeout=2)
+
+    try:
+        open_ticket(finding_id="RZ-1", cycle=7)
+    except Exception as exc:  # the type is asserted below without hiding thread errors
+        failures.append(exc)
+    finally:
+        release.set()
+        first.join(timeout=2)
+
+    from tools.idempotency import IdempotencyInProgress
+    assert len(effects) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], IdempotencyInProgress)
 
 
 def test_the_store_keeps_the_record_not_just_the_key():

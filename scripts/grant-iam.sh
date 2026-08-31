@@ -46,12 +46,58 @@ REPORTS="projects/${PROJECT}/databases/reports"
 
 sa () { echo "serviceAccount:rz-$1@${PROJECT}.iam.gserviceaccount.com"; }
 
-echo "Granting model access to every agent identity..."
+echo "Creating the seven agent service accounts when absent..."
 for agent in orchestrator triage reviewer ownership chase exception reporting; do
+  address="rz-${agent}@${PROJECT}.iam.gserviceaccount.com"
+  if gcloud iam service-accounts describe "${address}" \
+      --project="${PROJECT}" > /dev/null 2>&1; then
+    echo "  rz-${agent}: already exists"
+  else
+    gcloud iam service-accounts create "rz-${agent}" \
+      --display-name="Remediation Zero ${agent}" \
+      --project="${PROJECT}" --quiet > /dev/null
+    echo "  rz-${agent}: created"
+  fi
+done
+
+has_vertex_access () {
+  local member policy
+  member="$(sa "$1")"
+  if ! policy="$(gcloud projects get-iam-policy "${PROJECT}" \
+    --flatten='bindings[].members' \
+    --filter="bindings.role=roles/aiplatform.user AND bindings.members=${member}" \
+    --format='value(bindings.members)')"; then
+    return 2
+  fi
+  grep -Fqx "${member}" <<< "${policy}"
+}
+
+echo "Granting model access only to identities whose code calls a model..."
+for agent in orchestrator triage reviewer reporting; do
   gcloud projects add-iam-policy-binding "${PROJECT}" \
     --member="$(sa "${agent}")" --role="roles/aiplatform.user" \
     --condition=None --quiet > /dev/null
   echo "  rz-${agent}: roles/aiplatform.user"
+done
+
+# This script is also a reconciler. Earlier deployments granted Vertex access
+# to every named identity; merely narrowing the add loop would leave those
+# stale privileges effective forever.
+for agent in ownership chase exception; do
+  gcloud projects remove-iam-policy-binding "${PROJECT}" \
+    --member="$(sa "${agent}")" --role="roles/aiplatform.user" \
+    --condition=None --quiet > /dev/null 2>&1 || :
+  if has_vertex_access "${agent}"; then
+    echo "ERROR: rz-${agent} still has roles/aiplatform.user" >&2
+    exit 1
+  else
+    verify_status=$?
+    if [[ ${verify_status} -ne 1 ]]; then
+      echo "ERROR: could not verify Vertex access for rz-${agent}" >&2
+      exit 1
+    fi
+  fi
+  echo "  rz-${agent}: Vertex access verified absent (deterministic worker)"
 done
 
 echo

@@ -31,11 +31,13 @@ a stranger can reach must not be able to change the record it displays.
 """
 
 import os
+from hashlib import sha256
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -50,6 +52,9 @@ SESSION_ID = os.environ.get("ORCHESTRATOR_SESSION_ID", "unknown")
 
 _client: firestore.Client | None = None
 _reports_client: firestore.Client | None = None
+_snapshot_cache: tuple[float, dict] | None = None
+_snapshot_lock = Lock()
+CACHE_SECONDS = 10
 
 #: Reports live in their own database. See tools/reports.py for why.
 REPORTS_DATABASE = "reports"
@@ -141,36 +146,54 @@ def snapshot() -> dict:
     """Everything the page needs, in one pass."""
     client = db()
 
-    def rows(name, limit=60):
-        return [d.to_dict() for d in client.collection(name).limit(limit).stream()]
+    def rows(name, limit=60, newest_by=None):
+        query = client.collection(name)
+        if newest_by:
+            query = query.order_by(
+                newest_by, direction=firestore.Query.DESCENDING
+            )
+        return [d.to_dict() for d in query.limit(limit).stream()]
+
+    def newest_value(source, name, field):
+        docs = list(
+            source.collection(name)
+            .order_by(field, direction=firestore.Query.DESCENDING)
+            .limit(1).stream()
+        )
+        return (docs[0].to_dict().get(field, 0) or 0) if docs else 0
 
     human_queue = rows("human_queue")
     sla = rows("sla_clocks")
-    decisions = sorted(rows("decisions"), key=lambda d: d.get("real_ts", 0), reverse=True)
+    decisions = rows("decisions", newest_by="real_ts")
     tickets = rows("tickets")
     exceptions = rows("exceptions")
-    cycles = rows("cycles")
+    cycles = rows("cycles", newest_by="real_ts")
     # The scan manifests. Their stored counts are read, never recomputed: the
     # rescan wrote what it concluded, and a console that re-derives it can
     # disagree with the record it exists to display.
-    scans = sorted(rows("scans", limit=20),
-                   key=lambda scan: scan.get("real_ts", 0), reverse=True)
+    scans = rows("scans", limit=20, newest_by="real_ts")
     latest_scan = scans[0] if scans else {}
 
-    reports = sorted(
-        (d.to_dict() for d in reports_db().collection("reports").limit(10).stream()),
-        key=lambda r: r.get("real_ts", 0),
-        reverse=True,
-    )
+    report_client = reports_db()
+    reports = [d.to_dict() for d in
+               report_client.collection("reports")
+               .order_by("real_ts", direction=firestore.Query.DESCENDING)
+               .limit(10).stream()]
 
     # Scenario time is the furthest point the simulation has reached, taken
     # from the record rather than from this process's clock. The console never
     # advances time; it only reports where the fleet left it.
+    # Compute the maximum at the database, before LIMIT. Sorting a capped,
+    # unordered sample locally can display an arbitrary old scenario time once
+    # a collection grows beyond the page size.
     sim_now = max(
-        [0.0]
-        + [t.get("last_contact_sim_ts", 0) or 0 for t in tickets]
-        + [s.get("due_sim_ts", 0) or 0 for s in sla]
-        + [e.get("expires_sim_ts", 0) or 0 for e in exceptions]
+        0.0,
+        newest_value(client, "tickets", "last_contact_sim_ts"),
+        newest_value(client, "sla_clocks", "started_sim_ts"),
+        newest_value(client, "decisions", "sim_ts"),
+        newest_value(client, "exceptions", "accepted_sim_ts"),
+        newest_value(client, "cycles", "sim_ts"),
+        newest_value(report_client, "reports", "sim_ts"),
     )
 
     # int(): Firestore's count aggregation returns a float, so an empty
@@ -178,7 +201,7 @@ def snapshot() -> dict:
     counts = {
         name: int(client.collection(name).count().get()[0][0].value)
         for name in ("findings", "assets", "owners", "decisions", "tickets",
-                     "human_queue", "idempotency")
+                     "human_queue", "sla_clocks", "idempotency")
     }
 
     # Kept out of `counts`, which is a strip of raw collection sizes. This is
@@ -204,6 +227,29 @@ def snapshot() -> dict:
         "counts": counts,
         "sim_now": sim_now,
     }
+
+
+def cached_snapshot(now_real_ts: float | None = None) -> dict:
+    """Share one Firestore projection across the public refresh burst."""
+    global _snapshot_cache
+    now_real_ts = (
+        datetime.now(tz=timezone.utc).timestamp()
+        if now_real_ts is None else now_real_ts
+    )
+    cached = _snapshot_cache
+    if cached is not None and cached[0] > now_real_ts:
+        return cached[1]
+
+    # Cloud Run serves concurrent requests inside one instance. The second
+    # check ensures a cold burst produces one database projection, not one per
+    # waiting request.
+    with _snapshot_lock:
+        cached = _snapshot_cache
+        if cached is not None and cached[0] > now_real_ts:
+            return cached[1]
+        value = snapshot()
+        _snapshot_cache = (now_real_ts + CACHE_SECONDS, value)
+        return value
 
 
 # --- page -------------------------------------------------------------------
@@ -579,13 +625,13 @@ but cannot confirm.</p>"""
 
 {report_block}
 
-{section("Human queue", f"{len(data['human_queue'])} waiting",
+{section("Human queue", f"{counts.get('human_queue', 0)} waiting",
   "The terminal state for anything the fleet could not resolve safely. No agent reads from here; "
   "a person does. A finding arriving here is a successful outcome, not a failure.",
   ["Finding", "Reason class", "What happened", "Recorded"], hq_rows,
   "Nothing is waiting on a person.")}
 
-{section("SLA clocks", f"{len(data['sla'])} tracked",
+{section("SLA clocks", f"{counts.get('sla_clocks', 0)} tracked",
   "Deadlines run in scenario time so a six-week window can be demonstrated in minutes. "
   "The start time is recorded in both clocks and the wall-clock reading is never adjusted to match.",
   ["Finding", "Owner", "Status", "Deadline", "Started"], sla_rows,
@@ -598,7 +644,7 @@ but cannot confirm.</p>"""
   ["Finding", "Outcome", "Proposal and adjudication", "Recorded"], dec_rows,
   "No decisions yet.")}
 
-{section("Ticket lifecycle", f"{len(data['tickets'])} open",
+{section("Ticket lifecycle", f"{counts.get('tickets', 0)} recorded",
   "What chase did, and how long it really took. The two figures in the last column are the "
   "honest pair: minutes actually elapsed, against the days of scenario being demonstrated.",
   ["Finding", "Owner", "Status", "Trail", "Elapsed"], tk_rows,
@@ -629,6 +675,35 @@ def healthz():
     return {"ok": True}
 
 
+@app.middleware("http")
+async def defensive_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self' 'unsafe-inline' "
+        "https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; script-src 'none'; frame-ancestors 'none'; "
+        "base-uri 'none'; form-action 'none'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = (
+        "camera=(), microphone=(), geolocation=(), payment=()"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Strict-Transport-Security"] = (
+        "max-age=31536000; includeSubDomains"
+    )
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
-def index():
-    return HTMLResponse(render(snapshot()))
+def index(request: Request):
+    body = render(cached_snapshot())
+    etag = f'"{sha256(body.encode("utf-8")).hexdigest()}"'
+    headers = {
+        "Cache-Control": f"public, max-age={CACHE_SECONDS}, stale-while-revalidate=20",
+        "ETag": etag,
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return HTMLResponse(body, headers=headers)

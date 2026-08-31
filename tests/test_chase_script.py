@@ -22,6 +22,8 @@ be goes quiet with nobody deciding that it should.
 """
 
 import pytest
+from google.api_core.exceptions import AlreadyExists
+from google.cloud import firestore
 
 import scripts.chase as chase_module
 from scripts.chase import run_chase
@@ -39,6 +41,8 @@ class FakeSnapshot:
     def to_dict(self):
         return self._data
 
+    update_time = None
+
 
 class FakeDoc:
     def __init__(self, docs, key):
@@ -55,8 +59,21 @@ class FakeDoc:
         else:
             self._docs[self._key] = dict(data)
 
-    def update(self, data):
-        self._docs.setdefault(self._key, {}).update(data)
+    def create(self, data):
+        if self._key in self._docs:
+            raise AlreadyExists("already exists")
+        self._docs[self._key] = dict(data)
+
+    def update(self, data, option=None):
+        current = self._docs.setdefault(self._key, {})
+        for key, value in data.items():
+            if value is firestore.DELETE_FIELD:
+                current.pop(key, None)
+            else:
+                current[key] = value
+
+    def delete(self, option=None):
+        self._docs.pop(self._key, None)
 
 
 class FakeCollection:
@@ -76,6 +93,24 @@ class FakeClient:
 
     def collection(self, name):
         return FakeCollection(self.docs, name, self._rows)
+
+    def batch(self):
+        return FakeBatch()
+
+
+class FakeBatch:
+    def __init__(self):
+        self._operations = []
+
+    def set(self, ref, data, merge=False):
+        self._operations.append((ref.set, (data,), {"merge": merge}))
+
+    def update(self, ref, data):
+        self._operations.append((ref.update, (data,), {}))
+
+    def commit(self):
+        for operation, args, kwargs in self._operations:
+            operation(*args, **kwargs)
 
 
 def sla(finding_id="RZ-1", due_in_days=5, status="open", owner_id="own-1"):
@@ -156,6 +191,17 @@ def test_an_expired_acceptance_no_longer_suppresses_the_chase(run):
     assert actions["open_ticket"] == 1
 
 
+def test_an_active_label_cannot_keep_an_expired_acceptance_alive(run):
+    """Expiry is determined by the clock, even if the sweep has not yet
+    rewritten the status field. Independent scheduled workers may overlap."""
+    actions, _ = run(
+        [sla()],
+        exceptions=[{"finding_id": "RZ-1", "status": "active",
+                     "expires_sim_ts": NOW - DAY}])
+
+    assert actions["open_ticket"] == 1
+
+
 # --- where resolution comes from --------------------------------------------
 
 def test_a_resolved_finding_closes_its_ticket(run):
@@ -171,6 +217,22 @@ def test_a_resolved_finding_closes_its_ticket(run):
     assert actions["close_ticket"] == 1
     assert client.docs[("tickets", "RZ-1")]["status"] == "resolved"
     assert client.docs[("tickets", "RZ-1")]["resolved_by_scan"] == "rescan-01"
+
+
+def test_confirmed_resolution_outranks_an_active_risk_acceptance(run):
+    actions, client = run(
+        [sla()],
+        tickets=[{"finding_id": "RZ-1", "status": "open",
+                  "nudges_sent": 1, "last_contact_sim_ts": NOW - DAY}],
+        findings=[{"finding_id": "RZ-1", "status": "resolved",
+                   "resolved_by_scan": "rescan-01"}],
+        exceptions=[{"finding_id": "RZ-1", "status": "active",
+                     "expires_sim_ts": NOW + 30 * DAY}],
+    )
+
+    assert actions["close_ticket"] == 1
+    assert actions.get("skipped_accepted", 0) == 0
+    assert client.docs[("tickets", "RZ-1")]["status"] == "resolved"
 
 
 def test_an_unresolved_finding_is_still_chased(run):
@@ -219,6 +281,95 @@ def test_the_fleet_decides_identically_with_no_tracker_configured(run):
 
     assert actions["open_ticket"] == 1
     assert "github_issue" not in client.docs[("tickets", "RZ-1")]
+
+
+def test_a_failed_nudge_is_cancelled_after_risk_acceptance(run):
+    pending = {
+        "status": "pending", "event": "nudge", "finding_id": "RZ-1",
+        "owner": OWNER, "cycle": 4, "now_sim_ts": NOW - DAY,
+        "state": {"due_sim_ts": NOW + 5 * DAY, "nudges_sent": 0},
+        "attempts": 1,
+    }
+    actions, client = run(
+        [sla()],
+        tickets=[{"finding_id": "RZ-1", "status": "open",
+                  "nudges_sent": 1, "delivery": pending}],
+        exceptions=[{"finding_id": "RZ-1", "status": "active",
+                     "expires_sim_ts": NOW + 30 * DAY}],
+    )
+
+    assert actions["skipped_accepted"] == 1
+    delivery = client.docs[("tickets", "RZ-1")]["delivery"]
+    assert delivery["status"] == "cancelled"
+    assert delivery["cancel_reason"] == "risk_acceptance_active"
+
+
+def test_a_failed_nudge_is_cancelled_before_rescan_closure(run):
+    pending = {
+        "status": "pending", "event": "nudge", "finding_id": "RZ-1",
+        "owner": OWNER, "cycle": 4, "now_sim_ts": NOW - DAY,
+        "state": {"due_sim_ts": NOW + 5 * DAY, "nudges_sent": 0},
+        "attempts": 1,
+    }
+    actions, client = run(
+        [sla()],
+        tickets=[{"finding_id": "RZ-1", "status": "open",
+                  "nudges_sent": 1, "delivery": pending}],
+        findings=[{"finding_id": "RZ-1", "status": "resolved",
+                   "resolved_by_scan": "rescan-01"}],
+    )
+
+    assert actions["close_ticket"] == 1
+    delivery = client.docs[("tickets", "RZ-1")]["delivery"]
+    assert delivery["status"] == "cancelled"
+    assert delivery["cancel_reason"] == "finding_resolved"
+
+
+def test_a_tracker_outage_does_not_freeze_authoritative_escalation(run):
+    pending = {
+        "status": "pending", "event": "nudge", "finding_id": "RZ-1",
+        "owner": OWNER, "cycle": 4, "now_sim_ts": NOW - 2 * DAY,
+        "state": {"due_sim_ts": NOW - DAY, "nudges_sent": 1},
+        "attempts": 1,
+    }
+    actions, client = run(
+        [sla(due_in_days=-1)],
+        tickets=[{"finding_id": "RZ-1", "status": "open",
+                  "nudges_sent": 1, "last_contact_sim_ts": NOW - 2 * DAY,
+                  "delivery": pending}],
+        findings=[{"finding_id": "RZ-1", "status": "open"}],
+    )
+
+    assert actions["escalate"] == 1
+    assert client.docs[("tickets", "RZ-1")]["escalated"] is True
+
+
+def test_human_handoff_is_not_repeated_on_the_next_cycle(run):
+    first, first_client = run(
+        [sla(due_in_days=-3)],
+        tickets=[{"finding_id": "RZ-1", "status": "escalated",
+                  "escalated": True, "nudges_sent": 3,
+                  "last_contact_sim_ts": NOW - DAY}],
+        findings=[{"finding_id": "RZ-1", "status": "open"}],
+        cycle=5,
+    )
+    handed_off = {
+        "finding_id": "RZ-1",
+        "escalated": True,
+        "nudges_sent": 3,
+        **first_client.docs[("tickets", "RZ-1")],
+    }
+    second, second_client = run(
+        [sla(due_in_days=-3)],
+        tickets=[handed_off],
+        findings=[{"finding_id": "RZ-1", "status": "open"}],
+        cycle=6,
+    )
+
+    assert first["human_queue"] == 1
+    assert second["done"] == 1
+    assert second.get("human_queue", 0) == 0
+    assert ("human_queue", "unresolved-RZ-1") not in second_client.docs
 
 
 # --- once -------------------------------------------------------------------

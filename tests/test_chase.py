@@ -100,6 +100,13 @@ def test_an_already_escalated_overdue_finding_goes_to_a_person():
     assert next_action(current, now_sim_ts=DUE + 7 * DAY) is ChaseAction.HUMAN_QUEUE
 
 
+def test_a_human_handoff_is_terminal_on_later_cycles():
+    current = state(
+        ticket_open=True, nudges_sent=3, escalated=True, with_human=True
+    )
+    assert next_action(current, now_sim_ts=DUE + 90 * DAY) is ChaseAction.DONE
+
+
 def test_a_resolved_finding_stops_being_chased():
     """Resolution outranks every deadline. Thirty days past due with a nudge
     already sent, a confirmed fix still ends the chase rather than escalating."""

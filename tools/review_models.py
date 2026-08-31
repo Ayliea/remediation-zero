@@ -168,7 +168,9 @@ def render_finding(
 
 
 
-def propose(prompt_text: str, model: str, client: genai.Client) -> Proposal:
+def propose(
+    prompt_text: str, model: str, client: genai.Client, *, finding_id: str
+) -> Proposal:
     """Ask Gemini for a triage proposal."""
     response = _with_backoff(
         lambda: client.models.generate_content(
@@ -183,13 +185,46 @@ def propose(prompt_text: str, model: str, client: genai.Client) -> Proposal:
         what="triage model",
     )
     payload = json.loads(response.text)
+    return parse_proposal_payload(payload, finding_id=finding_id)
+
+
+def parse_proposal_payload(payload: Any, *, finding_id: str) -> Proposal:
+    """Validate the model's JSON shape before constructing a proposal.
+
+    Python's ordinary coercions are too permissive at a trust boundary:
+    ``int(True)`` is 1, ``tuple("NVD")`` is three evidence items, and
+    ``str({"instruction": ...})`` turns an object into plausible prose.
+    Reject those shapes rather than laundering them into valid-looking state.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("triage response must be a JSON object")
+    required = {"severity", "sla_days", "remediation", "evidence", "rationale"}
+    missing = sorted(required - payload.keys())
+    if missing:
+        raise ValueError(f"triage response missing fields: {', '.join(missing)}")
+    if not isinstance(payload["severity"], str):
+        raise ValueError("triage severity must be a string")
+    if isinstance(payload["sla_days"], bool) or not isinstance(payload["sla_days"], int):
+        raise ValueError("triage sla_days must be an integer")
+    if not isinstance(payload["remediation"], str):
+        raise ValueError("triage remediation must be a string")
+    evidence = payload["evidence"]
+    if not isinstance(evidence, list) or not all(
+        isinstance(item, str) for item in evidence
+    ):
+        raise ValueError("triage evidence must be an array of strings")
+    if not isinstance(payload["rationale"], str):
+        raise ValueError("triage rationale must be a string")
     return Proposal(
-        finding_id=payload.get("finding_id", ""),
-        severity=str(payload["severity"]).lower(),
-        sla_days=int(payload["sla_days"]),
-        remediation=str(payload["remediation"]),
-        evidence=tuple(payload.get("evidence", ())),
-        rationale=str(payload["rationale"]),
+        # Identity is bound by trusted orchestration context, never copied
+        # from model output. A model decides attributes, not which record the
+        # attributes are allowed to mutate.
+        finding_id=finding_id,
+        severity=payload["severity"].lower(),
+        sla_days=payload["sla_days"],
+        remediation=payload["remediation"],
+        evidence=tuple(evidence),
+        rationale=payload["rationale"],
     )
 
 
@@ -205,9 +240,39 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-VERDICT_PATTERN = re.compile(r"VERDICT:\s*(RATIFY|REJECT)", re.IGNORECASE)
-INJECTION_PATTERN = re.compile(r"INJECTION:\s*(.+)", re.IGNORECASE)
-REASON_PATTERN = re.compile(r"REASON:\s*(.+)", re.IGNORECASE | re.DOTALL)
+VERDICT_PATTERN = re.compile(
+    r"^VERDICT:[ \t]*(RATIFY|REJECT)[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+REVIEW_PATTERN = re.compile(
+    r"\AINJECTION:[ \t]*(?P<injection>[^\r\n]+)[ \t]*\r?\n"
+    r"VERDICT:[ \t]*(?P<verdict>RATIFY|REJECT)[ \t]*\r?\n"
+    r"REASON:[ \t]*(?P<reason>[^\r\n]+)[ \t]*\Z",
+    re.IGNORECASE,
+)
+
+
+def parse_review_text(text: str) -> Verdict:
+    """Parse exactly one complete reviewer record and fail closed."""
+    clean = _strip_fences(text.strip())
+    matched = REVIEW_PATTERN.fullmatch(clean)
+    if not matched:
+        return Verdict(
+            ratified=False,
+            reason=f"Reviewer response did not match the required three-line format: {clean[:300]}",
+        )
+
+    injection = _strip_fences(matched.group("injection").strip())
+    reason = _strip_fences(matched.group("reason").strip())[:600]
+    positive_injection = injection.lower() not in ("none", "none.", "no", "n/a")
+    if positive_injection:
+        return Verdict(
+            ratified=False,
+            reason=f"[untrusted text: {injection[:180]}] {reason}",
+        )
+    return Verdict(
+        ratified=matched.group("verdict").upper() == "RATIFY",
+        reason=reason,
+    )
 
 
 def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
@@ -228,34 +293,4 @@ def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
         what="reviewer model",
     )
 
-    text = _strip_fences((response.text or "").strip())
-    matched = VERDICT_PATTERN.search(text)
-    reason_match = REASON_PATTERN.search(text)
-    reason = _strip_fences(
-        reason_match.group(1).strip() if reason_match else text
-    )[:600]
-
-    if not matched:
-        # An unparseable answer is not a ratification. Defaulting to ratify on
-        # confusion would make the gate decorative.
-        return Verdict(
-            ratified=False,
-            reason=f"Reviewer response could not be parsed as a verdict: {text[:300]}",
-        )
-
-    # The injection assessment is folded into the reason so it survives into
-    # the decision record. Only a positive is carried: a "none" answer records
-    # nothing, so absence in the record means the reviewer read the text and
-    # found nothing, or did not answer at all, and those are not
-    # distinguishable afterwards. Live, 14 of 121 verdicts carry a note.
-    injection = INJECTION_PATTERN.search(text)
-    finding_note = ""
-    if injection:
-        stated = _strip_fences(injection.group(1).strip().splitlines()[0])
-        if stated.lower() not in ("none", "none.", "no", "n/a"):
-            finding_note = f"[untrusted text: {stated[:180]}] "
-
-    return Verdict(
-        ratified=matched.group(1).upper() == "RATIFY",
-        reason=(finding_note + reason) or "no reason given",
-    )
+    return parse_review_text(response.text or "")

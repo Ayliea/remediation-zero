@@ -14,9 +14,10 @@
 
 """Ticket, nudge and escalation writes.
 
-Every one of these is a side effect that must not happen twice. The
-idempotency key is derived from the finding, the action and the cycle, so a
-resumed agent that recomputes it finds the completed call and sends nothing.
+Every authoritative state transition is protected against a repeated cycle.
+Tracker calls are a recoverable, at-least-once delivery: issue creation has a
+lookup recovery path, while comments can repeat in the narrow case where
+GitHub accepted a request but the acknowledgement was lost.
 
 Nudges are keyed per cycle rather than per finding, deliberately. Week three's
 nudge is not week two's nudge and must still send; what must never happen is
@@ -26,6 +27,8 @@ send and the write.
 
 import json
 import logging
+import secrets
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from google.cloud import firestore
@@ -42,8 +45,19 @@ SLA_COLLECTION = "sla_clocks"
 HUMAN_QUEUE = "human_queue"
 
 
+@dataclass(frozen=True)
+class _DeliveryState:
+    started_sim_ts: float = 0.0
+    due_sim_ts: float = 0.0
+    nudges_sent: int = 0
+    resolved_by_scan: Optional[str] = None
+
+    def days_overdue(self, now_sim_ts: float) -> float:
+        return max(0.0, (now_sim_ts - self.due_sim_ts) / 86400)
+
+
 class TicketWriter:
-    """Performs chase's side effects, once each."""
+    """Performs chase state transitions once and delivers them best-effort."""
 
     def __init__(
         self,
@@ -59,32 +73,115 @@ class TicketWriter:
         #: fleet runs without it and the record is unchanged either way.
         self._delivery = delivery
 
-    def _deliver(self, event: str, finding_id: str, ticket_ref, **fields) -> None:
+    def _pending_delivery(
+        self, event: str, finding_id: str, owner: dict[str, Any], cycle: int,
+        now_sim_ts: float, state: ChaseState,
+    ) -> Optional[dict[str, Any]]:
+        if self._delivery is None:
+            return None
+        return {
+            # Persisted before egress. Unlike a public deterministic marker,
+            # this cannot be pre-forged by a commenter to suppress delivery.
+            "delivery_id": secrets.token_urlsafe(18),
+            "status": "pending",
+            "event": event,
+            "finding_id": finding_id,
+            "owner": dict(owner),
+            "cycle": cycle,
+            "now_sim_ts": now_sim_ts,
+            "state": {
+                "started_sim_ts": state.started_sim_ts,
+                "due_sim_ts": state.due_sim_ts,
+                "nudges_sent": state.nudges_sent,
+                "resolved_by_scan": getattr(state, "resolved_by_scan", None),
+            },
+            "attempts": 0,
+        }
+
+    def _deliver(self, ticket_ref, pending: Optional[dict[str, Any]]) -> bool:
         """Deliver one chase action to the tracker.
 
-        Never raises. Firestore is the record and the tracker is a delivery of
-        it: a cycle whose deadline, nudge count and escalation were written
-        correctly has done its work, and an unreachable tracker is a delivery
-        to retry rather than a cycle to fail. The inverse would be worse —
-        refusing to record that a nudge was due because a network call failed
-        loses the fact itself.
+        Never raises. The pending event is already in Firestore beside the
+        ticket state, so failure leaves durable work for the next cycle rather
+        than relying on a log line to become a retry mechanism.
         """
+        if pending is None:
+            return True
+        event = str(pending["event"])
+        finding_id = str(pending["finding_id"])
+        fields = {
+            "owner": pending.get("owner") or {},
+            "cycle": int(pending["cycle"]),
+            "now_sim_ts": float(pending["now_sim_ts"]),
+            "state": _DeliveryState(**(pending.get("state") or {})),
+            "delivery_id": pending.get("delivery_id"),
+        }
         if self._delivery is None:
-            return
+            return False
         try:
             number = self._delivery.deliver(
                 event=event, finding_id=finding_id, **fields)
+            stamp = self._clock.now()
+            delivered = {
+                **pending,
+                "status": "delivered",
+                "attempts": int(pending.get("attempts", 0)) + 1,
+                "delivered_real_ts": stamp.real_ts,
+                "delivered_sim_ts": stamp.sim_ts,
+            }
+            update = {"delivery": delivered}
             if number is not None:
-                ticket_ref.update({"github_issue": number})
+                update["github_issue"] = number
+            ticket_ref.update(update)
+            return True
         except Exception as exc:  # noqa: BLE001 - deliberately broad
-            # The cycle is in `fields`; it was being dropped on the one line
-            # that most needs it. A delivery failure is re-attempted by the
-            # next cycle, so which cycle failed is the whole question.
+            failed = {
+                **pending,
+                "status": "pending",
+                "attempts": int(pending.get("attempts", 0)) + 1,
+                "last_error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            }
+            ticket_ref.update({"delivery": failed})
             logger.warning(json.dumps({
                 "event": "delivery_failed", "finding_id": finding_id,
                 "cycle_id": cycle_id(fields.get("cycle")), "action": event,
                 "error": type(exc).__name__, "detail": str(exc)[:200],
             }, sort_keys=True))
+            return False
+
+    def retry_pending(self, finding_id: str, ticket: dict[str, Any]) -> bool:
+        """Replay the exact oldest undelivered event before newer work."""
+        pending = ticket.get("delivery")
+        if not isinstance(pending, dict) or pending.get("status") != "pending":
+            return True
+        ref = self._client.collection(COLLECTION).document(finding_id)
+        return self._deliver(ref, pending)
+
+    def cancel_pending(
+        self, finding_id: str, ticket: dict[str, Any], reason: str
+    ) -> bool:
+        """Cancel an undelivered event whose premise no longer holds.
+
+        Delivery is deliberately retried from durable state, but a retry is
+        not allowed to outrank newer authoritative state. A reminder that was
+        due before a rescan or risk acceptance must not reach an owner after
+        the fleet has learned to stop chasing it.
+        """
+        pending = ticket.get("delivery")
+        if not isinstance(pending, dict) or pending.get("status") != "pending":
+            return False
+        stamp = self._clock.now()
+        cancelled = {
+            **pending,
+            "status": "cancelled",
+            "cancel_reason": reason,
+            "cancelled_real_ts": stamp.real_ts,
+            "cancelled_sim_ts": stamp.sim_ts,
+        }
+        self._client.collection(COLLECTION).document(finding_id).update(
+            {"delivery": cancelled}
+        )
+        return True
 
     def act(
         self,
@@ -102,6 +199,10 @@ class TicketWriter:
         def _perform(*, finding_id: str, cycle: int) -> str:
             stamp = self._clock.now()
             ticket_ref = self._client.collection(COLLECTION).document(finding_id)
+            pending = self._pending_delivery(
+                action.value, finding_id, owner, cycle, now_sim_ts, state
+            )
+            delivery_field = {"delivery": pending} if pending is not None else {}
 
             if action is ChaseAction.OPEN_TICKET:
                 # merge, not replace. This branch opens a ticket that has
@@ -120,7 +221,9 @@ class TicketWriter:
                 # escalate without ever asking. What is preserved is the
                 # record of what happened, which is the part that cannot be
                 # reconstructed later.
-                ticket_ref.set(
+                batch = self._client.batch()
+                batch.set(
+                    ticket_ref,
                     {
                         "finding_id": finding_id,
                         "status": "open",
@@ -132,6 +235,7 @@ class TicketWriter:
                         "nudges_sent": 0,
                         "escalated": False,
                         "last_contact_sim_ts": now_sim_ts,
+                        **delivery_field,
                         # A resolution that no longer holds must not sit
                         # beside status "open" contradicting it. Same
                         # treatment scan_store.reopen gives the finding.
@@ -145,15 +249,15 @@ class TicketWriter:
                 # Appended rather than assigned, so a reopen extends the trail
                 # instead of starting it over. ArrayUnion creates the field
                 # when the ticket is genuinely new.
-                ticket_ref.update(
+                batch.update(
+                    ticket_ref,
                     {"history": firestore.ArrayUnion([
                         {"action": "open_ticket", "cycle": cycle,
                          "real_ts": stamp.real_ts, "sim_ts": now_sim_ts}
                     ])}
                 )
-                self._deliver("open_ticket", finding_id, ticket_ref,
-                              owner=owner, cycle=cycle, now_sim_ts=now_sim_ts,
-                              state=state)
+                batch.commit()
+                self._deliver(ticket_ref, pending)
                 return f"ticket:{finding_id}"
 
             entry = {"action": action.value, "cycle": cycle,
@@ -165,27 +269,31 @@ class TicketWriter:
                         "nudges_sent": firestore.Increment(1),
                         "last_contact_sim_ts": now_sim_ts,
                         "history": firestore.ArrayUnion([entry]),
+                        **delivery_field,
                     }
                 )
-                self._deliver("nudge", finding_id, ticket_ref, owner=owner,
-                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
+                self._deliver(ticket_ref, pending)
                 return f"nudge:{finding_id}:c{cycle}"
 
             if action is ChaseAction.ESCALATE:
-                ticket_ref.update(
+                batch = self._client.batch()
+                batch.update(
+                    ticket_ref,
                     {
                         "escalated": True,
                         "status": "escalated",
                         "escalated_cycle": cycle,
                         "last_contact_sim_ts": now_sim_ts,
                         "history": firestore.ArrayUnion([entry]),
+                        **delivery_field,
                     }
                 )
-                self._client.collection(SLA_COLLECTION).document(finding_id).update(
+                batch.update(
+                    self._client.collection(SLA_COLLECTION).document(finding_id),
                     {"status": "breached"}
                 )
-                self._deliver("escalate", finding_id, ticket_ref, owner=owner,
-                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
+                batch.commit()
+                self._deliver(ticket_ref, pending)
                 return f"escalate:{finding_id}"
 
             if action is ChaseAction.CLOSE_TICKET:
@@ -202,16 +310,18 @@ class TicketWriter:
                         "resolved_by_scan": getattr(state, "resolved_by_scan", None),
                         "last_contact_sim_ts": now_sim_ts,
                         "history": firestore.ArrayUnion([entry]),
+                        **delivery_field,
                     }
                 )
-                self._deliver("close_ticket", finding_id, ticket_ref, owner=owner,
-                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
+                self._deliver(ticket_ref, pending)
                 return f"close_ticket:{finding_id}"
 
             if action is ChaseAction.HUMAN_QUEUE:
-                self._client.collection(HUMAN_QUEUE).document(
+                batch = self._client.batch()
+                batch.set(
+                    self._client.collection(HUMAN_QUEUE).document(
                     f"unresolved-{finding_id}"
-                ).set(
+                    ),
                     {
                         "finding_id": finding_id,
                         "cycle": cycle,
@@ -227,10 +337,14 @@ class TicketWriter:
                         "sim_ts": now_sim_ts,
                     }
                 )
-                ticket_ref.update({"status": "with_human",
-                                   "history": firestore.ArrayUnion([entry])})
-                self._deliver("human_queue", finding_id, ticket_ref, owner=owner,
-                              cycle=cycle, now_sim_ts=now_sim_ts, state=state)
+                batch.update(
+                    ticket_ref,
+                    {"status": "with_human",
+                     "history": firestore.ArrayUnion([entry]),
+                     **delivery_field},
+                )
+                batch.commit()
+                self._deliver(ticket_ref, pending)
                 return f"human_queue:{finding_id}"
 
             return "noop"

@@ -117,7 +117,11 @@ def check_reviewer_catches_it_independently() -> None:
     test is the load-bearing half: clearing can fail, but a stale record can
     then no longer be mistaken for a result.
     """
-    env = dict(os.environ, MODEL_ARMOR_ENABLED="false")
+    env = dict(
+        os.environ,
+        MODEL_ARMOR_ENABLED="false",
+        ALLOW_UNSCREENED_REVIEW_CONTROL="true",
+    )
     cycle = 900
     client = firestore.Client()
     decision_ref = client.collection("decisions").document(f"{PLANTED}-c{cycle:03d}")

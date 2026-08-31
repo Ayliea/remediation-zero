@@ -24,6 +24,8 @@ work a second time: a second ticket, a second nudge, a second escalation.
 """
 
 import pytest
+from google.api_core.exceptions import AlreadyExists
+from google.cloud import firestore
 
 from tools.clock import ClockMode, SimClock
 from tools.idempotency import (
@@ -48,6 +50,8 @@ class FakeSnapshot:
     def to_dict(self):
         return self._data
 
+    update_time = None
+
 
 class FakeDoc:
     def __init__(self, docs, key):
@@ -58,6 +62,22 @@ class FakeDoc:
 
     def set(self, data):
         self._docs[self._key] = dict(data)
+
+    def create(self, data):
+        if self._key in self._docs:
+            raise AlreadyExists("already exists")
+        self._docs[self._key] = dict(data)
+
+    def update(self, data, option=None):
+        current = self._docs.setdefault(self._key, {})
+        for key, value in data.items():
+            if value is firestore.DELETE_FIELD:
+                current.pop(key, None)
+            else:
+                current[key] = value
+
+    def delete(self, option=None):
+        self._docs.pop(self._key, None)
 
 
 class FakeCollection:

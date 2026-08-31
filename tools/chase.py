@@ -82,6 +82,9 @@ class ChaseState:
     nudges_sent: int = 0
     last_contact_sim_ts: Optional[float] = None
     escalated: bool = False
+    #: A person has accepted ownership of the unresolved case. The fleet is
+    #: terminal until a later rescan changes the finding state.
+    with_human: bool = False
     resolved: bool = False
     #: Which scan confirmed the remediation. Carried so the closing comment can
     #: name its evidence rather than telling an owner only that the ticket went
@@ -106,6 +109,8 @@ class ChaseState:
             return replace(self, escalated=True, last_contact_sim_ts=now_sim_ts)
         if action is ChaseAction.CLOSE_TICKET:
             return replace(self, ticket_open=False, last_contact_sim_ts=now_sim_ts)
+        if action is ChaseAction.HUMAN_QUEUE:
+            return replace(self, with_human=True, last_contact_sim_ts=now_sim_ts)
         return self
 
     def days_overdue(self, now_sim_ts: float) -> float:
@@ -137,6 +142,9 @@ def next_action(state: ChaseState, now_sim_ts: float) -> ChaseAction:
         # for work that is already finished.
         if state.ticket_open:
             return ChaseAction.CLOSE_TICKET
+        return ChaseAction.DONE
+
+    if state.with_human:
         return ChaseAction.DONE
 
     if not state.ticket_open:

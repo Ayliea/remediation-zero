@@ -36,7 +36,7 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -63,3 +63,28 @@ jobs:
         # needs. If this step ever requires something here, that is a signal
         # the suite has grown a dependency on a developer's .env.
         run: pytest -q
+
+      - name: Verify every Python module compiles
+        run: python -m compileall -q agents scripts tools ui worker
+
+      - name: Verify deployment shell syntax
+        run: bash -n scripts/*.sh
+
+      - name: Reject committed whitespace errors
+        run: git show --check --oneline --no-renames HEAD
+
+      - name: Build the console container
+        run: docker build --pull=false -t remediation-zero-console:test .
+
+      - name: Build the scheduled-worker container
+        run: docker build --pull=false -f Dockerfile.worker -t remediation-zero-worker:test .
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Verify infrastructure formatting
+        run: terraform -chdir=infra fmt -check
+
+      - name: Verify infrastructure configuration
+        run: |
+          terraform -chdir=infra init -backend=false -input=false
+          terraform -chdir=infra validate
