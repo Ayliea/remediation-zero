@@ -616,6 +616,19 @@ def test_issue_body_unreviewed_says_so(ws):
     assert "different model family" not in body
 
 
+def test_issue_body_approved_unreviewed_says_approved_not_needed(ws):
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=roles_with(FakeAdapter(PROPOSAL_JSON)), clock=clock(), environ={})
+    body = _issue_body_for(ws, approval={"finding_id": FINDING_ID, "cycle": 1,
+                                         "decision_id": f"{FINDING_ID}-c001",
+                                         "approved_by": "Synthetic Approver",
+                                         "real_ts": 0.0, "sim_ts": 0.0})
+    assert "Not reviewed by a model; approved by Synthetic Approver." in body
+    assert "a person's review is needed" not in body
+    assert "Approved by" not in body
+    assert "different model family" not in body
+
+
 def test_issue_body_cross_family_unchanged():
     from tools.github_tickets import issue_body
     finding = {"finding_id": "RZ-0101", "cve_id": "CVE-2015-2502", "asset_id": "ast-1",

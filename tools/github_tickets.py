@@ -90,6 +90,9 @@ def _reviewer_section(reviewer, attempts, outcome, review, approved_by):
     """
     after = f" after {attempts} proposals" if attempts and int(attempts) > 1 else ""
     lines = []
+    if review == "unreviewed" and approved_by:
+        # Approved: say so once, and never also that a review is still needed.
+        return ["### Reviewer", f"Not reviewed by a model; approved by {approved_by}.", ""]
     if review == "unreviewed":
         lines = ["### Reviewer", "Not reviewed: a person's review is needed.", ""]
     elif reviewer and review == "same_family":
