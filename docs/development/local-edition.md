@@ -141,9 +141,14 @@ label plus "approved by" the person. A ratified, rejected or unavailable
 decision cannot be approved. Neither can a closed finding, or a decision a
 newer one has superseded.
 
-A decision recorded `unavailable` (the reviewer could not be reached after its
-retries) is terminal locally. Nothing re-triages it, and it stays in the human
-queue.
+An outage is not an answer. If a finding's newest decision is `unavailable`
+(the reviewer could not be reached after its retries), or `human_queue`
+because triage hit a capacity error (the note starts
+`triage failed: CapacityError`), the next `cycle` triages it again, and so does
+every later cycle until a model answers. The earlier record and its human
+queue entry are kept. During a long outage this costs one failing call per
+finding per cycle. A rejection, or a triage failure for any other reason,
+stays with a person.
 
 ## Untrusted text
 

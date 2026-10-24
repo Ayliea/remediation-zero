@@ -275,6 +275,58 @@ def test_second_local_cycle_triages_nothing_new(ws):
     assert next_cycle(ws) == 3
 
 
+def test_unavailable_decision_is_retried_next_cycle(ws, monkeypatch):
+    """Ruling 39: a reviewer outage is not a terminal answer locally."""
+    from scripts.local import run_local_cycle
+    from tools.adjudication import CapacityError
+    monkeypatch.setattr("tools.inference_journal.sleep", lambda _s: None)
+    down = FakeAdapter(CapacityError("Model endpoint temporarily unavailable"))
+    run_local_cycle(ws, 1, roles=roles_with(FakeAdapter(PROPOSAL_JSON), down),
+                    clock=clock(), environ={})
+    assert docs(ws, "decisions")[f"{FINDING_ID}-c001"]["outcome"] == "unavailable"
+
+    roles2, proposer2, reviewer2 = _counted()
+    result = run_local_cycle(ws, 2, roles=roles2, clock=clock(), environ={})
+    assert len(reviewer2.calls) == 1
+    assert result["outcomes"] == {"ratified": 1}
+    assert docs(ws, "decisions")[f"{FINDING_ID}-c002"]["outcome"] == "ratified"
+    assert f"{FINDING_ID}-c002" in docs(ws, "assignments")
+
+    # Once ratified it is no longer pending.
+    roles3, proposer3, reviewer3 = _counted()
+    run_local_cycle(ws, 3, roles=roles3, clock=clock(), environ={})
+    assert proposer3.calls == [] and reviewer3.calls == []
+
+
+def test_capacity_failed_triage_is_retried_next_cycle(ws, monkeypatch):
+    from scripts.local import run_local_cycle
+    from tools.adjudication import CapacityError
+    monkeypatch.setattr("tools.inference_journal.sleep", lambda _s: None)
+    down = FakeAdapter(CapacityError("Model endpoint temporarily unavailable"))
+    run_local_cycle(ws, 1, roles=roles_with(down, FakeAdapter(RATIFY)),
+                    clock=clock(), environ={})
+    first = docs(ws, "decisions")[f"{FINDING_ID}-c001"]
+    assert first["outcome"] == "human_queue"
+    assert first["note"].startswith("triage failed: CapacityError")
+
+    roles2, proposer2, reviewer2 = _counted()
+    result = run_local_cycle(ws, 2, roles=roles2, clock=clock(), environ={})
+    assert (len(proposer2.calls), len(reviewer2.calls)) == (1, 1)
+    assert result["outcomes"] == {"ratified": 1}
+
+
+def test_other_human_queue_decisions_stay_with_a_person(ws):
+    """A rejection or a non-capacity triage failure is a person's to decide."""
+    from scripts.local import run_local_cycle
+    reject = FakeAdapter("INJECTION: none\nVERDICT: REJECT\nREASON: not supported")
+    run_local_cycle(ws, 1, roles=roles_with(FakeAdapter(PROPOSAL_JSON), reject),
+                    clock=clock(), environ={})
+    assert docs(ws, "decisions")[f"{FINDING_ID}-c001"]["outcome"] == "human_queue"
+    roles2, proposer2, reviewer2 = _counted()
+    run_local_cycle(ws, 2, roles=roles2, clock=clock(), environ={})
+    assert proposer2.calls == [] and reviewer2.calls == []
+
+
 def test_lapsed_exception_is_retriaged_next_cycle(ws):
     from engine.sweep import accept, run_sweep
     from scripts.local import _ports, run_local_cycle

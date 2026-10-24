@@ -35,6 +35,9 @@ logger = logging.getLogger("remediation_zero.cycle")
 
 NO_PROPOSER = "no proposer configured: set one in Settings, then run the cycle again"
 FAILED_RUNS = "failed_runs"
+#: The prefix tools.adjudication.adjudicate writes when triage raised a
+#: CapacityError: f"triage failed: {type(exc).__name__}: {exc}".
+CAPACITY_TRIAGE_NOTE = "triage failed: CapacityError"
 
 
 def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
@@ -59,12 +62,26 @@ def pending_findings(docs) -> list:
     once, even when that re-triage ends held or unreviewed. A finding regressed by a rescan already has a
     decision; chase reopens its ticket, as in the cloud. The cloud passes
     its own explicit window and never calls this.
+
+    An outage is not an answer (Ruling 39): a finding whose newest decision
+    is `unavailable`, or `human_queue` because triage hit a CapacityError,
+    is pending again in every later cycle until a model answers.
     """
     latest: dict = {}  # finding_id -> newest decision sim_ts
+    newest: dict = {}  # finding_id -> (sim_ts, cycle, row) of the newest decision
     for d in docs.collection("decisions").stream():
         row = d.to_dict() or {}
         finding_id, sim_ts = row.get("finding_id"), row.get("sim_ts") or 0
         latest[finding_id] = max(latest.get(finding_id, sim_ts), sim_ts)
+        rank = (sim_ts, row.get("cycle") or 0)
+        if finding_id not in newest or rank >= newest[finding_id][:2]:
+            newest[finding_id] = (*rank, row)
+
+    def outage(finding_id) -> bool:
+        row = newest[finding_id][2]
+        return (row.get("outcome") == "unavailable"
+                or (row.get("outcome") == "human_queue"
+                    and str(row.get("note") or "").startswith(CAPACITY_TRIAGE_NOTE)))
     reopened = {(s.to_dict() or {}).get("finding_id") for s in
                 docs.collection("sla_clocks").where(
                     filter=FieldFilter("status", "==", "reopened_pending_triage")).stream()}
@@ -77,7 +94,8 @@ def pending_findings(docs) -> list:
     open_ids = {s.id for s in docs.collection("findings").where(
         filter=FieldFilter("status", "==", "open")).stream()}
     return sorted(f for f in open_ids
-                  if f not in latest or (f in reopened and awaits_retriage(f)))
+                  if f not in latest or outage(f)
+                  or (f in reopened and awaits_retriage(f)))
 
 
 def run_triage_cycle(ports: Ports, cycle: int, *, finding_ids: Optional[list] = None,
