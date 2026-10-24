@@ -46,7 +46,7 @@ class ExceptionWriter:
         accepted_by: str,
         reason: str,
         ttl_days: int,
-        in_kev: bool,
+        in_kev: Optional[bool],
         approved_by_human: bool = False,
     ) -> str:
         """Record a risk acceptance.

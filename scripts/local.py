@@ -34,6 +34,7 @@ from tools import local_settings
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
 from tools.delivery import GitHubDelivery
+from tools import enrichment as enrichment_module
 from tools.enrichment import EnrichmentCache
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.guardrail import NoGuard, guard_for
@@ -48,6 +49,7 @@ from worker.envelope import cycle_for_day
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = 'remediation-zero'
 DEFAULT_CORPUS = ROOT / 'data'
+CORPUS_FILES = ('findings.json', 'assets.json', 'owners.json')
 NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)'
 MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
 NOT_A_WORKSPACE = ('{} is not a Remediation Zero workspace directory (a single-file database from an earlier '
@@ -149,8 +151,15 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
         # Only pending findings (Ruling 29): re-triaging a decided one would
         # pay for the models again and restart its SLA clock. The cache is the
         # repo's data/cache, read only and offline; absent, enrichment is empty.
+        enrichment = EnrichmentCache()
+        missing = [name for name, present in (('kev', enrichment.has_kev), ('epss', enrichment.has_epss),
+                                              ('nvd', enrichment.has_nvd)) if not present]
+        if missing:
+            _log('enrichment_absent', f'cycle-{cycle:03d}', sources=missing)
+            print(f'warning: enrichment cache not found at {enrichment_module.DEFAULT_CACHE_DIR}: '
+                  f'{", ".join(missing)} were not checked', file=sys.stderr, flush=True)
         record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs),
-                                  enrichment=EnrichmentCache())
+                                  enrichment=enrichment)
 
         day = cycle_for_day(clock.now().real_ts)
         chase_docs = docs_for('chase')
@@ -304,6 +313,9 @@ def _parser():
     accepting.add_argument('--by', required=True, metavar='OWNER_ID')
     accepting.add_argument('--reason', required=True, metavar='TEXT')
     accepting.add_argument('--cycle', type=_cycle, required=True)
+    accepting.add_argument('--approved-by-person', action='store_true',
+                           help='A person has approved this acceptance; required for a KEV CVE, '
+                                'or when the KEV list is not available')
     actions.add_parser('list', help='List recorded risk acceptances')
     approving = commands.add_parser('approve', help='Approve an unreviewed or held decision as a person')
     approving.add_argument('finding')
@@ -345,12 +357,17 @@ def main():
                 parser.exit(1, f'The cycle stopped ({type(exc).__name__}); see failed runs on the dashboard. '
                                'Run the cycle again to retry.\n')
             return
-        ws = open_workspace(args.database)
-        clock = SimClock.from_env()
         if args.command == 'seed':
+            # Ruling 33: check the corpus before the workspace exists, so a
+            # refusal creates nothing.
             corpus = args.corpus or DEFAULT_CORPUS
             if args.corpus is None and not DEFAULT_CORPUS.is_dir():
                 parser.exit(1, NO_CORPUS + '\n')
+            if not all((corpus / name).is_file() for name in CORPUS_FILES):
+                parser.exit(1, f'No corpus found in {corpus}. Nothing was loaded.\n')
+        ws = open_workspace(args.database)
+        clock = SimClock.from_env()
+        if args.command == 'seed':
             docs = ws.docs_for('seed')
             try:
                 _print(seed(_ports(docs, None, clock), corpus))
@@ -370,7 +387,8 @@ def main():
             docs = ws.docs_for('exception_accept')
             try:
                 result = accept(_ports(docs, ws.journal(), clock), args.finding, args.ttl,
-                                args.by, args.reason, args.cycle)
+                                args.by, args.reason, args.cycle,
+                                approved_by_human=args.approved_by_person)
             except NoSuchFinding:
                 parser.exit(1, f'No such finding: {args.finding}. Nothing was written.\n')
             except ValueError:

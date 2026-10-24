@@ -80,6 +80,7 @@ class EnrichmentCache:
 
     def __init__(self, cache_dir: Optional[Path] = None) -> None:
         self._dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+        self._loaded: set[str] = set()
         self._kev = self._load_kev()
         self._epss = self._load_json("epss.json")
         self._nvd = self._load_json("nvd.json")
@@ -89,11 +90,27 @@ class EnrichmentCache:
         if not path.is_file():
             return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self._loaded.add(name)
+            return value
         except (json.JSONDecodeError, OSError):
             # A corrupt cache file is an absent source, not a crash. The
             # fetch script is how it gets repaired.
             return {}
+
+    # Whether each source file loaded, even if empty. False when it is missing
+    # or corrupt: an absent source, which a caller must not read as "checked".
+    @property
+    def has_kev(self) -> bool:
+        return "cisa_kev.json" in self._loaded
+
+    @property
+    def has_epss(self) -> bool:
+        return "epss.json" in self._loaded
+
+    @property
+    def has_nvd(self) -> bool:
+        return "nvd.json" in self._loaded
 
     def _load_kev(self) -> dict[str, dict[str, Any]]:
         catalogue = self._load_json("cisa_kev.json")

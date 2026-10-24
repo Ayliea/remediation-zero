@@ -81,7 +81,7 @@ class Exception_:
 def validate_acceptance(
     ttl_days: Optional[int],
     reason: str,
-    in_kev: bool,
+    in_kev: Optional[bool],
     approved_by_human: bool,
 ) -> None:
     """Refuse an acceptance the fleet is not permitted to make.
@@ -106,6 +106,9 @@ def validate_acceptance(
             "be reviewed later, which is the only thing separating it from "
             "ignoring the finding."
         )
+    if in_kev is None and not approved_by_human:
+        # KEV membership unknown (no KEV source): fail closed, as for a KEV CVE.
+        raise ValueError("KEV list not available: a person must approve this acceptance")
     if in_kev and not approved_by_human:
         raise ValueError(
             "This CVE is in the CISA KEV catalog, meaning it is being exploited "

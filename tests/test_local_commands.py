@@ -338,6 +338,116 @@ def test_seed_without_a_corpus_in_an_installed_tree(tmp_path):
     result = _local("seed", cwd=app)
     assert result.returncode == 1
     assert "no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)" in result.stderr
+    assert not (app / "remediation-zero").exists()  # refused before any workspace exists
+    partial = tmp_path / "partial"
+    partial.mkdir()
+    (partial / "findings.json").write_text("[]")
+    result = _local("seed", "--corpus", str(partial), cwd=app)
+    assert result.returncode == 1 and not (app / "remediation-zero").exists()
+
+
+def test_lapsed_retriage_held_is_not_retriaged_again(ws):
+    from engine.sweep import accept, run_sweep
+    from scripts.local import _ports, run_local_cycle
+    from tools.enrichment import Enrichment
+    from worker.envelope import cycle_for_day
+    sim = SimClock(ClockMode.SIM)
+    run_local_cycle(ws, 1, roles=_counted()[0], clock=sim, environ={})
+    not_kev = type("E", (), {"enrich": lambda self, cve: Enrichment(cve_id=cve, in_kev=False)})()
+    store = ws.docs_for("exception_accept")
+    accept(_ports(store, ws.journal(), sim), FINDING_ID, 7, "own-01", "Synthetic acceptance", 1,
+           enrichment=not_kev)
+    store.close()
+    sim.advance(seconds=8 * 86400)
+    store = ws.docs_for("sweep")
+    run_sweep(_ports(store, ws.journal(), sim), cycle_for_day(sim.now().real_ts) + 1)
+    store.close()
+
+    held, proposer2, _ = _counted(reviewer_family="gpt")
+    run_local_cycle(ws, 2, roles=held, clock=sim, environ={})
+    assert len(proposer2.calls) == 1
+    assert docs(ws, "decisions")[f"{FINDING_ID}-c002"]["outcome"] == "held_for_approval"
+    assert docs(ws, "sla_clocks")[FINDING_ID]["status"] == "reopened_pending_triage"
+
+    again, proposer3, reviewer3 = _counted(reviewer_family="gpt")
+    run_local_cycle(ws, 3, roles=again, clock=sim, environ={})
+    assert proposer3.calls == [] and reviewer3.calls == []
+
+
+# --- the KEV source and enrichment presence (Ruling 32) -----------------------
+
+
+def test_has_kev_true_and_false(tmp_path):
+    from tools.enrichment import EnrichmentCache
+    assert EnrichmentCache().has_kev is True  # the committed cache
+    assert EnrichmentCache(cache_dir=tmp_path / "missing").has_kev is False
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    (corrupt / "cisa_kev.json").write_text("not json")
+    assert EnrichmentCache(cache_dir=corrupt).has_kev is False
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "cisa_kev.json").write_text("{}")
+    cache = EnrichmentCache(cache_dir=empty)
+    assert cache.has_kev is True and cache.has_epss is False and cache.has_nvd is False
+
+
+def _accept_with(ws, cache_dir, approved):
+    from engine.sweep import accept
+    from scripts.local import _ports
+    from tools.enrichment import EnrichmentCache
+    store = ws.docs_for("exception_accept")
+    try:
+        return accept(_ports(store, ws.journal(), clock()), FINDING_ID, 7, "own-01",
+                      "Synthetic acceptance", 1, approved_by_human=approved,
+                      enrichment=EnrichmentCache(cache_dir=cache_dir))
+    finally:
+        store.close()
+
+
+def test_accept_without_kev_source_requires_person(ws, tmp_path):
+    with pytest.raises(ValueError, match="KEV list not available"):
+        _accept_with(ws, tmp_path / "no-cache", approved=False)
+    assert docs(ws, "exceptions") == {}
+    queued = docs(ws, "human_queue")[f"acceptance-refused-{FINDING_ID}-c001"]
+    assert queued["reason"] == "KEV list not available: a person must approve this acceptance"
+    assert queued["kind"] == "acceptance_refused"
+    with pytest.raises(ValueError):  # a repeat is absorbed by the refusal's key
+        _accept_with(ws, tmp_path / "no-cache", approved=False)
+    assert len(docs(ws, "human_queue")) == 1
+
+
+def test_accept_without_kev_source_with_approval_proceeds(ws, tmp_path):
+    assert _accept_with(ws, tmp_path / "no-cache", approved=True) == f"accepted:{FINDING_ID}"
+    exception = docs(ws, "exceptions")[FINDING_ID]
+    assert exception["approved_by_human"] is True and exception["in_kev"] is None
+    assert docs(ws, "human_queue") == {}
+
+
+def test_cycle_warns_when_enrichment_cache_absent(ws, tmp_path, monkeypatch, caplog, capsys):
+    import tools.enrichment as enrichment
+    from scripts.local import run_local_cycle
+    missing = tmp_path / "no-cache"
+    monkeypatch.setattr(enrichment, "DEFAULT_CACHE_DIR", missing)
+    caplog.set_level(logging.INFO)
+    run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+    absent = events(caplog, "enrichment_absent")
+    assert absent == [{"event": "enrichment_absent", "sources": ["kev", "epss", "nvd"],
+                       "cycle_id": "cycle-001", "finding_id": "-"}]
+    assert (f"warning: enrichment cache not found at {missing}: kev, epss, nvd were not checked"
+            in capsys.readouterr().err)
+
+
+def test_cycle_does_not_warn_with_the_cache_present(ws, caplog):
+    from scripts.local import run_local_cycle
+    caplog.set_level(logging.INFO)
+    run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+    assert events(caplog, "enrichment_absent") == []
+
+
+def test_exception_accept_has_approved_by_person_flag():
+    result = _local("exception", "accept", "--help")
+    assert result.returncode == 0 and "--approved-by-person" in result.stdout
 
 
 def test_approve_rejects_ratified_decision(ws):

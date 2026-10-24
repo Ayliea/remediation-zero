@@ -89,7 +89,10 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
     if not finding:
         raise NoSuchFinding(f"no such finding: {finding_id}")
     cache = enrichment if enrichment is not None else EnrichmentCache()
-    in_kev = cache.enrich(finding["cve_id"]).in_kev
+    # No KEV source: membership is unknown (None), which the acceptance rules
+    # refuse without a person. A cache-like object without `has_kev` is trusted.
+    in_kev = (cache.enrich(finding["cve_id"]).in_kev
+              if getattr(cache, "has_kev", True) else None)
     try:
         result = _writer(ports).accept(
             finding_id=finding_id, cycle=cycle, accepted_by=by,
