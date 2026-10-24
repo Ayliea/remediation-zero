@@ -28,11 +28,9 @@ call, and does not write a second decision.
 from dataclasses import replace as _replace
 from typing import Any, Mapping, Optional
 
-from google.cloud import firestore
-from google.api_core.exceptions import AlreadyExists
-
 from tools.adjudication import Adjudication, AdjudicationFailure, AdjudicationOutcome, Proposal, Verdict, adjudicate
 from tools.clock import SimClock
+from tools.docstore import AlreadyExists, as_docstore, firestore_client
 from tools.idempotency import IdempotencyGuard, derive_record
 
 #: Owned by the triage and reviewer agents. No other agent writes it.
@@ -80,10 +78,10 @@ class DecisionWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        self._db = as_docstore(client if client is not None else firestore_client())
         self._clock = clock or SimClock.from_env()
         self._store = store
         self._guard = IdempotencyGuard(store)
@@ -92,7 +90,7 @@ class DecisionWriter:
         """Restore canonical evidence; create-only repair of missing escalation."""
         key = derive_record(finding_id, "decision", cycle)
         document_id = f"{key.finding_id}-c{cycle:03d}"
-        snapshot = self._client.collection(COLLECTION).document(document_id).get()
+        snapshot = self._db.collection(COLLECTION).document(document_id).get()
         if not snapshot.exists:
             if self._store.get(key.key) is not None:
                 raise RuntimeError("completed decision ledger has no decision; reconciliation required")
@@ -168,8 +166,8 @@ class DecisionWriter:
         def _write(*, finding_id: str, cycle: int) -> str:
             document = to_decision_document(adjudication, self._clock, cycle)
             document["finding_id"] = finding_id
-            batch = self._client.batch()
-            batch.create(self._client.collection(COLLECTION).document(document_id), document)
+            batch = self._db.batch()
+            batch.create(self._db.collection(COLLECTION).document(document_id), document)
             if adjudication.outcome is not AdjudicationOutcome.RATIFIED:
                 ref, payload = self._queue_document(adjudication, cycle, document_id)
                 payload["finding_id"] = finding_id
@@ -215,4 +213,4 @@ class DecisionWriter:
             payload["kind"] = "unreviewed"
         elif outcome is AdjudicationOutcome.HELD_FOR_APPROVAL:
             payload["kind"] = "same_family_review"
-        return self._client.collection(HUMAN_QUEUE).document(queue_id), payload
+        return self._db.collection(HUMAN_QUEUE).document(queue_id), payload

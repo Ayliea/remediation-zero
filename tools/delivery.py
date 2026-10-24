@@ -29,6 +29,7 @@ import logging
 from typing import Any, Optional
 
 from tools.chase import MAX_NUDGES
+from tools.docstore import FieldFilter, as_docstore
 from tools.github_tickets import (
     MANAGED_LABEL, GitHubTickets, issue_body, issue_title,
 )
@@ -50,7 +51,7 @@ class GitHubDelivery:
 
     def __init__(self, tickets: GitHubTickets, client: Any) -> None:
         self._gh = tickets
-        self._db = client
+        self._db = as_docstore(client)
 
     def deliver(
         self, event: str, finding_id: str, owner: Any, cycle: int,
@@ -133,8 +134,6 @@ class GitHubDelivery:
         nowhere: the issues it filed said UNRATED with no remediation, which is
         a ticket that wastes the reader's time rather than saving it.
         """
-        from google.cloud.firestore_v1.base_query import FieldFilter
-
         docs = [d.to_dict() for d in
                 self._db.collection("decisions")
                 .where(filter=FieldFilter("finding_id", "==", finding_id))

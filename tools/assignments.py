@@ -26,9 +26,8 @@ sits next to `sim_ts` on every record and disagrees with it honestly.
 
 from typing import Any, Optional
 
-from google.cloud import firestore
-
 from tools.clock import SimClock
+from tools.docstore import as_docstore, firestore_client
 from tools.idempotency import IdempotencyGuard
 from tools.ownership import Assignment
 
@@ -43,10 +42,10 @@ class AssignmentWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        self._db = as_docstore(client if client is not None else firestore_client())
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
 
@@ -60,7 +59,7 @@ class AssignmentWriter:
             stamp = self._clock.now()
             document_id = f"{finding_id}-c{cycle:03d}"
 
-            self._client.collection(COLLECTION).document(document_id).set(
+            self._db.collection(COLLECTION).document(document_id).set(
                 {
                     "finding_id": finding_id,
                     "cycle": cycle,
@@ -77,7 +76,7 @@ class AssignmentWriter:
             )
 
             if assignment.needs_human:
-                self._client.collection(HUMAN_QUEUE).document(
+                self._db.collection(HUMAN_QUEUE).document(
                     f"unassigned-{document_id}"
                 ).set(
                     {
@@ -110,7 +109,7 @@ class AssignmentWriter:
         accelerated demonstration moves the deadline. `started_real_ts` records
         when this actually happened and is never adjusted to match.
         """
-        self._client.collection(SLA_COLLECTION).document(finding_id).set(
+        self._db.collection(SLA_COLLECTION).document(finding_id).set(
             {
                 "finding_id": finding_id,
                 "cycle_started": cycle,

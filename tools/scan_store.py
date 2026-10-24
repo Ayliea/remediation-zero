@@ -44,9 +44,8 @@ import json
 import logging
 from typing import Any, Iterable, Optional
 
-from google.cloud import firestore
-
 from tools.clock import SimClock
+from tools.docstore import DELETE_FIELD, as_docstore, firestore_client
 from tools.idempotency import IdempotencyGuard
 from tools.rescan import STATUS_RESOLVED, Outcome, Reconciliation
 from tools.telemetry import cycle_id
@@ -71,10 +70,13 @@ class ScanWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        # The client as given, kept for inspection only. Every read and write
+        # goes through self._db.
+        self._client = client if client is not None else firestore_client()
+        self._db = as_docstore(self._client)
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
 
@@ -94,7 +96,7 @@ class ScanWriter:
 
         @self._guard.protects(action="record_scan")
         def _perform(*, finding_id: str, cycle: int) -> str:
-            self._client.collection(SCANS).document(scan_id).set({
+            self._db.collection(SCANS).document(scan_id).set({
                 "scan_id": scan_id,
                 "covered_asset_ids": sorted(reconciliation.covered_asset_ids),
                 "counts": reconciliation.counts,
@@ -137,7 +139,7 @@ class ScanWriter:
             def _perform(*, finding_id: str, cycle: int, item=item) -> str:
                 nonlocal ran
                 ran = True
-                self._client.collection(FINDINGS).document(finding_id).update({
+                self._db.collection(FINDINGS).document(finding_id).update({
                     "status": STATUS_RESOLVED,
                     "resolved_by_scan": reconciliation.scan_id,
                     "resolved_reason": item.reason,
@@ -182,13 +184,13 @@ class ScanWriter:
             def _perform(*, finding_id: str, cycle: int, item=item) -> str:
                 nonlocal ran
                 ran = True
-                self._client.collection(FINDINGS).document(finding_id).update({
+                self._db.collection(FINDINGS).document(finding_id).update({
                     "status": "open",
-                    "resolved_by_scan": firestore.DELETE_FIELD,
-                    "resolved_reason": firestore.DELETE_FIELD,
-                    "resolved_cycle": firestore.DELETE_FIELD,
-                    "resolved_real_ts": firestore.DELETE_FIELD,
-                    "resolved_sim_ts": firestore.DELETE_FIELD,
+                    "resolved_by_scan": DELETE_FIELD,
+                    "resolved_reason": DELETE_FIELD,
+                    "resolved_cycle": DELETE_FIELD,
+                    "resolved_real_ts": DELETE_FIELD,
+                    "resolved_sim_ts": DELETE_FIELD,
                     "regressed_in_scan": reconciliation.scan_id,
                     "regressed_cycle": cycle,
                     "regressed_real_ts": stamp.real_ts,
@@ -245,7 +247,7 @@ class ScanWriter:
                 document.pop("_document_id", None)
                 document["status"] = "open"
                 document["first_seen_scan"] = reconciliation.scan_id
-                self._client.collection(FINDINGS).document(finding_id).set(document)
+                self._db.collection(FINDINGS).document(finding_id).set(document)
                 _log("finding_ingested", cycle, finding_id,
                      scan_id=reconciliation.scan_id)
                 return f"ingested:{finding_id}"

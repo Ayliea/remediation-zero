@@ -16,9 +16,8 @@
 
 from typing import Any, Optional
 
-from google.cloud import firestore
-
 from tools.clock import SimClock
+from tools.docstore import as_docstore, firestore_client
 from tools.exceptions import Exception_, validate_acceptance
 from tools.idempotency import IdempotencyGuard
 
@@ -33,10 +32,10 @@ class ExceptionWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        self._db = as_docstore(client if client is not None else firestore_client())
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
 
@@ -72,7 +71,7 @@ class ExceptionWriter:
             @self._guard.protects(action="refuse_acceptance")
             def _refuse(*, finding_id: str, cycle: int) -> str:
                 stamp = self._clock.now()
-                self._client.collection(HUMAN_QUEUE).document(
+                self._db.collection(HUMAN_QUEUE).document(
                     f"acceptance-refused-{finding_id}-c{cycle:03d}"
                 ).set(
                     {
@@ -95,7 +94,7 @@ class ExceptionWriter:
         def _write(*, finding_id: str, cycle: int) -> str:
             stamp = self._clock.now()
             expires = stamp.sim_ts + ttl_days * 86400
-            self._client.collection(COLLECTION).document(finding_id).set(
+            self._db.collection(COLLECTION).document(finding_id).set(
                 {
                     "finding_id": finding_id,
                     "accepted_by": accepted_by,
@@ -118,7 +117,7 @@ class ExceptionWriter:
             # before it was ever assigned, in which case no clock exists yet and
             # merging would leave a document identified only by its key. That is
             # unreadable to anything that queries by field rather than by id.
-            self._client.collection(SLA_COLLECTION).document(finding_id).set(
+            self._db.collection(SLA_COLLECTION).document(finding_id).set(
                 {
                     "finding_id": finding_id,
                     "status": "accepted",
@@ -141,7 +140,7 @@ class ExceptionWriter:
         @self._guard.protects(action="reopen_exception")
         def _write(*, finding_id: str, cycle: int) -> str:
             stamp = self._clock.now()
-            self._client.collection(COLLECTION).document(finding_id).set(
+            self._db.collection(COLLECTION).document(finding_id).set(
                 {
                     "reopened": True,
                     "status": "expired",
@@ -151,11 +150,11 @@ class ExceptionWriter:
                 },
                 merge=True,
             )
-            self._client.collection(SLA_COLLECTION).document(finding_id).set(
+            self._db.collection(SLA_COLLECTION).document(finding_id).set(
                 {"finding_id": finding_id, "status": "reopened_pending_triage"},
                 merge=True,
             )
-            self._client.collection(HUMAN_QUEUE).document(
+            self._db.collection(HUMAN_QUEUE).document(
                 f"reopened-{finding_id}"
             ).set(
                 {

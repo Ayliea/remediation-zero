@@ -26,9 +26,8 @@ import json
 import os
 from typing import Any, Optional
 
-from google.cloud import firestore
-
 from tools.clock import SimClock
+from tools.docstore import as_docstore, firestore_client
 from tools.idempotency import IdempotencyGuard
 from tools.inference import _load
 from tools.models import ChatAdapter
@@ -111,13 +110,14 @@ class ReportWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
     ) -> None:
         # Defaults to the reports database. The reporting agent's service
         # account holds write access there and read-only access everywhere
         # else, so this client physically cannot reach tickets.
-        self._client = client or firestore.Client(database=REPORTS_DATABASE)
+        self._db = as_docstore(client if client is not None
+                               else firestore_client(database=REPORTS_DATABASE))
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
 
@@ -126,7 +126,7 @@ class ReportWriter:
         def _write(*, finding_id: str, cycle: int) -> str:
             stamp = self._clock.now()
             document_id = f"report-c{cycle:03d}"
-            self._client.collection(COLLECTION).document(document_id).set(
+            self._db.collection(COLLECTION).document(document_id).set(
                 {
                     "report_id": document_id,
                     "cycle": cycle,

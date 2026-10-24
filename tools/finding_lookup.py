@@ -39,9 +39,10 @@ import os
 from dataclasses import replace
 from typing import Any, Optional
 
+from tools.docstore import as_docstore
 from tools.enrichment import EnrichmentCache
 from tools.model_armor import ModelArmor, apply_verdict
-from tools.review_models import render_finding
+from tools.inference import render_finding
 
 #: Seeded reference data, written by the seed script and never by an agent.
 FINDINGS = "findings"
@@ -159,7 +160,7 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     Raises:
         FindingNotFound: if there is no such finding.
     """
-    db = client if client is not None else _client()
+    db = as_docstore(client if client is not None else _client())
 
     snapshot = db.collection(FINDINGS).document(str(finding_id).strip()).get()
     if not snapshot.exists:

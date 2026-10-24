@@ -31,10 +31,9 @@ import secrets
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from google.cloud import firestore
-
 from tools.chase import ChaseAction, ChaseState
 from tools.clock import SimClock
+from tools.docstore import DELETE_FIELD, ArrayUnion, Increment, as_docstore, firestore_client
 from tools.idempotency import IdempotencyGuard
 from tools.telemetry import cycle_id
 
@@ -62,11 +61,11 @@ class TicketWriter:
     def __init__(
         self,
         store,
-        client: Optional[firestore.Client] = None,
+        client: Optional[Any] = None,
         clock: Optional[SimClock] = None,
         delivery: Optional[Any] = None,
     ) -> None:
-        self._client = client or firestore.Client()
+        self._db = as_docstore(client if client is not None else firestore_client())
         self._clock = clock or SimClock.from_env()
         self._guard = IdempotencyGuard(store)
         #: Where the ticket is delivered so a person sees it. Optional: the
@@ -154,7 +153,7 @@ class TicketWriter:
         pending = ticket.get("delivery")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             return True
-        ref = self._client.collection(COLLECTION).document(finding_id)
+        ref = self._db.collection(COLLECTION).document(finding_id)
         return self._deliver(ref, pending)
 
     def cancel_pending(
@@ -178,7 +177,7 @@ class TicketWriter:
             "cancelled_real_ts": stamp.real_ts,
             "cancelled_sim_ts": stamp.sim_ts,
         }
-        self._client.collection(COLLECTION).document(finding_id).update(
+        self._db.collection(COLLECTION).document(finding_id).update(
             {"delivery": cancelled}
         )
         return True
@@ -198,7 +197,7 @@ class TicketWriter:
         @self._guard.protects(action=action.value)
         def _perform(*, finding_id: str, cycle: int) -> str:
             stamp = self._clock.now()
-            ticket_ref = self._client.collection(COLLECTION).document(finding_id)
+            ticket_ref = self._db.collection(COLLECTION).document(finding_id)
             pending = self._pending_delivery(
                 action.value, finding_id, owner, cycle, now_sim_ts, state
             )
@@ -221,7 +220,7 @@ class TicketWriter:
                 # escalate without ever asking. What is preserved is the
                 # record of what happened, which is the part that cannot be
                 # reconstructed later.
-                batch = self._client.batch()
+                batch = self._db.batch()
                 batch.set(
                     ticket_ref,
                     {
@@ -239,10 +238,10 @@ class TicketWriter:
                         # A resolution that no longer holds must not sit
                         # beside status "open" contradicting it. Same
                         # treatment scan_store.reopen gives the finding.
-                        "resolved_cycle": firestore.DELETE_FIELD,
-                        "resolved_real_ts": firestore.DELETE_FIELD,
-                        "resolved_sim_ts": firestore.DELETE_FIELD,
-                        "resolved_by_scan": firestore.DELETE_FIELD,
+                        "resolved_cycle": DELETE_FIELD,
+                        "resolved_real_ts": DELETE_FIELD,
+                        "resolved_sim_ts": DELETE_FIELD,
+                        "resolved_by_scan": DELETE_FIELD,
                     },
                     merge=True,
                 )
@@ -251,7 +250,7 @@ class TicketWriter:
                 # when the ticket is genuinely new.
                 batch.update(
                     ticket_ref,
-                    {"history": firestore.ArrayUnion([
+                    {"history": ArrayUnion([
                         {"action": "open_ticket", "cycle": cycle,
                          "real_ts": stamp.real_ts, "sim_ts": now_sim_ts}
                     ])}
@@ -266,9 +265,9 @@ class TicketWriter:
             if action is ChaseAction.NUDGE:
                 ticket_ref.update(
                     {
-                        "nudges_sent": firestore.Increment(1),
+                        "nudges_sent": Increment(1),
                         "last_contact_sim_ts": now_sim_ts,
-                        "history": firestore.ArrayUnion([entry]),
+                        "history": ArrayUnion([entry]),
                         **delivery_field,
                     }
                 )
@@ -276,7 +275,7 @@ class TicketWriter:
                 return f"nudge:{finding_id}:c{cycle}"
 
             if action is ChaseAction.ESCALATE:
-                batch = self._client.batch()
+                batch = self._db.batch()
                 batch.update(
                     ticket_ref,
                     {
@@ -284,12 +283,12 @@ class TicketWriter:
                         "status": "escalated",
                         "escalated_cycle": cycle,
                         "last_contact_sim_ts": now_sim_ts,
-                        "history": firestore.ArrayUnion([entry]),
+                        "history": ArrayUnion([entry]),
                         **delivery_field,
                     }
                 )
                 batch.update(
-                    self._client.collection(SLA_COLLECTION).document(finding_id),
+                    self._db.collection(SLA_COLLECTION).document(finding_id),
                     {"status": "breached"}
                 )
                 batch.commit()
@@ -309,7 +308,7 @@ class TicketWriter:
                         "resolved_sim_ts": now_sim_ts,
                         "resolved_by_scan": getattr(state, "resolved_by_scan", None),
                         "last_contact_sim_ts": now_sim_ts,
-                        "history": firestore.ArrayUnion([entry]),
+                        "history": ArrayUnion([entry]),
                         **delivery_field,
                     }
                 )
@@ -317,9 +316,9 @@ class TicketWriter:
                 return f"close_ticket:{finding_id}"
 
             if action is ChaseAction.HUMAN_QUEUE:
-                batch = self._client.batch()
+                batch = self._db.batch()
                 batch.set(
-                    self._client.collection(HUMAN_QUEUE).document(
+                    self._db.collection(HUMAN_QUEUE).document(
                     f"unresolved-{finding_id}"
                     ),
                     {
@@ -340,7 +339,7 @@ class TicketWriter:
                 batch.update(
                     ticket_ref,
                     {"status": "with_human",
-                     "history": firestore.ArrayUnion([entry]),
+                     "history": ArrayUnion([entry]),
                      **delivery_field},
                 )
                 batch.commit()
