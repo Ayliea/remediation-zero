@@ -15,6 +15,8 @@ from tools.model_armor import ArmorVerdict
 
 _UNUSABLE = ArmorVerdict(blocked=True, screened=False, reasons=("guard response unusable",))
 _PROMPT = "guard_v1.md"
+#: An UNSAFE reason longer than this is cut, ending in "…".
+MAX_REASON_CHARS = 200
 
 
 class Guardrail(Protocol):
@@ -59,6 +61,10 @@ def _parse(response: str) -> ArmorVerdict:
         return ArmorVerdict(blocked=False, screened=True)
     if not reason:
         return _UNUSABLE
+    # The reason is model text that the screened input may have steered. It
+    # is logged, so it is kept short enough that it cannot carry the payload.
+    if len(reason) > MAX_REASON_CHARS:
+        reason = reason[:MAX_REASON_CHARS - 1] + "…"
     return ArmorVerdict(blocked=True, screened=True, reasons=(reason,))
 
 

@@ -152,3 +152,25 @@ def test_guardrail_module_is_stdlib_only():
 
 def test_protocol_is_importable():
     assert Guardrail is not None
+
+
+def test_guard_unsafe_reason_is_capped():
+    """The reason is model text an attacker may have steered: keep it short."""
+    long = "q" * 5000
+    verdict = GuardModelScreen(FakeAdapter(f"VERDICT: UNSAFE\nREASON: {long}")).screen("x")
+    assert verdict.blocked is True and verdict.screened is True
+    (reason,) = verdict.reasons
+    assert len(reason) <= 200
+    assert reason.endswith("…") and reason[:-1] == "q" * 199
+
+
+def test_guard_unsafe_reason_at_the_cap_is_kept_whole():
+    exact = "r" * 200
+    verdict = GuardModelScreen(FakeAdapter(f"VERDICT: UNSAFE\nREASON: {exact}")).screen("x")
+    assert verdict.reasons == (exact,)
+
+
+def test_guard_prompt_says_not_to_quote_and_keeps_the_marker_whole():
+    prompt = (REPO_ROOT / "prompts" / "guard_v1.md").read_text()
+    assert "Do not quote" in prompt
+    assert f"`{FENCE_BEGIN}`" in prompt and f"`{FENCE_END}`" in prompt

@@ -180,6 +180,24 @@ def test_unreviewed_finding_goes_to_queue_not_assigned(ws):
     assert roles._built == ["proposer"], "no reviewer adapter is built for an unreviewed role set"
 
 
+def test_long_guard_reason_is_logged_and_stored_capped(ws, caplog):
+    from tools.guardrail import GuardModelScreen
+    long = "z" * 5000
+    guard = GuardModelScreen(FakeAdapter(f"VERDICT: UNSAFE\nREASON: {long}"))
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    caplog.set_level(logging.INFO, logger="remediation_zero.cycle")
+
+    run(ports_for(ws, roles_with(proposer, reviewer), guard=guard))
+
+    screened = [json.loads(r.getMessage()) for r in caplog.records
+                if r.name == "remediation_zero.cycle"
+                and json.loads(r.getMessage())["event"] == "untrusted_text_screened"]
+    assert len(screened) == 1
+    assert screened[0]["reasons"] and all(len(r) <= 200 for r in screened[0]["reasons"])
+    assert all(len(r.getMessage()) < 1000 for r in caplog.records)
+    assert "z" * 201 not in json.dumps(everything(ws), default=str)
+
+
 def test_same_family_hold_goes_to_queue_not_assigned(ws):
     proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
     roles = roles_with(proposer, reviewer, reviewer_family="gpt")
