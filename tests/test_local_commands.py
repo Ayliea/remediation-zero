@@ -243,6 +243,103 @@ def test_approve_lets_held_decision_proceed_next_cycle(ws, caplog):
         assert claim not in cards[0]
 
 
+def _counted(reviewer_family="claude"):
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    return roles_with(proposer, reviewer, reviewer_family=reviewer_family), proposer, reviewer
+
+
+def test_second_local_cycle_triages_nothing_new(ws):
+    from scripts.local import run_local_cycle
+    roles, proposer, reviewer = _counted()
+    run_local_cycle(ws, 1, roles=roles, clock=clock(), environ={})
+    assert (len(proposer.calls), len(reviewer.calls)) == (1, 1)
+    # An escalated clock must survive the next cycle untouched.
+    shared = ws.docs_for("chase")
+    shared.collection("sla_clocks").document(FINDING_ID).update({"status": "escalated"})
+    shared.close()
+    sla, tickets = docs(ws, "sla_clocks"), docs(ws, "tickets")
+    assert sla[FINDING_ID]["status"] == "escalated"
+
+    roles2, proposer2, reviewer2 = _counted()
+    result = run_local_cycle(ws, 2, roles=roles2, clock=clock(), environ={})
+    assert proposer2.calls == [] and reviewer2.calls == []
+    assert docs(ws, "sla_clocks") == sla
+    assert docs(ws, "tickets") == tickets
+    assert list(docs(ws, "decisions")) == [f"{FINDING_ID}-c001"]
+    # An empty pending list still closes the cycle: the record is written with
+    # zero outcomes, so the next cycle number keeps advancing.
+    assert result["outcomes"] == {}
+    record = docs(ws, "cycles")["cycle-002"]
+    assert record["outcomes"] == {} and record["finding_ids"] == []
+    from scripts.local import next_cycle
+    assert next_cycle(ws) == 3
+
+
+def test_lapsed_exception_is_retriaged_next_cycle(ws):
+    from engine.sweep import accept, run_sweep
+    from scripts.local import _ports, run_local_cycle
+    from tools.enrichment import Enrichment
+    from worker.envelope import cycle_for_day
+    sim = SimClock(ClockMode.SIM)
+    roles, proposer, _ = _counted()
+    run_local_cycle(ws, 1, roles=roles, clock=sim, environ={})
+    first_sla = docs(ws, "sla_clocks")[FINDING_ID]
+
+    not_kev = type("E", (), {"enrich": lambda self, cve: Enrichment(cve_id=cve, in_kev=False)})()
+    store = ws.docs_for("exception_accept")
+    accept(_ports(store, ws.journal(), sim), FINDING_ID, 7, "own-01", "Synthetic acceptance", 1,
+           enrichment=not_kev)
+    store.close()
+    sim.advance(seconds=8 * 86400)
+    store = ws.docs_for("sweep")
+    assert run_sweep(_ports(store, ws.journal(), sim), cycle_for_day(sim.now().real_ts) + 1) == {"reopen": 1}
+    store.close()
+    assert docs(ws, "sla_clocks")[FINDING_ID]["status"] == "reopened_pending_triage"
+
+    roles2, proposer2, _ = _counted()
+    run_local_cycle(ws, 2, roles=roles2, clock=sim, environ={})
+    assert len(proposer2.calls) == 1
+    assert f"{FINDING_ID}-c002" in docs(ws, "decisions")
+    assert f"{FINDING_ID}-c002" in docs(ws, "assignments")
+    fresh = docs(ws, "sla_clocks")[FINDING_ID]
+    # The re-triage starts a fresh SLA clock, as the cloud's assignment path does.
+    assert fresh["status"] == "open" and fresh["cycle_started"] == 2
+    assert fresh["started_sim_ts"] > first_sla["started_sim_ts"]
+
+    roles3, proposer3, _ = _counted()
+    run_local_cycle(ws, 3, roles=roles3, clock=sim, environ={})
+    assert proposer3.calls == []
+
+
+def test_approved_held_decision_assigned_without_new_held_decision(ws):
+    from engine.approve import approve
+    from scripts.local import run_local_cycle
+    roles, _, _ = _counted(reviewer_family="gpt")
+    run_local_cycle(ws, 1, roles=roles, clock=clock(), environ={})
+    approve(approve_ports(ws), FINDING_ID, 1, "Synthetic Approver")
+    queue = docs(ws, "human_queue")
+    assert f"held-{FINDING_ID}-c001" in queue
+
+    roles2, proposer2, reviewer2 = _counted(reviewer_family="gpt")
+    run_local_cycle(ws, 2, roles=roles2, clock=clock(), environ={})
+    assert proposer2.calls == [] and reviewer2.calls == []
+    assert list(docs(ws, "assignments")) == [f"{FINDING_ID}-c001"]
+    assert list(docs(ws, "decisions")) == [f"{FINDING_ID}-c001"]
+    assert docs(ws, "human_queue") == queue
+
+
+def test_seed_without_a_corpus_in_an_installed_tree(tmp_path):
+    from scripts.build_local_installer import build
+    installer = build(tmp_path / "install.py")
+    app = tmp_path / "app"
+    subprocess.run([sys.executable, "-S", str(installer), "--directory", str(app), "--yes",
+                    "--no-start"], check=True, capture_output=True, timeout=30)
+    assert not (app / "data").exists()
+    result = _local("seed", cwd=app)
+    assert result.returncode == 1
+    assert "no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)" in result.stderr
+
+
 def test_approve_rejects_ratified_decision(ws):
     from engine.approve import approve
     from scripts.local import run_local_cycle

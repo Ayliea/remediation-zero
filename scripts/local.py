@@ -29,7 +29,7 @@ from engine.rescan import load_scan, run_rescan
 from engine.seed import seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
-from engine.triage_cycle import NO_PROPOSER, build_adapters, run_triage_cycle
+from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
 from tools import local_settings
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
@@ -48,6 +48,7 @@ from worker.envelope import cycle_for_day
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATABASE = 'remediation-zero'
 DEFAULT_CORPUS = ROOT / 'data'
+NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)'
 MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
 NOT_A_WORKSPACE = ('{} is not a Remediation Zero workspace directory (a single-file database from an earlier '
                    'version, or a non-empty folder). Choose a new or empty directory with --database DIR; '
@@ -145,7 +146,11 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
                         memory=LocalMemory(triage_docs), record_failed_runs=True)
         build_adapters(triage)  # a broken model configuration fails before any write
         approved = assign_approved(triage)
-        record = run_triage_cycle(triage, cycle, enrichment=EnrichmentCache())
+        # Only pending findings (Ruling 29): re-triaging a decided one would
+        # pay for the models again and restart its SLA clock. The cache is the
+        # repo's data/cache, read only and offline; absent, enrichment is empty.
+        record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs),
+                                  enrichment=EnrichmentCache())
 
         day = cycle_for_day(clock.now().real_ts)
         chase_docs = docs_for('chase')
@@ -283,8 +288,8 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('init', help='Create the workspace; no model calls')
     seeding = commands.add_parser('seed', help='Load findings, assets and owners from a corpus; no model calls')
-    seeding.add_argument('--corpus', type=Path, default=DEFAULT_CORPUS, metavar='DIR',
-                         help='Folder holding findings.json, assets.json and owners.json')
+    seeding.add_argument('--corpus', type=Path, metavar='DIR',
+                         help="Folder holding findings.json, assets.json and owners.json (default: the repository's data/)")
     cycle = commands.add_parser('cycle', help='Run triage, chase, sweep and report once; calls your models')
     cycle.add_argument('--cycle', type=_cycle, required=True)
     rescan = commands.add_parser('rescan', help='Apply a follow-up scan; the only way a finding is resolved')
@@ -343,11 +348,14 @@ def main():
         ws = open_workspace(args.database)
         clock = SimClock.from_env()
         if args.command == 'seed':
+            corpus = args.corpus or DEFAULT_CORPUS
+            if args.corpus is None and not DEFAULT_CORPUS.is_dir():
+                parser.exit(1, NO_CORPUS + '\n')
             docs = ws.docs_for('seed')
             try:
-                _print(seed(_ports(docs, None, clock), args.corpus))
+                _print(seed(_ports(docs, None, clock), corpus))
             except FileNotFoundError:
-                parser.exit(1, f'No corpus found in {args.corpus}. Nothing was loaded.\n')
+                parser.exit(1, f'No corpus found in {corpus}. Nothing was loaded.\n')
             finally:
                 docs.close()
         elif args.command == 'rescan':

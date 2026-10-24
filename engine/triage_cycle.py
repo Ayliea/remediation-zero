@@ -25,7 +25,7 @@ from tools.adjudication import Adjudication
 from tools.assignments import AssignmentWriter
 from tools.cycles import merge_cycle_record
 from tools.decisions import DecisionWriter
-from tools.docstore import AlreadyExists
+from tools.docstore import AlreadyExists, FieldFilter
 from tools.enrichment import Enrichment
 from tools.idempotency import derive_key
 from tools.model_armor import ArmorVerdict, apply_verdict
@@ -47,6 +47,25 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
             default=str,
         )
     )
+
+
+def pending_findings(docs) -> list:
+    """Finding ids awaiting triage, sorted: the local edition's cycle scope.
+
+    Pending means status "open" and either no decision in any cycle, or an
+    SLA clock the exception sweep set to "reopened_pending_triage" when a
+    risk acceptance lapsed. A finding regressed by a rescan already has a
+    decision; chase reopens its ticket, as in the cloud. The cloud passes
+    its own explicit window and never calls this.
+    """
+    decided = {(d.to_dict() or {}).get("finding_id")
+               for d in docs.collection("decisions").stream()}
+    reopened = {(s.to_dict() or {}).get("finding_id") for s in
+                docs.collection("sla_clocks").where(
+                    filter=FieldFilter("status", "==", "reopened_pending_triage")).stream()}
+    open_ids = {s.id for s in docs.collection("findings").where(
+        filter=FieldFilter("status", "==", "open")).stream()}
+    return sorted(f for f in open_ids if f not in decided or f in reopened)
 
 
 def run_triage_cycle(ports: Ports, cycle: int, *, finding_ids: Optional[list] = None,
