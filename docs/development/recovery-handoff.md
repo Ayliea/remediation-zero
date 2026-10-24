@@ -179,8 +179,11 @@ FastAPI dashboard and original console remain available.
 
 The model adapter uses an explicitly configured chat-completions endpoint,
 blocks redirects, bounds responses and validates proposals. Only the explicit
-suggest-demo command invokes a model; output is always labeled unreviewed.
-Only the bundled synthetic example is supported. No infrastructure is modified.
+`cycle` and `check-models` commands invoke a model, plus the launcher's interval
+runner when a cycle interval is set in Settings. (`suggest-demo` has been
+retired.) Each decision is labelled with how it was reviewed: cross-family,
+same-family or unreviewed. `check-models` sends only the bundled synthetic
+example. No infrastructure is modified.
 
 The archive now includes a runnable local-edition directory; see its README.
 82 targeted tests and four real loopback HTTP view checks passed, including

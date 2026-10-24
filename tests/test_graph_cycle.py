@@ -20,7 +20,6 @@ context unscreened here would not be caught by anything testing the other
 path, which is exactly how it went missing once before.
 """
 
-import pytest
 import re
 from pathlib import Path
 from types import SimpleNamespace

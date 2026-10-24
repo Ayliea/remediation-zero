@@ -54,7 +54,7 @@ def _run(role, adapter):
         parse_review_strict(recorder.reply or '')
         return None
     if role == 'summarizer':
-        from tools.reports import write_summary  # lazy: pulls in Firestore until it is made optional
+        from tools.reports import write_summary  # standard library only; imported when needed
         return None if write_summary(SAMPLE_METRICS, adapter) else 'EmptySummary'
     verdict = GuardModelScreen(adapter).screen(SAMPLE_GUARD_TEXT)
     if not verdict.screened:
