@@ -39,7 +39,10 @@ AGENT_FILES = {
     "chase": ("tickets",),
     "exception": ("exceptions",),
     "reporting": ("reports",),
-    "references": ("findings", "assets", "owners", "scans", "approvals"),
+    "references": ("findings", "assets", "owners", "scans"),
+    # Its own file, so the approve command reaches findings only read-only.
+    # Workspaces made before this kept approvals in references; init moves them.
+    "approvals": ("approvals",),
 }
 SHARED = ("human_queue", "sla_clocks")
 # The triage cycle writes `assignments` because scripts/cycle.py runs the
@@ -115,7 +118,37 @@ class Workspace:
                 conn.commit()
             finally:
                 conn.close()
+        self._move_old_layout_approvals()
         return SQLiteStore(self._path(SHARED_FILE))  # creates the journal tables
+
+    def _move_old_layout_approvals(self) -> None:
+        """Move approvals out of references.sqlite3, where they used to live.
+
+        One transaction across both files (journal_mode=DELETE makes that
+        commit atomic), so an approval is never in neither file. INSERT OR
+        IGNORE keeps a copy already in approvals.sqlite3, which is what an
+        interrupted earlier move would leave, and then the stale one goes.
+        """
+        old = self._path("references")
+        conn = sqlite3.connect(self._path("approvals"), isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("ATTACH DATABASE ? AS old", (str(old),))
+            if conn.execute("SELECT 1 FROM old.docs WHERE collection = 'approvals' "
+                            "LIMIT 1").fetchone() is None:
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute("INSERT OR IGNORE INTO main.docs (collection, id, data, revision) "
+                             "SELECT collection, id, data, revision FROM old.docs "
+                             "WHERE collection = 'approvals'")
+                conn.execute("DELETE FROM old.docs WHERE collection = 'approvals'")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.close()
 
     def docs_for(self, stage: str) -> SQLiteDocStore:
         writable = STAGE_WRITES[stage]  # KeyError for an unknown stage

@@ -163,6 +163,9 @@ The local permission boundary is enforced in the code by construction, not by
 the operating system: one local user owns every workspace file. Each agent's
 collections live in their own SQLite file, and each stage opens a store that
 can write only its own collections. The reporting stage cannot write tickets.
+Approvals have their own file (`approvals.sqlite3`), so `approve` opens the
+findings file read-only. A workspace made before that file existed has its
+approvals moved into it, in one transaction, the next time it is opened.
 The workspace folder is 0700 and each database file 0600 on POSIX.
 
 ## Failed runs

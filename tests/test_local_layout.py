@@ -111,7 +111,8 @@ def test_init_is_idempotent_and_keeps_data(ws):
 def test_file_layout(ws):
     assert ws.file_for("cycles") == ws.root / "orchestrator.sqlite3"
     assert ws.file_for("human_queue") == ws.root / "shared.sqlite3"
-    assert ws.file_for("approvals") == ws.root / "references.sqlite3"
+    assert ws.file_for("approvals") == ws.root / "approvals.sqlite3"
+    assert ws.file_for("findings") == ws.root / "references.sqlite3"
 
 
 def test_unknown_stage_and_collection_raise_key_error(ws):
@@ -230,3 +231,74 @@ def test_private_file_works_without_fchmod(tmp_path, monkeypatch):
 def test_local_layout_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.local_layout"],
                    cwd=REPO_ROOT, check=True)
+
+
+def test_approve_stage_findings_file_is_readonly_in_sqlite(ws):
+    # Approvals have their own file, so the approve command reaches findings
+    # only through a read-only attachment, not the code check alone.
+    store = ws.docs_for("approve")
+    try:
+        conn, alias = store._conn_of("findings")
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute(f"INSERT INTO {alias}.docs (collection, id, data, revision) "
+                         "VALUES ('findings', 'F-1', '{}', 1)")
+    finally:
+        store.close()
+
+
+def _put_old_layout_approval(ws, doc_id, data):
+    """An approval where workspaces before approvals.sqlite3 kept it."""
+    conn = sqlite3.connect(ws.root / "references.sqlite3")
+    try:
+        conn.execute("INSERT INTO docs (collection, id, data, revision) VALUES (?, ?, ?, 1)",
+                     ("approvals", doc_id, data))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _rows(path, collection):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT id, data FROM docs WHERE collection = ?",
+                            (collection,)).fetchall()
+    finally:
+        conn.close()
+
+
+def test_init_moves_old_layout_approvals_once(ws):
+    ws.init()
+    _put_old_layout_approval(ws, "RZ-1-c001", '{"approved_by": "Synthetic Owner"}')
+
+    ws.init()
+    ws.init()  # a repeat finds nothing left to move
+
+    assert _rows(ws.root / "references.sqlite3", "approvals") == []
+    assert _rows(ws.root / "approvals.sqlite3", "approvals") == [
+        ("RZ-1-c001", '{"approved_by": "Synthetic Owner"}')]
+    store = ws.docs_for("dashboard")
+    try:
+        assert store.collection("approvals").document("RZ-1-c001").get().to_dict() == {
+            "approved_by": "Synthetic Owner"}
+    finally:
+        store.close()
+
+
+def test_move_keeps_the_new_file_copy_after_an_interrupted_move(ws):
+    # A move that copied but never deleted leaves a row in both files. The
+    # copy already in approvals.sqlite3 wins; the stale one is dropped.
+    ws.init()
+    _put_old_layout_approval(ws, "RZ-1-c001", '{"approved_by": "old"}')
+    conn = sqlite3.connect(ws.root / "approvals.sqlite3")
+    try:
+        conn.execute("INSERT INTO docs (collection, id, data, revision) VALUES "
+                     "('approvals', 'RZ-1-c001', '{\"approved_by\": \"new\"}', 1)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    ws.init()
+
+    assert _rows(ws.root / "references.sqlite3", "approvals") == []
+    assert _rows(ws.root / "approvals.sqlite3", "approvals") == [
+        ("RZ-1-c001", '{"approved_by": "new"}')]

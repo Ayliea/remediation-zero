@@ -32,9 +32,10 @@ in a file that holds only read-only collections is refused twice: by that
 `mode=ro` to the read connection. A read-only collection that shares a file
 with a writable one is guarded by the `PermissionError` alone, because that
 file is attached read-write. In the local layout that happens only in the
-references file (findings, assets, owners, scans, approvals), which is written
-by the seed, rescan and approve scripts and never by an agent. Agent files are
-never mixed (Ruling 18).
+references file (findings, assets, owners, scans), which is written by the
+seed and rescan scripts and never by an agent. Approvals have their own file,
+so the approve command reaches findings only read-only. Agent files are never
+mixed (Ruling 18).
 
 `revision` counts writes to one document: 1 when a create, or a set that
 creates the document, first writes it, then the previous value + 1 on every set
