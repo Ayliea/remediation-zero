@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from engine.approve import ApprovalRefused, approve, assign_approved
+from engine.approve import ApprovalRefused, InvalidFindingId, approve, assign_approved
 from engine.chase import run_chase
 from engine.ports import NoDelivery, NoTelemetry, Ports
 from engine.report import run_report
@@ -409,6 +409,8 @@ def main():
             try:
                 _print({'approval_id': approve(ports, args.finding, args.cycle, args.by),
                         'finding_id': args.finding, 'cycle': args.cycle})
+            except InvalidFindingId as exc:
+                parser.exit(1, f'{exc}\n')
             except ApprovalRefused as exc:
                 parser.exit(1, f'{exc}. Nothing was written.\n')
             finally:

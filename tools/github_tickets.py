@@ -82,6 +82,30 @@ def issue_title(finding: Any) -> str:
     )
 
 
+def _reviewer_section(reviewer, attempts, outcome, review, approved_by):
+    """What the review was, stated honestly (hard constraint 3).
+
+    The cross-family sentence only for a ratified cross-family decision; the
+    cloud's tickets are all of that kind, so their text is unchanged.
+    """
+    after = f" after {attempts} proposals" if attempts and int(attempts) > 1 else ""
+    lines = []
+    if review == "unreviewed":
+        lines = ["### Reviewer", "Not reviewed: a person's review is needed.", ""]
+    elif reviewer and review == "same_family":
+        lines = ["### Reviewer", "Reviewed by the same model family" + after + ":", "",
+                 f"> {reviewer}", ""]
+    elif reviewer and outcome == "ratified" and review == "cross_family":
+        lines = ["### Reviewer",
+                 "Ratified by an adversarial reviewer running on a different model "
+                 "family" + after + ":",
+                 "",
+                 f"> {reviewer}", ""]
+    if approved_by:
+        lines = (lines or ["### Reviewer"]) + [f"Approved by {approved_by}.", ""]
+    return lines
+
+
 def issue_body(
     finding: Any,
     owner: Any,
@@ -93,6 +117,9 @@ def issue_body(
     evidence: str = "",
     reviewer: str = "",
     attempts: Any = None,
+    outcome: str = "ratified",
+    review: str = "cross_family",
+    approved_by: str = "",
 ) -> str:
     """The issue as the accountable person reads it.
 
@@ -119,11 +146,7 @@ def issue_body(
         "",
         *( ["### Why this severity", rationale, ""] if rationale else []),
         *( [f"**Evidence cited:** {evidence}", ""] if evidence else []),
-        *( ["### Reviewer",
-            f"Ratified by an adversarial reviewer running on a different model "
-            f"family" + (f" after {attempts} proposals" if attempts and int(attempts) > 1 else "") + ":",
-            "",
-            f"> {reviewer}", ""] if reviewer else []),
+        *_reviewer_section(reviewer, attempts, outcome, review, approved_by),
         "---",
         f"Filed automatically by the **{MARKER}** chase agent. Nudges and "
         "escalations arrive as comments on this issue.",

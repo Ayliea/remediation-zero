@@ -62,6 +62,8 @@ class Enrichment:
     cvss_vector: Optional[str] = None
     description: Optional[str] = None
     sources: tuple[str, ...] = field(default_factory=tuple)
+    #: False when no KEV list was available, so `in_kev` is unknown, not "no".
+    kev_checked: bool = True
 
     @property
     def has_evidence(self) -> bool:
@@ -102,7 +104,8 @@ class EnrichmentCache:
     # or corrupt: an absent source, which a caller must not read as "checked".
     @property
     def has_kev(self) -> bool:
-        return "cisa_kev.json" in self._loaded
+        # A parsed `vulnerabilities` list, even an empty one; `{}` is not a catalogue.
+        return self._kev_loaded
 
     @property
     def has_epss(self) -> bool:
@@ -114,6 +117,8 @@ class EnrichmentCache:
 
     def _load_kev(self) -> dict[str, dict[str, Any]]:
         catalogue = self._load_json("cisa_kev.json")
+        self._kev_loaded = (isinstance(catalogue, dict)
+                            and isinstance(catalogue.get("vulnerabilities"), list))
         return {v["cveID"]: v for v in catalogue.get("vulnerabilities", [])}
 
     def enrich(self, cve_id: str) -> Enrichment:
@@ -145,6 +150,7 @@ class EnrichmentCache:
             cvss_vector=cvss_vector,
             description=description,
             sources=tuple(sources),
+            kev_checked=self.has_kev,
         )
 
     def _from_nvd(self, cve_id: str):

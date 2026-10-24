@@ -168,7 +168,7 @@ def render_finding(
         f"  internet_facing: {asset.get('internet_facing')}",
         "",
         "ENRICHMENT",
-        f"  in_cisa_kev: {enrichment.in_kev}",
+        f"  in_cisa_kev: {enrichment.in_kev if getattr(enrichment, 'kev_checked', True) else 'unknown (KEV list not available)'}",
         f"  kev_due_date: {enrichment.kev_due_date or 'not applicable'}",
         f"  kev_known_ransomware_use: {enrichment.kev_ransomware}",
         f"  epss_score: {enrichment.epss_score if enrichment.epss_score is not None else 'no data'}",

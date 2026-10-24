@@ -385,11 +385,193 @@ def test_has_kev_true_and_false(tmp_path):
     corrupt.mkdir()
     (corrupt / "cisa_kev.json").write_text("not json")
     assert EnrichmentCache(cache_dir=corrupt).has_kev is False
+    # Ruling 36: an empty catalogue counts as loaded; `{}` is not a catalogue.
     empty = tmp_path / "empty"
     empty.mkdir()
-    (empty / "cisa_kev.json").write_text("{}")
+    (empty / "cisa_kev.json").write_text('{"vulnerabilities": []}')
     cache = EnrichmentCache(cache_dir=empty)
     assert cache.has_kev is True and cache.has_epss is False and cache.has_nvd is False
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "cisa_kev.json").write_text("{}")
+    assert EnrichmentCache(cache_dir=bare).has_kev is False
+
+
+def test_prompt_says_kev_unknown_without_the_list(tmp_path):
+    from tools.enrichment import EnrichmentCache
+    from tools.inference import render_finding
+    finding = {"finding_id": FINDING_ID, "cve_id": "CVE-2021-44228", "scanner_comment": ""}
+    absent = render_finding(finding, {}, EnrichmentCache(cache_dir=tmp_path / "none").enrich(
+        "CVE-2021-44228"))
+    assert "  in_cisa_kev: unknown (KEV list not available)\n" in absent
+    assert "in_cisa_kev: False" not in absent
+
+
+def test_prompt_unchanged_with_the_kev_list(tmp_path):
+    from tools.enrichment import Enrichment, EnrichmentCache
+    from tools.inference import render_finding
+    finding = {"finding_id": FINDING_ID, "cve_id": "CVE-2021-44228", "scanner_comment": ""}
+    present = EnrichmentCache().enrich("CVE-2021-44228")
+    assert present.kev_checked is True
+    rendered = render_finding(finding, {}, present)
+    assert f"  in_cisa_kev: {present.in_kev}\n" in rendered
+    # Byte-identical to an Enrichment built without the new field.
+    import dataclasses
+    legacy = Enrichment(**{f.name: getattr(present, f.name) for f in dataclasses.fields(present)
+                           if f.name != "kev_checked"})
+    assert render_finding(finding, {}, legacy) == rendered
+    kev_empty = tmp_path / "k"
+    kev_empty.mkdir()
+    (kev_empty / "cisa_kev.json").write_text('{"vulnerabilities": []}')
+    assert "  in_cisa_kev: False\n" in render_finding(
+        finding, {}, EnrichmentCache(cache_dir=kev_empty).enrich("CVE-2021-44228"))
+
+
+# --- the approval refuses a closed finding or a superseded decision ----------
+
+
+def test_approve_refuses_a_finding_that_is_not_open(ws):
+    from engine.approve import approve
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=_counted(reviewer_family="gpt")[0], clock=clock(), environ={})
+    seeder = ws.docs_for("rescan")
+    seeder.collection("findings").document(FINDING_ID).update({"status": "resolved"})
+    seeder.close()
+    with pytest.raises(ValueError, match="not open"):
+        approve(approve_ports(ws), FINDING_ID, 1, "Synthetic Approver")
+    assert docs(ws, "approvals") == {}
+
+
+def test_approve_refuses_a_superseded_decision(ws):
+    from engine.approve import approve
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=_counted(reviewer_family="gpt")[0], clock=clock(), environ={})
+    # A later decision for the same finding (for example after a lapsed acceptance).
+    store = ws.docs_for("triage_cycle")
+    later = dict(docs(ws, "decisions")[f"{FINDING_ID}-c001"], cycle=2)
+    later["sim_ts"] += 60
+    store.collection("decisions").document(f"{FINDING_ID}-c002").set(later)
+    store.close()
+    with pytest.raises(ValueError, match="superseded"):
+        approve(approve_ports(ws), FINDING_ID, 1, "Synthetic Approver")
+    assert docs(ws, "approvals") == {}
+    assert approve(approve_ports(ws), FINDING_ID, 2, "Synthetic Approver") == f"{FINDING_ID}-c002"
+
+
+def test_approve_with_a_malformed_finding_id_says_so(tmp_path):
+    result = _local("--database", str(tmp_path / "w"), "approve", "   ", "--cycle", "1")
+    assert result.returncode == 1
+    assert result.stderr == "invalid finding id:    \n"
+
+
+# --- the GitHub issue body states the review honestly (Ruling 34) ------------
+
+
+def _issue_body_for(ws, decision_update=None, approval=None):
+    from tools.delivery import GitHubDelivery
+    from tools.github_tickets import GitHubTickets
+    store = ws.docs_for("triage_cycle")
+    decision_id = f"{FINDING_ID}-c001"
+    if decision_update:
+        store.collection("decisions").document(decision_id).update(decision_update)
+    store.close()
+    if approval:
+        approver = ws.docs_for("approve")
+        approver.collection("approvals").document(decision_id).set(approval)
+        approver.close()
+    captured = {}
+
+    class Tickets(GitHubTickets):
+        def open_issue(self, finding_id, title, body, labels, cycle):
+            captured["body"] = body
+            return 7
+
+    chase = ws.docs_for("chase")  # the store local delivery is given
+    delivery = GitHubDelivery(Tickets(repo="synthetic/repo", token="synthetic", http=object()),
+                              client=chase)
+    delivery.deliver("open_ticket", FINDING_ID, {}, 1, 0.0, None)
+    chase.close()
+    return captured["body"]
+
+
+def test_issue_body_same_family_never_claims_cross_family(ws):
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+    body = _issue_body_for(ws, {"review_independence": "same_family"})
+    assert "different model family" not in body
+    assert "Reviewed by the same model family:\n\n> evidence sufficient" in body
+
+
+def test_issue_body_approved_held_says_approved_by_person(ws):
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=_counted(reviewer_family="gpt")[0], clock=clock(), environ={})
+    decision_id = f"{FINDING_ID}-c001"
+    body = _issue_body_for(ws, approval={"finding_id": FINDING_ID, "cycle": 1,
+                                         "decision_id": decision_id,
+                                         "approved_by": "Synthetic Approver",
+                                         "real_ts": 0.0, "sim_ts": 0.0})
+    assert "different model family" not in body and "Ratified" not in body
+    assert "Reviewed by the same model family:" in body
+    assert "Approved by Synthetic Approver." in body
+
+
+def test_issue_body_unreviewed_says_so(ws):
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=roles_with(FakeAdapter(PROPOSAL_JSON)), clock=clock(), environ={})
+    body = _issue_body_for(ws)
+    assert "Not reviewed: a person's review is needed." in body
+    assert "different model family" not in body
+
+
+def test_issue_body_cross_family_unchanged():
+    from tools.github_tickets import issue_body
+    finding = {"finding_id": "RZ-0101", "cve_id": "CVE-2015-2502", "asset_id": "ast-1",
+               "scanner_severity": "high"}
+    owner = {"display_name": "Synthetic Owner", "email": "owner@example.invalid", "team": "ops"}
+    args = dict(due="2026-09-10", sla_days=7, severity="critical", remediation="Patch it.",
+                rationale="Exploited.", evidence="['CISA KEV catalog']",
+                reviewer="The severity is supported.", attempts=2)
+    expected = "\n".join([
+        "### Reviewer",
+        "Ratified by an adversarial reviewer running on a different model family after 2 proposals:",
+        "",
+        "> The severity is supported.",
+        "",
+        "---",
+    ])
+    body = issue_body(finding, owner, **args)
+    assert expected in body
+    assert body == issue_body(finding, owner, **args, outcome="ratified", review="cross_family")
+    # The pre-change renderer, kept in this test as the pinned reference.
+    assert body == _reference_body(finding, owner, **args)
+
+
+def _reference_body(finding, owner, due, sla_days, severity, remediation, rationale="",
+                    evidence="", reviewer="", attempts=None):
+    marker = "Remediation Zero"
+    return "\n".join([
+        f"**{severity.upper()}** · due **{due}** · SLA {sla_days} days", "",
+        "### What to do", remediation or "_No remediation was proposed._", "",
+        "### Finding", f"- Finding: `{finding['finding_id']}`",
+        f"- CVE: `{finding.get('cve_id', 'unknown')}`",
+        f"- Asset: `{finding.get('asset_id', 'unknown')}`",
+        f"- Scanner severity: {finding.get('scanner_severity', 'unrated')}", "",
+        "### Owner",
+        f"- {owner.get('display_name', 'unassigned')} "
+        f"({owner.get('email', 'no address')}) · team {owner.get('team', 'unknown')}", "",
+        *(["### Why this severity", rationale, ""] if rationale else []),
+        *([f"**Evidence cited:** {evidence}", ""] if evidence else []),
+        *(["### Reviewer",
+           "Ratified by an adversarial reviewer running on a different model "
+           "family" + (f" after {attempts} proposals" if attempts and int(attempts) > 1 else "") + ":",
+           "", f"> {reviewer}", ""] if reviewer else []),
+        "---",
+        f"Filed automatically by the **{marker}** chase agent. Nudges and "
+        "escalations arrive as comments on this issue.", "",
+        "> **This is synthetic.** The corpus, the asset and the owner are "
+        "generated; only the CVE identifier is real. Nothing here describes an "
+        "actual unpatched system.",
+    ])
 
 
 def _accept_with(ws, cache_dir, approved):

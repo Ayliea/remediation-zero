@@ -90,7 +90,8 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
         raise NoSuchFinding(f"no such finding: {finding_id}")
     cache = enrichment if enrichment is not None else EnrichmentCache()
     # No KEV source: membership is unknown (None), which the acceptance rules
-    # refuse without a person. A cache-like object without `has_kev` is trusted.
+    # refuse without a person. The getattr(..., True) fallback exists only for
+    # test fakes; production always passes an EnrichmentCache, which has has_kev.
     in_kev = (cache.enrich(finding["cve_id"]).in_kev
               if getattr(cache, "has_kev", True) else None)
     try:

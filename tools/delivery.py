@@ -121,6 +121,9 @@ class GitHubDelivery:
                 evidence=decision.get("evidence", ""),
                 reviewer=decision.get("reviewer", ""),
                 attempts=decision.get("attempts"),
+                outcome=decision.get("outcome", "ratified"),
+                review=decision.get("review_independence", "cross_family"),
+                approved_by=decision.get("approved_by", ""),
             ),
             labels=LABELS,
             cycle=cycle,
@@ -150,7 +153,22 @@ class GitHubDelivery:
                 verdicts = []
         ratifying = [v for v in verdicts if isinstance(v, dict) and v.get("ratified")]
 
+        # A person's approval exists only for an unreviewed or held decision,
+        # so a ratified decision (every cloud ticket) costs no extra read.
+        approved_by = ""
+        if chosen.get("outcome") in ("unreviewed", "held_for_approval"):
+            decision_id = f"{chosen.get('finding_id', finding_id)}-c{int(chosen.get('cycle') or 0):03d}"
+            approval = (self._db.collection("approvals").document(decision_id)
+                        .get().to_dict() or {})
+            if approval.get("decision_id") == decision_id:
+                approved_by = approval.get("approved_by") or ""
+
         return {
+            "outcome": chosen.get("outcome") or "ratified",
+            # Absent on documents older than the field: they were all
+            # cross-family, as DecisionWriter.restore assumes.
+            "review_independence": chosen.get("review_independence") or "cross_family",
+            "approved_by": approved_by,
             "severity": chosen.get("proposed_severity") or "unrated",
             "remediation": chosen.get("proposed_remediation") or "",
             "sla_days": chosen.get("proposed_sla_days"),

@@ -23,7 +23,7 @@ from engine.ports import Ports
 from engine.triage_cycle import assign_if_ratified
 from tools.assignments import AssignmentWriter
 from tools.decisions import DecisionWriter
-from tools.docstore import AlreadyExists
+from tools.docstore import AlreadyExists, FieldFilter
 from tools.idempotency import IdempotencyGuard, derive_record
 
 logger = logging.getLogger("remediation_zero.approve")
@@ -37,6 +37,10 @@ class ApprovalRefused(ValueError):
     """The approval was refused; nothing was written."""
 
 
+class InvalidFindingId(ApprovalRefused):
+    """The finding id is malformed; its message is printed as is."""
+
+
 def approve(ports: Ports, finding_id: str, cycle: int, by: str) -> str:
     """Record `by`'s approval of the decision for `finding_id` in `cycle`.
 
@@ -46,15 +50,28 @@ def approve(ports: Ports, finding_id: str, cycle: int, by: str) -> str:
     if (not isinstance(by, str) or not by.strip() or len(by) > MAX_NAME
             or any(ch in by for ch in "\r\n")):
         raise ApprovalRefused("give the approver's name with --by (one line, at most 200 characters)")
-    key = derive_record(finding_id, "approval", cycle)  # validates both
+    try:
+        key = derive_record(finding_id, "approval", cycle)  # validates both
+    except ValueError:
+        raise InvalidFindingId(f"invalid finding id: {finding_id}") from None
     decision_id = f"{key.finding_id}-c{key.cycle:03d}"
     snapshot = ports.docs.collection("decisions").document(decision_id).get()
     if not snapshot.exists:
         raise ApprovalRefused(f"no decision {decision_id}: run that cycle first")
-    outcome = (snapshot.to_dict() or {}).get("outcome")
+    decision = snapshot.to_dict() or {}
+    outcome = decision.get("outcome")
     if outcome not in APPROVABLE:
         raise ApprovalRefused(f"decision {decision_id} is {outcome}; only an unreviewed "
                               "or held decision can be approved")
+    finding = ports.docs.collection("findings").document(key.finding_id).get().to_dict() or {}
+    if finding.get("status") != "open":
+        raise ApprovalRefused(f"finding {key.finding_id} is not open; there is nothing to approve")
+    newer = [d.id for d in ports.docs.collection("decisions").where(
+                 filter=FieldFilter("finding_id", "==", key.finding_id)).stream()
+             if ((d.to_dict() or {}).get("sim_ts") or 0) > (decision.get("sim_ts") or 0)]
+    if newer:
+        raise ApprovalRefused(f"decision {decision_id} has been superseded by {sorted(newer)[-1]}; "
+                              "approve the newer decision instead")
 
     @IdempotencyGuard(ports.journal).protects(action="approval")
     def _write(*, finding_id: str, cycle: int) -> str:
