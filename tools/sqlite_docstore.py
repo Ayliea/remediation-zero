@@ -69,7 +69,7 @@ from tools.docstore import (
 )
 
 BUSY_TIMEOUT_MS = 10000
-_SCHEMA = ("CREATE TABLE IF NOT EXISTS {alias}.docs(collection TEXT, id TEXT, "
+DOCS_SCHEMA = ("CREATE TABLE IF NOT EXISTS {alias}.docs(collection TEXT, id TEXT, "
            "data TEXT NOT NULL, revision INTEGER NOT NULL, "
            "PRIMARY KEY(collection, id))")
 _ABSENT = object()
@@ -147,7 +147,7 @@ class SQLiteDocStore(DocStoreBase):
                     got = conn.execute(f"PRAGMA {alias}.journal_mode=DELETE").fetchone()[0]
                     if got.lower() != "delete":
                         raise RuntimeError(f"{path} stayed in journal mode {got}")
-                    conn.execute(_SCHEMA.format(alias=alias))
+                    conn.execute(DOCS_SCHEMA.format(alias=alias))
                 for name in names:
                     self._conn_for[name] = (conn, alias)
         except BaseException:
