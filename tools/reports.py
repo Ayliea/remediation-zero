@@ -26,13 +26,12 @@ import json
 import os
 from typing import Any, Optional
 
-from google import genai
-from google.genai import types
 from google.cloud import firestore
 
 from tools.clock import SimClock
 from tools.idempotency import IdempotencyGuard
-from tools.review_models import _load
+from tools.inference import _load
+from tools.models import ChatAdapter
 
 COLLECTION = "reports"
 
@@ -82,21 +81,28 @@ def _presentable(metrics: dict[str, Any]) -> dict[str, Any]:
     return shown
 
 
-def write_summary(metrics: dict[str, Any], model: str, client: genai.Client) -> str:
-    """Ask the model to narrate metrics it did not compute."""
+#: Written in place of a narrative when no summarizer role is configured, so a
+#: report without prose says so rather than going out looking complete.
+NO_SUMMARIZER = "no summary: no summarizer configured"
+
+
+def write_summary(metrics: dict[str, Any], adapter: Optional[ChatAdapter]) -> str:
+    """Ask the summarizer role to narrate metrics it did not compute.
+
+    With no summarizer configured, no call is made and a fixed marker is
+    returned; the metrics are still stored by the caller.
+    """
+    if adapter is None:
+        return NO_SUMMARIZER
     payload = json.dumps(_presentable(metrics), indent=2, sort_keys=True, default=str)
-    response = client.models.generate_content(
-        model=model,
-        contents=(
+    return adapter.complete(
+        system=_load("reporting.md"),
+        user=(
             "Here is the metrics block for this reporting period. Every figure "
             "you state must come from it.\n\n" + payload
         ),
-        config=types.GenerateContentConfig(
-            system_instruction=_load("reporting.md"),
-            temperature=0.3,
-        ),
-    )
-    return (response.text or "").strip()
+        json_output=False,
+    ).strip()
 
 
 class ReportWriter:

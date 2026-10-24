@@ -199,3 +199,65 @@ def test_a_rate_is_rendered_as_a_whole_percent():
                           "coverage_rate": 0.75, "rejection_reasons": []})
     assert shown["remediated_of_scanned"] == "36%"
     assert shown["coverage_rate"] == "75%"
+
+
+# --- the summarizer role ----------------------------------------------------
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from tools.reports import write_summary
+from tools.review_models import _load
+
+NO_SUMMARIZER = "no summary: no summarizer configured"
+PREAMBLE = ("Here is the metrics block for this reporting period. Every figure "
+            "you state must come from it.\n\n")
+
+
+class RecordingAdapter:
+    def __init__(self, text="  narrated  "):
+        self.calls, self._text = [], text
+
+    def complete(self, system, user, *, json_output):
+        self.calls.append((system, user, json_output))
+        return self._text
+
+
+def test_no_summarizer_writes_marker_and_metrics():
+    assert write_summary(METRICS, None) == NO_SUMMARIZER
+    client = FakeClient()
+    writer = ReportWriter(
+        store=InMemoryIdempotencyStore(), client=client,
+        clock=SimClock(mode=ClockMode.REAL),
+    )
+    writer.record(metrics=METRICS, summary=write_summary(METRICS, None), cycle=1)
+    stored = next(iter(client.docs.values()))
+    assert stored["summary"] == NO_SUMMARIZER
+    assert stored["metrics"] == METRICS
+
+
+def test_summarizer_adapter_receives_reporting_prompt():
+    adapter = RecordingAdapter()
+    assert write_summary(METRICS, adapter) == "narrated"
+    system, user, json_output = adapter.calls[0]
+    assert system == _load("reporting.md")
+    assert json_output is False
+    assert "ratification_rate" in user
+
+
+def test_summary_user_turn_is_unchanged():
+    adapter = RecordingAdapter()
+    write_summary(METRICS, adapter)
+    payload = json.dumps(_presentable(METRICS), indent=2, sort_keys=True, default=str)
+    assert adapter.calls == [(_load("reporting.md"), PREAMBLE + payload, False)]
+
+
+def test_reports_module_does_not_import_google_genai():
+    root = Path(__file__).resolve().parents[1]
+    code = ("import sys, tools.reports; "
+            "assert 'google.genai' not in sys.modules, 'google.genai imported'")
+    result = subprocess.run([sys.executable, "-c", code], cwd=root,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

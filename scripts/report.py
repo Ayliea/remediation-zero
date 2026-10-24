@@ -36,6 +36,7 @@ from scripts import quiet_sdk_logging
 from tools import review_models as rm
 from tools.clock import SimClock
 from tools.metrics import compute_metrics
+from tools.model_roles import ModelRoles
 from tools.reports import REPORTS_DATABASE, ReportWriter, write_summary
 from tools.store import FirestoreIdempotencyStore
 from tools.telemetry import cycle_id
@@ -77,7 +78,17 @@ def main() -> int:
         assets=rows("assets"),
     )
 
-    summary = write_summary(metrics, os.environ["REASONING_MODEL"], rm._client())
+    roles = ModelRoles.from_env(os.environ)
+    # No summarizer role: no adapter is built and the report carries metrics alone.
+    if roles.summarizer is None:
+        summarizer = None
+    else:
+        # The Vertex client is built only when the role is a Vertex one.
+        summarizer = roles.adapter(
+            "summarizer",
+            vertex_client=rm._client() if roles.summarizer.format == "vertex" else None,
+        )
+    summary = write_summary(metrics, summarizer)
 
     store = FirestoreIdempotencyStore(client=reports_client, clock=clock)
     document_id = ReportWriter(
