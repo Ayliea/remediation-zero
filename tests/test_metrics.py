@@ -244,3 +244,66 @@ def test_unreviewed_and_held_not_counted_as_rejections():
     assert result["ratified"] == 2
     assert result["routed_to_human"] == 1
     assert result["ratification_rate"] == pytest.approx(2 / 5)
+
+
+# --- Ruling 41: the cloud report shape is the base shape ----------------------
+
+#: tools/metrics.py on base 1b88fc3, in order. A cloud decision set (cross
+#: family, never unreviewed or held) must produce exactly these keys, so the
+#: stored report and the summarizer's user turn are byte-identical to the base.
+BASE_KEYS = [
+    "decisions_total", "ratified", "routed_to_human", "reviewer_unavailable",
+    "ratification_rate", "required_retry", "verdicts_total", "rejections",
+    "disagreement_rate", "rejection_reasons", "tickets_open", "tickets_total",
+    "nudges_sent", "escalations", "sla_tracked", "sla_breached",
+    "human_queue_total", "human_queue_by_kind", "exceptions_active",
+    "exceptions_expired", "severity_mix", "findings_total", "findings_resolved",
+    "findings_open", "remediated_of_scanned", "unverifiable", "regressions",
+    "newly_discovered", "latest_scan", "assets_total", "assets_covered",
+    "coverage_rate", "scans_recorded",
+]
+
+
+def _cloud_shaped():
+    return [dict(d, review_independence="cross_family") for d in DECISIONS] + [
+        {"finding_id": "RZ-8", "cycle": 1, "outcome": "unavailable", "attempts": 1,
+         "verdicts": []}]
+
+
+def test_cloud_decisions_produce_the_base_key_set_in_order():
+    metrics = compute_metrics(_cloud_shaped(), TICKETS, SLA, HUMAN_QUEUE, EXCEPTIONS,
+                              FINDINGS, SCANS, ASSETS)
+    assert list(metrics) == BASE_KEYS
+    # Legacy documents carry no review_independence field at all.
+    legacy = compute_metrics(DECISIONS, TICKETS, SLA, HUMAN_QUEUE, EXCEPTIONS,
+                             FINDINGS, SCANS, ASSETS)
+    assert list(legacy) == BASE_KEYS
+
+
+def test_cloud_summarizer_user_turn_has_no_new_keys():
+    import json
+    from tools.reports import _presentable
+    metrics = compute_metrics(_cloud_shaped(), TICKETS, SLA, HUMAN_QUEUE, EXCEPTIONS,
+                              FINDINGS, SCANS, ASSETS)
+    turn = json.dumps(_presentable(metrics), indent=2, sort_keys=True, default=str)
+    for key in ("unreviewed", "held_for_approval", "ratified_same_family"):
+        assert f'"{key}"' not in turn
+
+
+def test_same_family_ratifications_are_named_and_still_ratified():
+    decisions = DECISIONS + [
+        {"finding_id": "RZ-9", "cycle": 1, "outcome": "ratified", "attempts": 1,
+         "review_independence": "same_family", "same_family_policy": "proceed",
+         "verdicts": [{"ratified": True, "reason": "ok"}]},
+        # Held, not ratified: not counted as a same-family ratification.
+        {"finding_id": "RZ-10", "cycle": 1, "outcome": "held_for_approval", "attempts": 1,
+         "review_independence": "same_family",
+         "verdicts": [{"ratified": True, "reason": "ok"}]},
+    ]
+    metrics = compute_metrics(decisions, TICKETS, SLA, HUMAN_QUEUE, EXCEPTIONS,
+                              FINDINGS, SCANS, ASSETS)
+    assert metrics["ratified_same_family"] == 1
+    assert metrics["ratified"] == 3
+    assert metrics["ratification_rate"] == pytest.approx(3 / 5)
+    assert metrics["held_for_approval"] == 1
+    assert "unreviewed" not in metrics

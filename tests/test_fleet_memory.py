@@ -194,3 +194,19 @@ def test_the_agent_tool_is_a_coroutine():
     from tools.recall import recall_fleet_history
 
     assert asyncio.iscoroutinefunction(recall_fleet_history)
+
+
+def test_same_family_ratifications_are_named_in_the_memory():
+    text = render_cycle_memory(cycle_id="cycle-073",
+                               counts={"ratified": 3, "ratified_same_family": 2},
+                               real_ts=1.0, sim_ts=1.0)
+    assert "3 findings were ratified (2 of them reviewed by the same model family)" in text
+
+
+def test_memory_text_is_unchanged_without_same_family_ratifications():
+    expected = ("In cycle-070, at real time 1970-01-01 00:00 UTC (simulated "
+                "1970-01-01 00:00 UTC), 8 findings were ratified; 6 went to the human queue.")
+    for counts in ({"ratified": 8, "routed_to_human": 6},
+                   {"ratified": 8, "routed_to_human": 6, "ratified_same_family": 0}):
+        assert render_cycle_memory(cycle_id="cycle-070", counts=counts,
+                                   real_ts=1.0, sim_ts=1.0) == expected

@@ -194,6 +194,11 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
     adjudication = writer.restore(finding_id, cycle)
     outcomes[adjudication.outcome.value] = outcomes.get(
         adjudication.outcome.value, 0) + 1
+    # Named, never hidden inside "ratified" (Ruling 41). The cloud is always
+    # cross family, so its outcomes never carry this key.
+    if (adjudication.outcome.value == "ratified"
+            and adjudication.review_independence == "same_family"):
+        outcomes["ratified_same_family"] = outcomes.get("ratified_same_family", 0) + 1
 
     assigned = assign_if_ratified(ports, adjudication, cycle, finding=finding,
                                   assets=assets, owners=owners, assigner=assigner)

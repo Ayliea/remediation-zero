@@ -101,7 +101,10 @@ def render_cycle_memory(
     )
 
     clauses = [
-        phrase.format(v=counts[key])
+        phrase.format(v=counts[key]) + (
+            # Hard constraint 3: a same-family ratification is named as such.
+            f" ({counts['ratified_same_family']} of them reviewed by the same model family)"
+            if key == "ratified" and counts.get("ratified_same_family") else "")
         for key, phrase in _PHRASES
         if counts.get(key) is not None
     ]

@@ -213,6 +213,21 @@ def test_same_family_hold_goes_to_queue_not_assigned(ws):
     assert state["assignments"] == {} and state["sla_clocks"] == {}
 
 
+def test_same_family_proceed_is_named_in_outcomes_and_memory(ws):
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    roles = roles_with(proposer, reviewer, reviewer_family="gpt")
+    object.__setattr__(roles, "same_family_policy", "proceed")
+
+    record = run(ports_for(ws, roles))
+
+    assert record["outcomes"] == {"ratified": 1, "ratified_same_family": 1}
+    state = everything(ws)
+    assert state["decisions"]["RZ-0001-c001"][0]["review_independence"] == "same_family"
+    assert "RZ-0001-c001" in state["assignments"]
+    memory = state["memories"]["cycle-001"][0]["text"]
+    assert "1 findings were ratified (1 of them reviewed by the same model family)" in memory
+
+
 def test_resume_reconciles_missing_assignment(ws, monkeypatch, caplog):
     """A crash between the decision write and the assignment write."""
     from tools.assignments import AssignmentWriter
