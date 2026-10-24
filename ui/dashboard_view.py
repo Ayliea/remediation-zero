@@ -74,6 +74,22 @@ def approve_hint(row, approve_command):
             f'<p>The next cycle then assigns it. Your approval is recorded separately; the review record is not changed.</p>')
 
 
+def screening_text(row):
+    """Whether the scanner's own notes were screened before a model read them.
+
+    Records written before the flags existed carry no `screening`, and say so
+    rather than guessing in either direction.
+    """
+    screening = row.get("screening")
+    if not isinstance(screening, dict):
+        return "Whether scanner notes were checked was not recorded."
+    if not screening.get("screened"):
+        return "Scanner notes were not checked, so they were withheld from the models."
+    if screening.get("blocked"):
+        return "Scanner notes were flagged as unsafe and withheld from the models."
+    return "Scanner notes were checked for unsafe content before any model read them."
+
+
 def decision_card(row, approve_command=None):
     outcome = row.get("outcome")
     approved = outcome == "ratified"
@@ -97,7 +113,7 @@ def decision_card(row, approve_command=None):
 <p>{text(row.get('rationale') or row.get('note') or 'Business impact has not been recorded. Ask your IT provider to assess this finding.')}</p>
 <h4>Your next step</h4><p>{text(next_step)}</p>{approve_hint(row, approve_command)}
 <details><summary>Technical evidence and review history</summary><ul>{evidence or '<li>No supporting evidence recorded.</li>'}</ul>
-<ul>{verdicts}</ul><p>{text(row.get('note'))}</p>
+<ul>{verdicts}</ul><p>{text(row.get('note'))}</p><p>{text(screening_text(row))}</p>
 {('<h4>Unreviewed model suggestion</h4><p>' + text(row.get('proposed_remediation')) + '</p>') if outcome == 'unreviewed' else ''}
 <p>Recorded time (UTC): {stamp(row.get('real_ts'), row.get('sim_ts'))}</p>
 <p>A reviewed recommendation does not mean the fix was applied or verified.</p></details></article>'''

@@ -42,12 +42,18 @@ HUMAN_QUEUE = "human_queue"
 
 
 def to_decision_document(
-    adjudication: Adjudication, clock: SimClock, cycle: int
+    adjudication: Adjudication, clock: SimClock, cycle: int, screening: Any = None
 ) -> dict[str, Any]:
-    """Flatten an adjudication into a Firestore document."""
+    """Flatten an adjudication into a Firestore document.
+
+    `screening` is the guard's verdict on the untrusted text. Only its two
+    flags are kept: its reasons can quote the text they describe. A caller
+    that has no verdict leaves the field out, which reads as unknown rather
+    than as a claim either way.
+    """
     stamp = clock.now()
     proposal = adjudication.proposal
-    return {
+    document = {
         "finding_id": adjudication.finding_id,
         "cycle": cycle,
         "outcome": adjudication.outcome.value,
@@ -70,6 +76,10 @@ def to_decision_document(
         "real_ts": stamp.real_ts,
         "sim_ts": stamp.sim_ts,
     }
+    if screening is not None:
+        document["screening"] = {"screened": bool(screening.screened),
+                                 "blocked": bool(screening.blocked)}
+    return document
 
 
 class DecisionWriter:
@@ -121,7 +131,7 @@ class DecisionWriter:
         return result
 
     def adjudicate_once(self, finding, triage, review, *, cycle: int, context: str = "",
-                        roles=None) -> Adjudication:
+                        roles=None, screening=None) -> Adjudication:
         """Adjudicate once. `roles` supplies independence, provenance and policy.
 
         `roles` is required: a record must never claim an independence nobody
@@ -157,10 +167,10 @@ class DecisionWriter:
             result = exc.adjudication
         result = _replace(result, review_independence=independence,
                           models=provenance, same_family_policy=policy)
-        self.record(result, cycle)
+        self.record(result, cycle, screening=screening)
         return self.restore(finding_id, cycle)
 
-    def record(self, adjudication: Adjudication, cycle: int) -> str:
+    def record(self, adjudication: Adjudication, cycle: int, screening=None) -> str:
         """Atomically create decision and escalation; first durable result wins."""
         key = derive_record(adjudication.finding_id, "decision", cycle)
         document_id = f"{key.finding_id}-c{cycle:03d}"
@@ -169,7 +179,7 @@ class DecisionWriter:
 
         @self._guard.protects(action="decision")
         def _write(*, finding_id: str, cycle: int) -> str:
-            document = to_decision_document(adjudication, self._clock, cycle)
+            document = to_decision_document(adjudication, self._clock, cycle, screening)
             document["finding_id"] = finding_id
             batch = self._db.batch()
             batch.create(self._db.collection(COLLECTION).document(document_id), document)

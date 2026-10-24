@@ -47,7 +47,7 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from ui.dashboard_view import VIEWS as DASHBOARD_VIEWS, demo_snapshot
-from ui.dashboard_view import render as render_dashboard
+from ui.dashboard_view import render as render_dashboard, screening_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(REPO_ROOT / ".env")
@@ -517,7 +517,8 @@ but cannot confirm.</p>"""
           <td class="prose">
             <b class="k">{esc(d.get('proposed_severity','—'))} · SLA {esc(d.get('proposed_sla_days','—'))}d</b><br>
             {esc(d.get('proposed_remediation',''))[:150]}<br>
-            <span class="t t--none">cites: {esc(cites)}</span>
+            <span class="t t--none">cites: {esc(cites)}</span><br>
+            <span class="t t--none">{esc(screening_text(d))}</span>
             {verdicts}
           </td>
           <td>{stamp(d.get('real_ts'), d.get('sim_ts'))}</td>

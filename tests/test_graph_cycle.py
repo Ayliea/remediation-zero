@@ -212,3 +212,12 @@ def test_cycle_script_assignment_gate_is_a_positive_equality():
     for script in ("cycle.py", "graph_cycle.py"):
         wiring = (root / "scripts" / script).read_text()
         assert not [g for g in re.findall(gate, wiring) if g[0] == "!="], script
+
+
+def test_the_screening_verdict_is_kept_for_the_decision_record():
+    """The decision written after review records whether this text was
+    screened, so the verdict must survive from the screen node to it."""
+    verdict = ArmorVerdict(blocked=True, screened=False, reasons=("unreachable",))
+    built, scratch, _ = handlers(verdict)
+    built["screen"]("RZ-1", 1)
+    assert scratch["verdict"] is verdict

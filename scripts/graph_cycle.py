@@ -122,6 +122,7 @@ def build_handlers(clients: dict) -> dict:
         scratch["finding"] = finding
         scratch["asset"] = asset
         scratch["enrichment"] = enrichment
+        scratch["verdict"] = verdict
         _log("screened", cycle_id, finding_id,
              blocked=verdict.blocked, screened=verdict.screened,
              confidence=verdict.confidence)
@@ -154,7 +155,8 @@ def build_handlers(clients: dict) -> dict:
              "REVIEWER_MODEL": clients["reviewer_model"]})
         result = triage_and_review(
             replace(ports, roles=roles), scratch["finding"], scratch["asset"],
-            scratch["enrichment"], cycle, writer=writer, vertex_client=genai_client)
+            scratch["enrichment"], cycle, screening=scratch["verdict"],
+            writer=writer, vertex_client=genai_client)
         scratch["adjudication"] = result
         _log("adjudicated", cycle_id, finding_id,
              outcome=result.outcome.value, attempts=result.attempts,

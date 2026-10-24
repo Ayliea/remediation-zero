@@ -338,3 +338,19 @@ def test_adjudicate_once_without_roles_refuses(writer, client):
             lambda _f, _p: calls.append("review") or Verdict(True, "ok"), cycle=3)
     assert calls == []
     assert not client.docs
+
+
+def test_decision_document_carries_screening_flags_only_when_given():
+    from tools.clock import ClockMode, SimClock
+    from tools.decisions import to_decision_document
+    from tools.model_armor import ArmorVerdict
+    adjudication = Adjudication(finding_id="RZ-1", outcome=AdjudicationOutcome.UNAVAILABLE,
+                                proposal=None, verdicts=(), attempts=0, note="n")
+    clock = SimClock(ClockMode.REAL)
+    verdict = ArmorVerdict(blocked=True, screened=False, reasons=("quoted payload",))
+
+    with_flags = to_decision_document(adjudication, clock, 1, screening=verdict)
+    assert with_flags["screening"] == {"screened": False, "blocked": True}
+    assert "quoted payload" not in repr(with_flags)
+    # Absent, not invented: a caller that cannot say leaves it unknown.
+    assert "screening" not in to_decision_document(adjudication, clock, 1)

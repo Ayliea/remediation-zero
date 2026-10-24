@@ -182,7 +182,8 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
 
     try:
         adjudication = triage_and_review(ports, finding, asset, enriched, cycle,
-                                         writer=writer, adapters=adapters)
+                                         writer=writer, adapters=adapters,
+                                         screening=verdict)
     except Exception as exc:
         # Model failures have durable evidence. Persistence failure must
         # stop execution for replay, never manufacture another escalation.
@@ -274,12 +275,15 @@ def build_adapters(ports: Ports, *, vertex_client: Any = None) -> tuple:
 
 
 def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enrichment,
-                      cycle: int, *, writer: Optional[DecisionWriter] = None,
+                      cycle: int, *, screening: ArmorVerdict,
+                      writer: Optional[DecisionWriter] = None,
                       adapters: Optional[tuple] = None,
                       vertex_client: Any = None) -> Adjudication:
     """Triage and adversarial review, journalled so a resume never pays twice.
 
-    `finding` and `enrichment` must already have crossed `screen_finding`.
+    `finding` and `enrichment` must already have crossed `screen_finding`, and
+    `screening` is that crossing's verdict. It is required so no path can
+    record a decision without saying whether its untrusted text was screened.
     """
     _require_proposer(ports)
     proposer, reviewer = (adapters if adapters is not None
@@ -303,6 +307,7 @@ def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enri
         cycle=cycle,
         context=inference.inference_fingerprint(rendered, ports.roles),
         roles=ports.roles,
+        screening=screening,
     )
 
 

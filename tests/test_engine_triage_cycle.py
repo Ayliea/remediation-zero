@@ -372,7 +372,8 @@ def test_step_functions_refuse_without_a_proposer(ws):
     from engine.triage_cycle import triage_and_review
     ports = ports_for(ws, None)
     with pytest.raises(ValueError, match="no proposer configured"):
-        triage_and_review(ports, {"finding_id": FINDING_ID}, {}, Enrichment("CVE-2021-44228"), 1)
+        triage_and_review(ports, {"finding_id": FINDING_ID}, {}, Enrichment("CVE-2021-44228"), 1,
+                          screening=ArmorVerdict(blocked=False, screened=True))
 
 
 def test_engine_triage_stdlib_only():
@@ -391,3 +392,22 @@ def test_installed_local_edition_can_import_the_stage(tmp_path):
     imported = subprocess.run([sys.executable, "-S", "-c", "import engine.triage_cycle"],
                               cwd=destination, capture_output=True, text=True, timeout=30)
     assert imported.returncode == 0, imported.stderr
+
+
+@pytest.mark.parametrize("verdict, expected", [
+    (ArmorVerdict(blocked=False, screened=True), {"screened": True, "blocked": False}),
+    (ArmorVerdict(blocked=True, screened=True, reasons=("prompt injection",)),
+     {"screened": True, "blocked": True}),
+    # No guard configured, or one that could not answer: withheld, and the
+    # record says the text was never screened (spec, Guardrail port).
+    (ArmorVerdict(blocked=True, screened=False, reasons=("no guard configured",)),
+     {"screened": False, "blocked": True}),
+])
+def test_decision_records_whether_the_untrusted_text_was_screened(ws, verdict, expected):
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+
+    run(ports_for(ws, roles_with(proposer, reviewer), guard=RecordingGuard(verdict)))
+
+    decision = everything(ws)["decisions"]["RZ-0001-c001"][0]
+    # The flags only. Reasons can quote the untrusted text they describe.
+    assert decision["screening"] == expected
