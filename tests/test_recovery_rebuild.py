@@ -193,6 +193,7 @@ def test_both_runners_record_outage_preserve_rejection_and_suppress_replay(monke
     from dataclasses import replace
     import subprocess
     import sys
+    from tools import inference
     from tools import review_models as rm
     from tools.enrichment import Enrichment
     from tools.model_armor import ArmorVerdict
@@ -212,8 +213,8 @@ def test_both_runners_record_outage_preserve_rejection_and_suppress_replay(monke
         if rejection_first and len(calls) == 1:
             return Verdict(False, "first rejection")
         raise CapacityError("offline outage")
-    monkeypatch.setattr(rm, "propose", propose)
-    monkeypatch.setattr(rm, "review", review)
+    monkeypatch.setattr(inference, "propose", propose)
+    monkeypatch.setattr(inference, "review", review)
     if runner == "graph":
         from scripts.graph_cycle import build_handlers
         def run():
@@ -304,6 +305,7 @@ def test_procedural_resume_completes_assignment_without_repeating_inference(monk
     import subprocess
     import sys
     from scripts import cycle
+    from tools import inference
     from tools.assignments import AssignmentWriter
     from tools.enrichment import Enrichment
     from tools.model_armor import ArmorVerdict
@@ -324,8 +326,8 @@ def test_procedural_resume_completes_assignment_without_repeating_inference(monk
     monkeypatch.setattr(cycle, "load_dotenv", lambda *_: None)
     monkeypatch.setattr(cycle.rm, "_client", lambda: None)
     monkeypatch.setattr(subprocess, "run", lambda *_, **__: SimpleNamespace(stdout="offline"))
-    monkeypatch.setattr(cycle.rm, "propose", lambda *_, **__: model_calls.append("triage") or replace(PROPOSAL, finding_id=finding_id))
-    monkeypatch.setattr(cycle.rm, "review", lambda *_, **__: model_calls.append("review") or Verdict(True, "approved"))
+    monkeypatch.setattr(inference, "propose", lambda *_, **__: model_calls.append("triage") or replace(PROPOSAL, finding_id=finding_id))
+    monkeypatch.setattr(inference, "review", lambda *_, **__: model_calls.append("review") or Verdict(True, "approved"))
 
     original_record = AssignmentWriter.record
     def interrupt(*_, **__):

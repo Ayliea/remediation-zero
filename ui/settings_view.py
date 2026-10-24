@@ -15,9 +15,10 @@ def render_settings(values, section, token, *, message='', key_present=False, ov
         for k, v in SECTIONS.items()) + '</nav>'
     def form(contents):
         return f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}"><input type="hidden" name="section" value="{section}">{contents}<div class="row"><button type="submit">Save preferences</button><a href="/?view=settings&amp;section={section}">Cancel</a></div></form>'
+    connection = values['roles']['proposer'] or {'endpoint': '', 'model': ''}
     if section == 'model':
         body = '<h2>Your model, your choice</h2><p>Use a local or hosted OpenAI-compatible chat-completions endpoint. Saving makes no model calls.</p>'
-        body += form(f'<label>Endpoint URL<input name="endpoint" type="url" maxlength="2048" value="{e(values["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label><p class="muted">Use the full chat-completions URL. Hosted endpoints require HTTPS. Leave both fields blank to disconnect.</p><label>Model name<input name="model" maxlength="200" value="{e(values["model"])}"></label>')
+        body += form(f'<label>Endpoint URL<input name="endpoint" type="url" maxlength="2048" value="{e(connection["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label><p class="muted">Use the full chat-completions URL. Hosted endpoints require HTTPS. Leave both fields blank to disconnect.</p><label>Model name<input name="model" maxlength="200" value="{e(connection["model"])}"></label>')
         body += f'<h3>API key</h3><p>Environment key: {"present" if key_present else "not set"}. Keys are never displayed or saved here. Set RZ_MODEL_API_KEY before starting the app.</p><p>Connection status: Not tested. Saving does not verify availability.</p>'
         if overrides:
             body += '<p class="notice">RZ_MODEL_ENDPOINT or RZ_MODEL is set in this process. Environment values override saved preferences for command-line runs.</p>'

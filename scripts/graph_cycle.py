@@ -43,7 +43,9 @@ from agents.orchestrator.graph import (
     HUMAN_QUEUE, RATIFIED, UNAVAILABLE, CycleState, build_graph, describe,
 )
 from scripts import quiet_sdk_logging
+from tools import inference
 from tools import review_models as rm
+from tools.model_roles import ModelRoles
 from tools.adjudication import (
     AdjudicationOutcome, CapacityError, Proposal, Verdict, adjudicate,
 )
@@ -133,20 +135,25 @@ def build_handlers(clients: dict) -> dict:
             ctx.route = restored.outcome.value
             return restored.outcome.value
         rendered = scratch["rendered"]
+        roles = clients.get("roles") or ModelRoles.from_env(
+            {"REASONING_MODEL": clients["reasoning_model"],
+             "REVIEWER_MODEL": clients["reviewer_model"]})
+        proposer = roles.adapter("proposer", vertex_client=genai_client)
+        reviewer = roles.adapter("reviewer", vertex_client=genai_client)
         result = writer.adjudicate_once(
             scratch["finding"],
-            triage=lambda _f: rm.propose(
-                rendered, clients["reasoning_model"], genai_client,
+            triage=lambda _f: inference.propose(
+                rendered, proposer,
                 finding_id=finding_id, retry=False,
             ),
-            review=lambda _f, p: rm.review(
+            review=lambda _f, p: inference.review(
                 rendered + "\n\nPROPOSAL\n" + json.dumps(
                     {"severity": p.severity, "sla_days": p.sla_days,
                      "remediation": p.remediation, "evidence": list(p.evidence),
                      "rationale": p.rationale}, indent=2),
-                clients["reviewer_model"], genai_client, retry=False),
+                reviewer, retry=False),
             cycle=cycle,
-            context=rm.inference_fingerprint(rendered, clients["reasoning_model"], clients["reviewer_model"]),
+            context=inference.inference_fingerprint(rendered, roles),
         )
         scratch["adjudication"] = result
         _log("adjudicated", cycle_id, finding_id,
@@ -208,6 +215,7 @@ async def run(finding_id: str, cycle: int) -> int:
             capture_output=True, text=True, check=False).stdout.strip(),
         "decisions": DecisionWriter(store=store, client=db, clock=clock),
         "assignments": AssignmentWriter(store=store, client=db, clock=clock),
+        "roles": ModelRoles.from_env(os.environ),
         "reasoning_model": os.environ["REASONING_MODEL"],
         "reviewer_model": os.environ["REVIEWER_MODEL"],
         "cycle_id": cycle_id(cycle),

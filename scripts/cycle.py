@@ -35,7 +35,9 @@ from dotenv import load_dotenv
 from google.cloud import firestore
 
 from scripts import quiet_sdk_logging
+from tools import inference
 from tools import review_models as rm
+from tools.model_roles import ModelRoles
 from tools.adjudication import adjudicate
 from tools.clock import SimClock
 from tools.fleet_memory import FleetMemory
@@ -82,8 +84,9 @@ def main() -> int:
     client = firestore.Client()
     cache = EnrichmentCache()
     genai_client = rm._client()
-    reasoning_model = os.environ["REASONING_MODEL"]
-    reviewer_model = os.environ["REVIEWER_MODEL"]
+    roles = ModelRoles.from_env(os.environ)
+    proposer = roles.adapter("proposer", vertex_client=genai_client)
+    reviewer = roles.adapter("reviewer", vertex_client=genai_client)
 
     armor = ModelArmor()
     import subprocess
@@ -171,18 +174,18 @@ def main() -> int:
         try:
             adjudication = writer.adjudicate_once(
                 finding,
-                triage=lambda _f: rm.propose(
-                    rendered, reasoning_model, genai_client,
+                triage=lambda _f: inference.propose(
+                    rendered, proposer,
                     finding_id=finding_id, retry=False,
                 ),
-                review=lambda _f, p: rm.review(
+                review=lambda _f, p: inference.review(
                     rendered + "\n\nPROPOSAL\n" + json.dumps(
                         {"severity": p.severity, "sla_days": p.sla_days,
                          "remediation": p.remediation, "evidence": list(p.evidence),
                          "rationale": p.rationale}, indent=2),
-                    reviewer_model, genai_client, retry=False),
+                    reviewer, retry=False),
                 cycle=args.cycle,
-                context=rm.inference_fingerprint(rendered, reasoning_model, reviewer_model),
+                context=inference.inference_fingerprint(rendered, roles),
             )
         except Exception as exc:
             # Model failures have durable evidence. Persistence failure must

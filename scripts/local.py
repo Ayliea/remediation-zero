@@ -16,6 +16,7 @@ from tools.idempotency import derive_record
 from tools.inference_journal import InferenceJournal
 from tools.model_endpoint import ModelEndpoint
 from tools import local_settings
+from tools.model_roles import suggest_family
 from ui.settings_view import SECTIONS, render_settings
 from tools.sqlite_store import SQLiteStore
 from ui.dashboard_view import VIEWS, demo_snapshot, render
@@ -103,7 +104,10 @@ def handler(store, demo, config_path=None):
                 section = fields.pop('section', '')
                 values = local_settings.load(config_path)
                 if section == 'model' and set(fields) == {'endpoint', 'model'}:
-                    values.update(fields)
+                    # The existing form edits the proposer only; other v2 fields stay as saved.
+                    values['roles']['proposer'] = None if not (fields['endpoint'] or fields['model']) else {
+                        'format': 'openai_chat', 'endpoint': fields['endpoint'], 'model': fields['model'],
+                        'family': suggest_family(fields['model'])}
                 elif section == 'application' and set(fields) in ({'mode', 'port'}, {'mode', 'port', 'open_browser'}):
                     if fields.get('open_browser', 'yes') != 'yes':
                         raise ValueError()
@@ -142,7 +146,8 @@ def main():
         config_path = local_settings.settings_path(args.database)
         preferences = local_settings.load(config_path)
         if args.command == 'suggest-demo':
-            endpoint = ModelEndpoint(os.environ.get('RZ_MODEL_ENDPOINT', preferences['endpoint']), os.environ.get('RZ_MODEL', preferences['model']), os.environ.get('RZ_MODEL_API_KEY'))
+            saved = preferences['roles']['proposer'] or {'endpoint': '', 'model': ''}
+            endpoint = ModelEndpoint(os.environ.get('RZ_MODEL_ENDPOINT', saved['endpoint']), os.environ.get('RZ_MODEL', saved['model']), os.environ.get('RZ_MODEL_API_KEY'))
             derive_record('DEMO-WEB-01', 'local_suggestion', args.cycle)
         store = SQLiteStore(args.database)
         if args.command == 'suggest-demo':

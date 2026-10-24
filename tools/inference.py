@@ -52,12 +52,19 @@ def _check_input(text):
         raise ValueError("model input exceeds byte limit")
 
 
-def inference_fingerprint(rendered, reasoning_model, reviewer_model):
+def inference_fingerprint(rendered, roles):
+    """Hash of everything that decides what a cycle's model calls mean.
+
+    Covers every configured role (provenance, endpoint), the same-family
+    policy, both prompts and the transport limits. A change mid-cycle must stop
+    for human review rather than replay under different models.
+    """
+    endpoints = {role: config.endpoint for role, config in roles.configured()}
     return hashlib.sha256(json.dumps([
-        rendered, reasoning_model, reviewer_model, _load("triage.md"),
-        _load("reviewer.md"), MAX_INPUT_BYTES, MAX_OUTPUT_TOKENS,
-        REQUEST_TIMEOUT_MS,
-    ], ensure_ascii=False).encode("utf-8")).hexdigest()
+        rendered, roles.provenance(), endpoints, roles.same_family_policy,
+        _load("triage.md"), _load("reviewer.md"), MAX_INPUT_BYTES,
+        MAX_OUTPUT_TOKENS, REQUEST_TIMEOUT_MS,
+    ], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _invoke(call, *, what, retry):
