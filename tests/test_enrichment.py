@@ -108,3 +108,12 @@ def test_missing_nvd_cache_degrades_rather_than_raising(tmp_path):
     assert result.in_kev is True
     assert result.epss_score == 0.9
     assert result.cvss_base is None
+
+
+@pytest.mark.parametrize("payload", [[], [{"cveID": "CVE-2021-44228"}], "kev", 3, None])
+def test_a_kev_file_that_is_not_an_object_is_an_absent_source(tmp_path, payload):
+    (tmp_path / "cisa_kev.json").write_text(json.dumps(payload))
+    cache = EnrichmentCache(cache_dir=tmp_path)
+    assert cache.has_kev is False
+    result = cache.enrich("CVE-2021-44228")
+    assert result.in_kev is False and result.kev_checked is False

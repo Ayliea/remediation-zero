@@ -119,7 +119,11 @@ class EnrichmentCache:
         catalogue = self._load_json("cisa_kev.json")
         self._kev_loaded = (isinstance(catalogue, dict)
                             and isinstance(catalogue.get("vulnerabilities"), list))
-        return {v["cveID"]: v for v in catalogue.get("vulnerabilities", [])}
+        if not self._kev_loaded:
+            # Not a catalogue (a list, a string, no `vulnerabilities` list):
+            # an absent source, never a crash and never "checked, not in KEV".
+            return {}
+        return {v["cveID"]: v for v in catalogue["vulnerabilities"]}
 
     def enrich(self, cve_id: str) -> Enrichment:
         """Everything the cache knows about `cve_id`."""
