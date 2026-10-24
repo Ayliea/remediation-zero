@@ -25,6 +25,7 @@ same key from the finding, the action and the cycle number, finds the completed
 call, and does not write a second decision.
 """
 
+from dataclasses import replace as _replace
 from typing import Any, Mapping, Optional
 
 from google.cloud import firestore
@@ -64,6 +65,10 @@ def to_decision_document(
             {"ratified": v.ratified, "reason": v.reason}
             for v in adjudication.verdicts
         ],
+        # How independent the review was, and which models took part.
+        "review_independence": adjudication.review_independence,
+        "models": dict(adjudication.models),
+        "same_family_policy": adjudication.same_family_policy,
         "real_ts": stamp.real_ts,
         "sim_ts": stamp.sim_ts,
     }
@@ -100,7 +105,12 @@ class DecisionWriter:
             proposal = Proposal(key.finding_id, doc["proposed_severity"], doc["proposed_sla_days"],
                                 doc["proposed_remediation"], tuple(doc["cited_evidence"]), doc["rationale"])
         result = Adjudication(key.finding_id, AdjudicationOutcome(doc["outcome"]), proposal,
-                              tuple(Verdict(**v) for v in doc["verdicts"]), doc["attempts"], doc["note"])
+                              tuple(Verdict(**v) for v in doc["verdicts"]), doc["attempts"], doc["note"],
+                              # Documents written before these fields existed were
+                              # all reviewed by one family against another.
+                              doc.get("review_independence", "cross_family"),
+                              dict(doc.get("models") or {}),
+                              doc.get("same_family_policy", "wait"))
         if result.outcome is not AdjudicationOutcome.RATIFIED:
             @self._guard.protects(action="decision_queue_repair")
             def repair(*, finding_id: str, cycle: int):
@@ -112,13 +122,19 @@ class DecisionWriter:
             repair(finding_id=key.finding_id, cycle=cycle)
         return result
 
-    def adjudicate_once(self, finding, triage, review, *, cycle: int, context: str = "") -> Adjudication:
+    def adjudicate_once(self, finding, triage, review, *, cycle: int, context: str = "",
+                        roles=None) -> Adjudication:
+        """Adjudicate once. `roles` supplies independence, provenance and policy;
+        without it the record is the cloud default (cross family, no models)."""
         from tools.inference_journal import InferenceJournal
         finding_id = finding["finding_id"]
         restored = self.restore(finding_id, cycle)
         if restored is not None:
             return restored
         journal = InferenceJournal(self._store, finding_id, cycle, context=context)
+        independence = roles.independence() if roles is not None else "cross_family"
+        provenance = dict(roles.provenance()) if roles is not None else {}
+        policy = roles.same_family_policy if roles is not None else "wait"
         counts = {"triage": 0, "review": 0}
         def checked(phase, expected, fn):
             def invoke(*args):
@@ -130,9 +146,14 @@ class DecisionWriter:
             return invoke
         try:
             result = adjudicate(finding, checked("triage", Proposal, triage),
-                                checked("review", Verdict, review), max_capacity_retries=1)
+                                None if independence == "unreviewed"
+                                else checked("review", Verdict, review),
+                                max_capacity_retries=1,
+                                independence=independence, same_family_policy=policy)
         except AdjudicationFailure as exc:
             result = exc.adjudication
+        result = _replace(result, review_independence=independence,
+                          models=provenance, same_family_policy=policy)
         self.record(result, cycle)
         return self.restore(finding_id, cycle)
 
@@ -167,7 +188,15 @@ class DecisionWriter:
     ):
         stamp = self._clock.now()
         unavailable = adjudication.outcome is AdjudicationOutcome.UNAVAILABLE
-        queue_id = f"reviewer-unavailable-{decision_id}" if unavailable else decision_id
+        outcome = adjudication.outcome
+        if unavailable:
+            queue_id = f"reviewer-unavailable-{decision_id}"
+        elif outcome is AdjudicationOutcome.UNREVIEWED:
+            queue_id = f"unreviewed-{decision_id}"
+        elif outcome is AdjudicationOutcome.HELD_FOR_APPROVAL:
+            queue_id = f"held-{decision_id}"
+        else:
+            queue_id = decision_id
         payload = {
                 "finding_id": adjudication.finding_id,
                 "cycle": cycle,
@@ -182,4 +211,8 @@ class DecisionWriter:
             }
         if unavailable:
             payload["kind"] = "reviewer_unavailable"
+        elif outcome is AdjudicationOutcome.UNREVIEWED:
+            payload["kind"] = "unreviewed"
+        elif outcome is AdjudicationOutcome.HELD_FOR_APPROVAL:
+            payload["kind"] = "same_family_review"
         return self._client.collection(HUMAN_QUEUE).document(queue_id), payload

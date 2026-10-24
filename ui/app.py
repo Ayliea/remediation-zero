@@ -495,7 +495,8 @@ but cannot confirm.</p>"""
             for v in d.get("verdicts", [])
         )
         outcome = d.get("outcome", "—")
-        tone = {"ratified": "ok", "human_queue": "breach", "unavailable": "pending"}.get(outcome, "mute")
+        tone = {"ratified": "ok", "human_queue": "breach", "unavailable": "pending",
+                "unreviewed": "pending", "held_for_approval": "pending"}.get(outcome, "mute")
         cites = ", ".join(d.get("cited_evidence", [])) or "none cited"
         dec_rows.append(f"""<tr>
           <td class="k">{esc(d.get('finding_id','—'))}<br>

@@ -352,3 +352,17 @@ def test_procedural_resume_completes_assignment_without_repeating_inference(monk
     assert cycle.main() == 0
     assert {key: doc for key, doc in client.docs.items() if key[0] != "cycles"} == preserved
     assert model_calls == ["triage", "review"]
+
+
+def test_audit_accepts_held_and_unreviewed_with_their_own_queue_ids():
+    from tools.adjudication import Adjudication
+    for outcome, prefix, verdicts in (
+            (AdjudicationOutcome.HELD_FOR_APPROVAL, "held-", (Verdict(True, "ok"),)),
+            (AdjudicationOutcome.UNREVIEWED, "unreviewed-", ())):
+        client, _, writer = setup_writer()
+        writer.record(Adjudication("RZ-1", outcome, PROPOSAL, verdicts, 1, "waiting"), 1)
+        decisions = {k[1]: v for k, v in client.docs.items() if k[0] == "decisions"}
+        queue = {k[1]: v for k, v in client.docs.items() if k[0] == "human_queue"}
+        assert list(queue) == [f"{prefix}RZ-1-c001"]
+        statuses = [r["status"] for r in audit_recovery_snapshot(decisions, queue)]
+        assert statuses == ["no_action"]

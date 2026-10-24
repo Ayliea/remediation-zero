@@ -21,9 +21,18 @@ path, which is exactly how it went missing once before.
 """
 
 import pytest
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from agents.orchestrator.graph import (
+    HUMAN_QUEUE as HUMAN_QUEUE_ROUTE, RATIFIED as RATIFIED_ROUTE, build_graph,
+)
+
 from scripts.graph_cycle import build_handlers
+from tools.adjudication import Adjudication, AdjudicationOutcome
 from tools.model_armor import WITHHELD_NOTICE, ArmorVerdict
 
 
@@ -165,3 +174,37 @@ def test_every_node_in_the_graph_has_a_handler():
 def test_each_handler_is_callable():
     built, _, _ = handlers(ArmorVerdict(blocked=False, screened=True))
     assert all(callable(fn) for fn in built.values())
+
+
+# --- the ratified gate -------------------------------------------------------
+
+@pytest.mark.parametrize("outcome", [AdjudicationOutcome.UNREVIEWED,
+                                     AdjudicationOutcome.HELD_FOR_APPROVAL])
+def test_held_and_unreviewed_never_pass_ratified_gate(outcome):
+    """Neither outcome may reach assignment: the route is the human-queue edge,
+    and the assignment writer is never called."""
+    restored = Adjudication("RZ-1", outcome, None, (), 1, "waiting for a person")
+    assignments = SimpleNamespace(record=lambda *a, **k: pytest.fail("assignment recorded"))
+    scratch = {}
+    built = build_handlers({
+        "db": FakeDB(findings={}, assets={}), "clock": None, "cache": FakeCache(),
+        "genai": None, "armor": None, "armor_token": "t",
+        "decisions": SimpleNamespace(restore=lambda *_: restored),
+        "assignments": assignments, "cycle_id": "cycle-001", "scratch": scratch,
+    })
+    ctx = SimpleNamespace(route=None)
+
+    built["review"](ctx, "RZ-1", 1)
+
+    assert ctx.route == HUMAN_QUEUE_ROUTE
+    assert ctx.route != RATIFIED_ROUTE
+    graph = build_graph({name: (lambda finding_id, cycle: "done") for name in built})
+    branch = next(e for e in graph.edges if isinstance(e[1], dict))[1]
+    assert branch[ctx.route].name == "queue"
+
+
+def test_cycle_script_assignment_gate_is_a_positive_equality():
+    """The tick driver assigns only on `== "ratified"`; never on a negation."""
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "cycle.py").read_text()
+    gates = re.findall(r"if [\w.]*outcome\.value ([!=]=) \"(\w+)\":", source)
+    assert gates == [("==", "ratified"), ("==", "ratified")]

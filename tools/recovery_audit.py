@@ -33,7 +33,8 @@ def _validate(document_id, doc):
         raise ValueError("ratified decision has no proposal")
     if outcome is AdjudicationOutcome.RATIFIED and (not verdicts or not verdicts[-1].ratified):
         raise ValueError("ratified outcome has no ratification")
-    if outcome is not AdjudicationOutcome.RATIFIED and any(v.ratified for v in verdicts):
+    if outcome not in {AdjudicationOutcome.RATIFIED, AdjudicationOutcome.HELD_FOR_APPROVAL} \
+            and any(v.ratified for v in verdicts):
         raise ValueError("terminal failure contradicts ratification")
     return outcome
 
@@ -44,11 +45,14 @@ def audit_recovery_snapshot(decisions, human_queue):
     for document_id, doc in decisions.items():
         try:
             outcome = _validate(document_id, doc)
-            expected = (f"reviewer-unavailable-{document_id}"
-                        if outcome is AdjudicationOutcome.UNAVAILABLE else document_id)
+            prefix = {AdjudicationOutcome.UNAVAILABLE: "reviewer-unavailable-",
+                      AdjudicationOutcome.UNREVIEWED: "unreviewed-",
+                      AdjudicationOutcome.HELD_FOR_APPROVAL: "held-"}.get(outcome, "")
+            expected = f"{prefix}{document_id}"
             matches = []
             for queue_id, entry in human_queue.items():
-                if (queue_id in {document_id, f"reviewer-unavailable-{document_id}"}
+                if (queue_id in {document_id, f"reviewer-unavailable-{document_id}",
+                                 f"unreviewed-{document_id}", f"held-{document_id}"}
                     or entry.get("decision_id") == document_id
                     or (entry.get("kind") in {"reviewer_unavailable", "cycle_failure"}
                         and entry.get("finding_id") == doc["finding_id"]

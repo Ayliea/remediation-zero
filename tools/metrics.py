@@ -66,6 +66,8 @@ def compute_metrics(
     ratified = sum(1 for d in decisions if d.get("outcome") == "ratified")
     to_human = sum(1 for d in decisions if d.get("outcome") == "human_queue")
     unavailable = sum(1 for d in decisions if d.get("outcome") == "unavailable")
+    unreviewed = sum(1 for d in decisions if d.get("outcome") == "unreviewed")
+    held = sum(1 for d in decisions if d.get("outcome") == "held_for_approval")
 
     verdicts = [v for d in decisions for v in d.get("verdicts", [])]
     rejections = [v for v in verdicts if not v.get("ratified")]
@@ -85,6 +87,8 @@ def compute_metrics(
         "ratified": ratified,
         "routed_to_human": to_human,
         "reviewer_unavailable": unavailable,
+        "unreviewed": unreviewed,
+        "held_for_approval": held,
         "ratification_rate": _rate(ratified, len(decisions)),
         "required_retry": sum(1 for d in decisions if int(d.get("attempts", 1)) > 1),
         # The control, measured. A disagreement rate of zero would mean the

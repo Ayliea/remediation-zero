@@ -48,6 +48,11 @@ class AdjudicationOutcome(Enum):
     HUMAN_QUEUE = "human_queue"
     #: The reviewer could not be reached. Not a rejection, not a ratification.
     UNAVAILABLE = "unavailable"
+    #: No reviewer is configured. A suggestion, not a decision; a person decides.
+    UNREVIEWED = "unreviewed"
+    #: Ratified by a reviewer of the same model family as the proposer, under
+    #: the default policy. A person must approve before it may become state.
+    HELD_FOR_APPROVAL = "held_for_approval"
 
 
 class CapacityError(RuntimeError):
@@ -116,6 +121,12 @@ class Adjudication:
     verdicts: tuple[Verdict, ...] = field(default_factory=tuple)
     attempts: int = 0
     note: str = ""
+    #: How independent the review was: cross_family, same_family or unreviewed.
+    review_independence: str = "cross_family"
+    #: Per role: format, model and family. Never endpoints or keys.
+    models: Mapping[str, Any] = field(default_factory=dict)
+    #: What was to happen to a same-family ratification: wait or proceed.
+    same_family_policy: str = "wait"
 
 
 #: One retry after a rejection, then a person. Not configurable by accident.
@@ -137,19 +148,27 @@ class AdjudicationFailure(ValueError):
 def adjudicate(
     finding: Mapping[str, Any],
     triage: Callable[[Mapping[str, Any]], Proposal],
-    review: Callable[[Mapping[str, Any], Proposal], Verdict],
+    review: Optional[Callable[[Mapping[str, Any], Proposal], Verdict]],
     max_capacity_retries: int = 3,
+    *,
+    independence: str = "cross_family",
+    same_family_policy: str = "wait",
 ) -> Adjudication:
     """Run one finding through triage and review.
 
     Args:
         finding: the finding, as an agent sees it.
         triage: proposes a decision.
-        review: ratifies or rejects. May raise `CapacityError`.
+        review: ratifies or rejects. May raise `CapacityError`. `None` means
+            no reviewer is configured: the result is `UNREVIEWED`.
         max_capacity_retries: how many times a 429 is retried before the
             reviewer is declared unavailable. Capacity retries are counted
             separately from review attempts, because a queue-full response is
             not the reviewer disagreeing.
+        independence: how independent the review is (cross_family,
+            same_family). A same-family ratification is held for a person
+            unless `same_family_policy` is "proceed".
+        same_family_policy: "wait" (default) or "proceed".
 
     Returns:
         The adjudication record, including every reason given.
@@ -160,6 +179,8 @@ def adjudicate(
         raise ValueError("max_capacity_retries must be an integer between 1 and 3")
     verdicts: list[Verdict] = []
     proposal: Optional[Proposal] = None
+    provenance = {"review_independence": independence,
+                  "same_family_policy": same_family_policy}
 
     for attempt in range(1, MAX_REVIEW_ATTEMPTS + 1):
         try:
@@ -176,6 +197,17 @@ def adjudicate(
                 str(finding.get("finding_id", "")), AdjudicationOutcome.HUMAN_QUEUE,
                 proposal, tuple(verdicts), attempt,
                 f"triage failed: {type(exc).__name__}: {exc}")) from exc
+
+        if review is None:
+            return Adjudication(
+                finding_id=str(finding.get("finding_id", "")),
+                outcome=AdjudicationOutcome.UNREVIEWED,
+                proposal=proposal,
+                verdicts=(),
+                attempts=attempt,
+                note="needs a person's review: no reviewer configured",
+                **provenance,
+            )
 
         verdict = None
         for capacity_attempt in range(1, max_capacity_retries + 1):
@@ -195,6 +227,7 @@ def adjudicate(
                         verdicts=tuple(verdicts),
                         attempts=attempt,
                         note=f"reviewer unavailable after {capacity_attempt} attempts: {exc}",
+                        **provenance,
                     )
             except (RetryStateError, AdjudicationFailure):
                 raise
@@ -208,12 +241,23 @@ def adjudicate(
         verdicts.append(verdict)
 
         if verdict.ratified:
+            if independence == "same_family" and same_family_policy == "wait":
+                return Adjudication(
+                    finding_id=str(finding.get("finding_id", "")),
+                    outcome=AdjudicationOutcome.HELD_FOR_APPROVAL,
+                    proposal=proposal,
+                    verdicts=tuple(verdicts),
+                    attempts=attempt,
+                    note="same-family review: needs a person's approval",
+                    **provenance,
+                )
             return Adjudication(
                 finding_id=str(finding.get("finding_id", "")),
                 outcome=AdjudicationOutcome.RATIFIED,
                 proposal=proposal,
                 verdicts=tuple(verdicts),
                 attempts=attempt,
+                **provenance,
             )
 
     return Adjudication(
@@ -223,4 +267,5 @@ def adjudicate(
         verdicts=tuple(verdicts),
         attempts=MAX_REVIEW_ATTEMPTS,
         note="rejected twice; a person decides",
+        **provenance,
     )

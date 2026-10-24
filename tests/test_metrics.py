@@ -225,3 +225,22 @@ def test_every_remediation_metric_the_prompt_relies_on_actually_exists(metrics):
     for key in re.findall(r"`([a-z_]+)`", prompt):
         if key in ("remediated_of_scanned", "unverifiable", "coverage_rate"):
             assert key in metrics, f"the prompt names {key}, the block has no such key"
+
+
+def test_unreviewed_and_held_not_counted_as_rejections():
+    decisions = DECISIONS + [
+        {"finding_id": "RZ-6", "cycle": 1, "outcome": "unreviewed", "attempts": 1,
+         "proposed_severity": "low", "verdicts": []},
+        {"finding_id": "RZ-7", "cycle": 1, "outcome": "held_for_approval", "attempts": 1,
+         "proposed_severity": "low", "verdicts": [{"ratified": True, "reason": "ok"}]},
+    ]
+    result = compute_metrics(decisions, TICKETS, SLA, HUMAN_QUEUE, EXCEPTIONS,
+                             FINDINGS, SCANS, ASSETS)
+
+    assert result["unreviewed"] == 1
+    assert result["held_for_approval"] == 1
+    assert result["rejections"] == 3
+    assert result["reviewer_unavailable"] == 0
+    assert result["ratified"] == 2
+    assert result["routed_to_human"] == 1
+    assert result["ratification_rate"] == pytest.approx(2 / 5)

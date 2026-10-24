@@ -225,3 +225,106 @@ def test_a_later_cycle_records_separately(writer, client):
     writer.record(adjudication(), cycle=4)
     assert (COLLECTION, "RZ-1-c003") in client.docs
     assert (COLLECTION, "RZ-1-c004") in client.docs
+
+
+# --- review independence -----------------------------------------------------
+
+def test_document_carries_independence_models_and_policy(writer, client):
+    result = Adjudication(
+        "RZ-1", AdjudicationOutcome.HELD_FOR_APPROVAL, PROPOSAL,
+        (Verdict(True, "ok"),), 1, "same-family review: needs a person's approval",
+        review_independence="same_family",
+        models={"proposer": {"format": "openai_chat", "model": "qwen-a", "family": "qwen"}},
+        same_family_policy="wait")
+    writer.record(result, cycle=3)
+
+    document = client.docs[(COLLECTION, "RZ-1-c003")]
+    assert document["review_independence"] == "same_family"
+    assert document["models"]["proposer"]["family"] == "qwen"
+    assert document["same_family_policy"] == "wait"
+
+
+def test_old_decision_document_restores_with_defaults(writer, client):
+    document = to_decision_document(adjudication(), SimClock(mode=ClockMode.REAL), 3)
+    for name in ("review_independence", "models", "same_family_policy"):
+        del document[name]
+    client.docs[(COLLECTION, "RZ-1-c003")] = document
+
+    restored = writer.restore("RZ-1", 3)
+
+    assert restored.outcome is AdjudicationOutcome.RATIFIED
+    assert restored.review_independence == "cross_family"
+    assert restored.models == {}
+    assert restored.same_family_policy == "wait"
+
+
+def test_unreviewed_writes_its_own_queue_document_once(writer, client):
+    result = adjudication(outcome=AdjudicationOutcome.UNREVIEWED, verdicts=(),
+                          note="needs a person's review: no reviewer configured")
+    writer.record(result, cycle=3)
+    writer.record(result, cycle=3)
+
+    entry = client.docs[(HUMAN_QUEUE, "unreviewed-RZ-1-c003")]
+    assert entry["kind"] == "unreviewed"
+    assert entry["decision_id"] == "RZ-1-c003"
+    assert (HUMAN_QUEUE, "RZ-1-c003") not in client.docs
+    assert len([k for k in client.docs if k[0] == HUMAN_QUEUE]) == 1
+
+
+def test_held_writes_its_own_queue_document_once(writer, client):
+    result = adjudication(outcome=AdjudicationOutcome.HELD_FOR_APPROVAL,
+                          note="same-family review: needs a person's approval")
+    writer.record(result, cycle=3)
+    writer.record(result, cycle=3)
+
+    entry = client.docs[(HUMAN_QUEUE, "held-RZ-1-c003")]
+    assert entry["kind"] == "same_family_review"
+    assert entry["reason"] == "same-family review: needs a person's approval"
+    assert len([k for k in client.docs if k[0] == HUMAN_QUEUE]) == 1
+
+
+def test_a_missing_held_queue_document_is_repaired_without_duplicates(writer, client):
+    result = adjudication(outcome=AdjudicationOutcome.HELD_FOR_APPROVAL, note="held")
+    client.docs[(COLLECTION, "RZ-1-c003")] = to_decision_document(
+        result, SimClock(mode=ClockMode.REAL), 3)
+
+    writer.restore("RZ-1", 3)
+    writer.restore("RZ-1", 3)
+
+    assert [k for k in client.docs if k[0] == HUMAN_QUEUE] == [(HUMAN_QUEUE, "held-RZ-1-c003")]
+
+
+def _roles(env):
+    from tools.model_roles import ModelRoles
+    return ModelRoles.from_env(env)
+
+
+def test_cloud_decision_records_cross_family(writer, client):
+    roles = _roles({"REASONING_MODEL": "gemini-3.5-flash",
+                    "REVIEWER_MODEL": "gemma-4-26b-a4b-it-maas"})
+    writer.adjudicate_once(
+        {"finding_id": "RZ-1"}, lambda _f: PROPOSAL,
+        lambda _f, _p: Verdict(True, "ok"), cycle=3, roles=roles)
+
+    document = client.docs[(COLLECTION, "RZ-1-c003")]
+    assert document["outcome"] == "ratified"
+    assert document["review_independence"] == "cross_family"
+    assert document["same_family_policy"] == "wait"
+    assert {"proposer", "reviewer"} <= set(document["models"])
+    assert document["models"] == roles.provenance()
+    assert not [k for k in client.docs if k[0] == HUMAN_QUEUE]
+
+
+def test_adjudicate_once_without_a_reviewer_never_calls_review(writer, client):
+    roles = _roles({"REASONING_MODEL": "gemini-3.5-flash"})
+    assert roles.independence() == "unreviewed"
+
+    result = writer.adjudicate_once(
+        {"finding_id": "RZ-1"}, lambda _f: PROPOSAL, None, cycle=3, roles=roles)
+
+    assert result.outcome is AdjudicationOutcome.UNREVIEWED
+    document = client.docs[(COLLECTION, "RZ-1-c003")]
+    assert document["review_independence"] == "unreviewed"
+    assert document["models"] == roles.provenance()
+    assert "reviewer" not in document["models"]
+    assert (HUMAN_QUEUE, "unreviewed-RZ-1-c003") in client.docs

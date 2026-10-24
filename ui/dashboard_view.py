@@ -63,8 +63,11 @@ def decision_card(row):
     outcome = row.get("outcome")
     approved = outcome == "ratified"
     label = {"ratified": "Recommendation reviewed", "unavailable": "Check incomplete",
-             "unreviewed": "Suggestion · not reviewed",
+             "unreviewed": "Not reviewed · needs a person",
+             "held_for_approval": "Reviewed by the same model family · waiting for your approval",
              "human_queue": "Needs a person’s review"}.get(outcome, "Review status unknown")
+    if approved and row.get("review_independence") == "same_family":
+        label = "Reviewed by the same model family"
     next_step = (row.get("proposed_remediation") or "No remediation instructions recorded.") if approved else (
         "Ask a trusted IT provider to review this before making changes.")
     evidence = "".join(f"<li>{text(item)}</li>" for item in row.get("cited_evidence", []))

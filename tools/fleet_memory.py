@@ -75,6 +75,8 @@ _PHRASES = (
     ("human_queue", "{v} went to the human queue for a person to decide"),
     ("routed_to_human", "{v} went to the human queue"),
     ("unavailable", "{v} could not be adjudicated because the reviewer was unavailable"),
+    ("unreviewed", "{v} had no reviewer and need a person's review"),
+    ("held_for_approval", "{v} were reviewed by the same model family and wait for a person's approval"),
     ("rejections", "the reviewer issued {v} rejections"),
     ("required_retry", "{v} needed a second proposal"),
     ("open_ticket", "{v} tickets were opened"),

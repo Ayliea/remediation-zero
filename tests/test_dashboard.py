@@ -82,3 +82,21 @@ def test_local_edition_keeps_inline_logo_and_root_links():
     page = dashboard_view.render(dashboard_view.demo_snapshot(), "overview")
     assert "data:image/png;base64," in page
     assert 'href="/?view=actions"' in page
+
+
+def test_dashboard_labels_same_family():
+    data = {"decisions": [
+        {"finding_id": "A", "outcome": "unreviewed"},
+        {"finding_id": "B", "outcome": "held_for_approval", "proposed_remediation": "HELD_FIX"},
+        {"finding_id": "C", "outcome": "ratified", "review_independence": "same_family"},
+        {"finding_id": "D", "outcome": "ratified", "review_independence": "cross_family"},
+        {"finding_id": "<b>E</b>", "outcome": "held_for_approval"},
+    ]}
+    page = dashboard_view.render(data, "activity")
+
+    assert "Not reviewed · needs a person" in page
+    assert "Reviewed by the same model family · waiting for your approval" in page
+    assert "Reviewed by the same model family</span>" in page
+    assert page.count("Recommendation reviewed") == 1
+    assert "HELD_FIX" not in page
+    assert "<b>E</b>" not in page and "&lt;b&gt;E&lt;/b&gt;" in page

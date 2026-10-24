@@ -86,7 +86,9 @@ def main() -> int:
     genai_client = rm._client()
     roles = ModelRoles.from_env(os.environ)
     proposer = roles.adapter("proposer", vertex_client=genai_client)
-    reviewer = roles.adapter("reviewer", vertex_client=genai_client)
+    # No reviewer role: no adapter is built, and adjudication ends unreviewed.
+    reviewer = (None if roles.independence() == "unreviewed"
+                else roles.adapter("reviewer", vertex_client=genai_client))
 
     armor = ModelArmor()
     import subprocess
@@ -178,7 +180,7 @@ def main() -> int:
                     rendered, proposer,
                     finding_id=finding_id, retry=False,
                 ),
-                review=lambda _f, p: inference.review(
+                review=None if reviewer is None else lambda _f, p: inference.review(
                     rendered + "\n\nPROPOSAL\n" + json.dumps(
                         {"severity": p.severity, "sla_days": p.sla_days,
                          "remediation": p.remediation, "evidence": list(p.evidence),
@@ -186,6 +188,7 @@ def main() -> int:
                     reviewer, retry=False),
                 cycle=args.cycle,
                 context=inference.inference_fingerprint(rendered, roles),
+                roles=roles,
             )
         except Exception as exc:
             # Model failures have durable evidence. Persistence failure must

@@ -69,6 +69,18 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
         sort_keys=True, default=str))
 
 
+def _route(outcome: str) -> str:
+    """The graph edge for an outcome.
+
+    Only "ratified" reaches assignment. An unreviewed or held decision waits
+    for a person, so it takes the human-queue edge; the decision writer has
+    already filed its own queue document under its own id.
+    """
+    if outcome in (RATIFIED, HUMAN_QUEUE, UNAVAILABLE):
+        return outcome
+    return HUMAN_QUEUE
+
+
 def build_handlers(clients: dict) -> dict:
     """One callable per node. Each is one agent's responsibility, and nothing
     else's: none of them decides where the finding goes next."""
@@ -132,21 +144,22 @@ def build_handlers(clients: dict) -> dict:
         restored = writer.restore(finding_id, cycle)
         if restored is not None:
             scratch["adjudication"] = restored
-            ctx.route = restored.outcome.value
+            ctx.route = _route(restored.outcome.value)
             return restored.outcome.value
         rendered = scratch["rendered"]
         roles = clients.get("roles") or ModelRoles.from_env(
             {"REASONING_MODEL": clients["reasoning_model"],
              "REVIEWER_MODEL": clients["reviewer_model"]})
         proposer = roles.adapter("proposer", vertex_client=genai_client)
-        reviewer = roles.adapter("reviewer", vertex_client=genai_client)
+        reviewer = (None if roles.independence() == "unreviewed"
+                    else roles.adapter("reviewer", vertex_client=genai_client))
         result = writer.adjudicate_once(
             scratch["finding"],
             triage=lambda _f: inference.propose(
                 rendered, proposer,
                 finding_id=finding_id, retry=False,
             ),
-            review=lambda _f, p: inference.review(
+            review=None if reviewer is None else lambda _f, p: inference.review(
                 rendered + "\n\nPROPOSAL\n" + json.dumps(
                     {"severity": p.severity, "sla_days": p.sla_days,
                      "remediation": p.remediation, "evidence": list(p.evidence),
@@ -154,12 +167,13 @@ def build_handlers(clients: dict) -> dict:
                 reviewer, retry=False),
             cycle=cycle,
             context=inference.inference_fingerprint(rendered, roles),
+            roles=roles,
         )
         scratch["adjudication"] = result
         _log("adjudicated", cycle_id, finding_id,
              outcome=result.outcome.value, attempts=result.attempts,
              rejections=[v.reason[:120] for v in result.verdicts if not v.ratified])
-        ctx.route = result.outcome.value
+        ctx.route = _route(result.outcome.value)
         return result.outcome.value
 
     def record(finding_id: str, cycle: int) -> str:

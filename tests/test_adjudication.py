@@ -251,3 +251,75 @@ def test_a_non_capacity_error_is_not_retried():
         _with_backoff(bad_request, what="test model")
 
     assert len(calls) == 1
+
+
+# --- review independence ------------------------------------------------------
+
+def _ratify(_finding, _proposal):
+    return Verdict(ratified=True, reason="Evidence supports it.")
+
+
+def test_no_reviewer_is_unreviewed_not_ratified():
+    triaged = []
+
+    def triage(finding):
+        triaged.append(1)
+        return PROPOSAL
+
+    result = adjudicate(FINDING, triage=triage, review=None, independence="unreviewed")
+
+    assert result.outcome is AdjudicationOutcome.UNREVIEWED
+    assert result.note == "needs a person's review: no reviewer configured"
+    assert result.verdicts == ()
+    assert result.proposal == PROPOSAL
+    assert len(triaged) == 1
+    assert result.review_independence == "unreviewed"
+
+
+def test_same_family_wait_holds_ratification():
+    result = adjudicate(FINDING, triage=_triage, review=_ratify,
+                        independence="same_family", same_family_policy="wait")
+
+    assert result.outcome is AdjudicationOutcome.HELD_FOR_APPROVAL
+    assert result.note == "same-family review: needs a person's approval"
+    assert [v.ratified for v in result.verdicts] == [True]
+    assert result.review_independence == "same_family"
+    assert result.same_family_policy == "wait"
+
+
+def test_same_family_proceed_ratifies():
+    result = adjudicate(FINDING, triage=_triage, review=_ratify,
+                        independence="same_family", same_family_policy="proceed")
+
+    assert result.outcome is AdjudicationOutcome.RATIFIED
+    assert result.review_independence == "same_family"
+    assert result.same_family_policy == "proceed"
+
+
+@pytest.mark.parametrize("policy", ["wait", "proceed"])
+def test_cross_family_ignores_policy(policy):
+    result = adjudicate(FINDING, triage=_triage, review=_ratify,
+                        independence="cross_family", same_family_policy=policy)
+
+    assert result.outcome is AdjudicationOutcome.RATIFIED
+    assert result.note == ""
+
+
+def test_capacity_still_never_rejection_under_same_family():
+    def review(_finding, _proposal):
+        raise CapacityError("429 The request queue is full")
+
+    result = adjudicate(FINDING, triage=_triage, review=review, max_capacity_retries=2,
+                        independence="same_family", same_family_policy="wait")
+
+    assert result.outcome is AdjudicationOutcome.UNAVAILABLE
+    assert result.verdicts == ()
+
+
+def test_same_family_rejection_is_still_a_rejection():
+    result = adjudicate(FINDING, triage=_triage,
+                        review=lambda f, p: Verdict(ratified=False, reason="No."),
+                        independence="same_family")
+
+    assert result.outcome is AdjudicationOutcome.HUMAN_QUEUE
+    assert result.attempts == 2
