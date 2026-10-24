@@ -151,7 +151,7 @@ def adjudicate(
     review: Optional[Callable[[Mapping[str, Any], Proposal], Verdict]],
     max_capacity_retries: int = 3,
     *,
-    independence: str = "cross_family",
+    independence: str,
     same_family_policy: str = "wait",
 ) -> Adjudication:
     """Run one finding through triage and review.
@@ -166,7 +166,9 @@ def adjudicate(
             separately from review attempts, because a queue-full response is
             not the reviewer disagreeing.
         independence: how independent the review is (cross_family,
-            same_family). A same-family ratification is held for a person
+            same_family, unreviewed). Required, with no default: the record
+            must never claim an independence the caller did not establish
+            (hard constraint 3). A same-family ratification is held for a person
             unless `same_family_policy` is "proceed".
         same_family_policy: "wait" (default) or "proceed".
 
@@ -196,7 +198,7 @@ def adjudicate(
             raise AdjudicationFailure(Adjudication(
                 str(finding.get("finding_id", "")), AdjudicationOutcome.HUMAN_QUEUE,
                 proposal, tuple(verdicts), attempt,
-                f"triage failed: {type(exc).__name__}: {exc}")) from exc
+                f"triage failed: {type(exc).__name__}: {exc}", **provenance)) from exc
 
         if review is None:
             return Adjudication(
@@ -235,7 +237,7 @@ def adjudicate(
                 raise AdjudicationFailure(Adjudication(
                     str(finding.get("finding_id", "")), AdjudicationOutcome.HUMAN_QUEUE,
                     proposal, tuple(verdicts), attempt,
-                    f"reviewer failed: {type(exc).__name__}: {exc}")) from exc
+                    f"reviewer failed: {type(exc).__name__}: {exc}", **provenance)) from exc
 
         assert verdict is not None
         verdicts.append(verdict)

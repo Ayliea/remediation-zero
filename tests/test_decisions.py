@@ -328,3 +328,13 @@ def test_adjudicate_once_without_a_reviewer_never_calls_review(writer, client):
     assert document["models"] == roles.provenance()
     assert "reviewer" not in document["models"]
     assert (HUMAN_QUEUE, "unreviewed-RZ-1-c003") in client.docs
+
+
+def test_adjudicate_once_without_roles_refuses(writer, client):
+    calls = []
+    with pytest.raises(ValueError, match="roles are required: independence cannot be assumed"):
+        writer.adjudicate_once(
+            {"finding_id": "RZ-1"}, lambda _f: calls.append("triage") or PROPOSAL,
+            lambda _f, _p: calls.append("review") or Verdict(True, "ok"), cycle=3)
+    assert calls == []
+    assert not client.docs

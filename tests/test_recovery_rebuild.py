@@ -12,6 +12,11 @@ from tools.idempotency import CompletedCall, InMemoryIdempotencyStore, derive_re
 from tools.inference_journal import InferenceJournal
 from tools.recovery_audit import audit_recovery_snapshot
 from tests.test_decisions import FakeClient, PROPOSAL
+from tools.model_roles import ModelRoles
+
+# Explicit roles: independence is never assumed (Ruling 8, hard constraint 3).
+CLOUD_ROLES = ModelRoles.from_env({"REASONING_MODEL": "gemini-3.5-flash",
+                                   "REVIEWER_MODEL": "gemma-4-26b-a4b-it-maas"})
 
 
 @pytest.fixture(autouse=True)
@@ -23,7 +28,8 @@ def no_backoff(monkeypatch):
 def test_invalid_limits_before_models(limit):
     calls = []
     with pytest.raises(ValueError):
-        adjudicate({}, lambda _: calls.append(1), lambda *_: calls.append(1), limit)
+        adjudicate({}, lambda _: calls.append(1), lambda *_: calls.append(1), limit,
+                   independence="cross_family")
     assert not calls
 
 
@@ -43,7 +49,8 @@ def test_rejection_then_failure_keeps_evidence(error):
             return Verdict(False, "first objection")
         raise error
     try:
-        result = adjudicate({"finding_id": "RZ-1"}, lambda _: PROPOSAL, review, 1)
+        result = adjudicate({"finding_id": "RZ-1"}, lambda _: PROPOSAL, review, 1,
+                            independence="cross_family")
     except AdjudicationFailure as exc:
         result = exc.adjudication
     assert result.verdicts == (Verdict(False, "first objection"),)
@@ -63,7 +70,8 @@ def test_outage_records_and_escalates_once_and_replays_without_models():
     def outage(*_):
         calls.append(1)
         raise CapacityError("offline")
-    result = writer.adjudicate_once({"finding_id": "RZ-1"}, lambda _: PROPOSAL, outage, cycle=1)
+    result = writer.adjudicate_once({"finding_id": "RZ-1"}, lambda _: PROPOSAL, outage, cycle=1,
+                                   roles=CLOUD_ROLES)
     assert result.outcome is AdjudicationOutcome.UNAVAILABLE
     assert len(calls) == 4
     assert ("decisions", "RZ-1-c001") in client.docs
@@ -71,7 +79,8 @@ def test_outage_records_and_escalates_once_and_replays_without_models():
     def forbidden(*_):
         raise AssertionError("replay invoked a model")
     new_writer = DecisionWriter(store, client, SimClock(ClockMode.REAL))
-    assert new_writer.adjudicate_once({"finding_id": "RZ-1"}, forbidden, forbidden, cycle=1) == result
+    assert new_writer.adjudicate_once({"finding_id": "RZ-1"}, forbidden, forbidden, cycle=1,
+                                      roles=CLOUD_ROLES) == result
     assert len(client.docs) == 2
 
 
@@ -123,9 +132,11 @@ def test_saved_rejection_survives_second_round_crash():
             raise KeyboardInterrupt()
         return PROPOSAL
     with pytest.raises(KeyboardInterrupt):
-        writer.adjudicate_once({"finding_id": "RZ-1"}, triage, lambda *_: Verdict(False, "first"), cycle=1)
+        writer.adjudicate_once({"finding_id": "RZ-1"}, triage, lambda *_: Verdict(False, "first"), cycle=1,
+                              roles=CLOUD_ROLES)
     result = writer.adjudicate_once({"finding_id": "RZ-1"}, lambda _: PROPOSAL,
-                                   lambda *_: Verdict(True, "fixed"), cycle=1)
+                                   lambda *_: Verdict(True, "fixed"), cycle=1,
+                                   roles=CLOUD_ROLES)
     assert result.verdicts == (Verdict(False, "first"), Verdict(True, "fixed"))
 
 
@@ -166,11 +177,13 @@ def test_persisted_stage_is_replayed_after_decision_commit_failure(monkeypatch):
     monkeypatch.setattr(client, "batch", lambda: (_ for _ in ()).throw(ConnectionError("db down")))
     with pytest.raises(ConnectionError):
         writer.adjudicate_once({"finding_id": "RZ-1"}, lambda _: PROPOSAL,
-                               lambda *_: Verdict(True, "yes"), cycle=1)
+                               lambda *_: Verdict(True, "yes"), cycle=1,
+                               roles=CLOUD_ROLES)
     monkeypatch.setattr(client, "batch", real)
     def forbidden(*_):
         pytest.fail("inference repeated after checkpoint")
-    assert writer.adjudicate_once({"finding_id": "RZ-1"}, forbidden, forbidden, cycle=1).outcome is AdjudicationOutcome.RATIFIED
+    assert writer.adjudicate_once({"finding_id": "RZ-1"}, forbidden, forbidden, cycle=1,
+                                  roles=CLOUD_ROLES).outcome is AdjudicationOutcome.RATIFIED
 
 
 def test_audit_is_read_only_and_flags_duplicates_and_orphans():

@@ -51,6 +51,7 @@ def test_a_ratified_proposal_is_adjudicated_on_the_first_pass():
         FINDING,
         triage=_triage,
         review=lambda f, p: Verdict(ratified=True, reason="Evidence supports it."),
+        independence="cross_family",
     )
 
     assert result.outcome is AdjudicationOutcome.RATIFIED
@@ -66,7 +67,7 @@ def test_a_rejection_is_retried_exactly_once():
         seen.append(proposal)
         return Verdict(ratified=False, reason="SLA too generous for a KEV entry.")
 
-    result = adjudicate(FINDING, triage=_triage, review=review)
+    result = adjudicate(FINDING, triage=_triage, review=review, independence="cross_family")
 
     assert len(seen) == 2
     assert result.attempts == 2
@@ -80,7 +81,7 @@ def test_a_rejection_then_ratification_is_accepted():
     ]
 
     result = adjudicate(
-        FINDING, triage=_triage, review=lambda f, p: verdicts.pop(0)
+        FINDING, triage=_triage, review=lambda f, p: verdicts.pop(0), independence="cross_family"
     )
 
     assert result.outcome is AdjudicationOutcome.RATIFIED
@@ -95,7 +96,7 @@ def test_every_rejection_reason_is_retained():
     def review(_finding, _proposal):
         return Verdict(ratified=False, reason=reasons.pop(0))
 
-    result = adjudicate(FINDING, triage=_triage, review=review)
+    result = adjudicate(FINDING, triage=_triage, review=review, independence="cross_family")
 
     assert [v.reason for v in result.verdicts] == [
         "First objection.",
@@ -111,7 +112,8 @@ def test_capacity_pressure_is_never_recorded_as_a_rejection():
     def review(_finding, _proposal):
         raise CapacityError("429 The request queue is full")
 
-    result = adjudicate(FINDING, triage=_triage, review=review, max_capacity_retries=2)
+    result = adjudicate(FINDING, triage=_triage, review=review, max_capacity_retries=2,
+                        independence="cross_family")
 
     assert result.outcome is AdjudicationOutcome.UNAVAILABLE
     assert result.verdicts == ()
@@ -127,7 +129,8 @@ def test_capacity_pressure_retries_then_succeeds():
             raise CapacityError("429 The request queue is full")
         return Verdict(ratified=True, reason="Fine.")
 
-    result = adjudicate(FINDING, triage=_triage, review=review, max_capacity_retries=3)
+    result = adjudicate(FINDING, triage=_triage, review=review, max_capacity_retries=3,
+                        independence="cross_family")
 
     assert result.outcome is AdjudicationOutcome.RATIFIED
     assert len(calls) == 3
@@ -141,7 +144,7 @@ def test_the_loop_cannot_run_away():
         calls.append(1)
         return Verdict(ratified=False, reason="No.")
 
-    adjudicate(FINDING, triage=_triage, review=review)
+    adjudicate(FINDING, triage=_triage, review=review, independence="cross_family")
 
     assert len(calls) <= 2
 
@@ -176,6 +179,7 @@ def test_a_proposal_cannot_switch_to_a_different_finding():
         adjudicate(
             FINDING, triage=lambda _finding: wrong,
             review=lambda _finding, _proposal: Verdict(True, "Fine."),
+            independence="cross_family",
         )
 
 

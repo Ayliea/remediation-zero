@@ -122,17 +122,22 @@ class DecisionWriter:
 
     def adjudicate_once(self, finding, triage, review, *, cycle: int, context: str = "",
                         roles=None) -> Adjudication:
-        """Adjudicate once. `roles` supplies independence, provenance and policy;
-        without it the record is the cloud default (cross family, no models)."""
+        """Adjudicate once. `roles` supplies independence, provenance and policy.
+
+        `roles` is required: a record must never claim an independence nobody
+        established (hard constraint 3), so there is no default to fall back to.
+        """
+        if roles is None:
+            raise ValueError("roles are required: independence cannot be assumed")
         from tools.inference_journal import InferenceJournal
         finding_id = finding["finding_id"]
         restored = self.restore(finding_id, cycle)
         if restored is not None:
             return restored
         journal = InferenceJournal(self._store, finding_id, cycle, context=context)
-        independence = roles.independence() if roles is not None else "cross_family"
-        provenance = dict(roles.provenance()) if roles is not None else {}
-        policy = roles.same_family_policy if roles is not None else "wait"
+        independence = roles.independence()
+        provenance = dict(roles.provenance())
+        policy = roles.same_family_policy
         counts = {"triage": 0, "review": 0}
         def checked(phase, expected, fn):
             def invoke(*args):
