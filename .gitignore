@@ -154,3 +154,7 @@ agents/*_tmp[0-9]*/
 
 # Local user preferences (endpoint and model; never API keys).
 *.settings.json
+
+# Local agent workspaces
+.claude/worktrees/
+.superpowers/
