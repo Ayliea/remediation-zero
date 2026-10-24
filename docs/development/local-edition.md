@@ -1,128 +1,229 @@
-# Local edition: first runnable slice
+# Local edition
+
+The local edition runs the whole remediation lifecycle on one machine: triage,
+review, ownership, chase, risk acceptances, rescans and reports. It uses SQLite
+and models you configure. It needs Python 3.12 or newer and nothing from pip,
+and it makes no cloud calls. Python 3.12 on Linux is the tested runtime;
+Windows and macOS have not been exercised.
+
+It is still a synthetic preview. Do not feed real client data into it yet.
 
 ## Single-file installer
 
-Download install-remediation-zero.py from the supplied development bundle.
-With Python 3.12 or newer installed, run `python3 install-remediation-zero.py`
-(Windows: `py -3.12 install-remediation-zero.py`). The installer shows its plan
-and asks for confirmation before creating files. It bundles all application
-files, downloads nothing, installs no packages, requests no credentials and makes
-no model calls. It installs into a new RemediationZero directory under your home
-directory, starts a local synthetic demo and opens the browser.
+Download `install-remediation-zero.py` from the supplied development bundle and
+run `python3 install-remediation-zero.py` (Windows: `py -3.12
+install-remediation-zero.py`).
+
+- The installer shows its plan and asks before it creates files.
+- It bundles the application files, downloads nothing, installs no packages,
+  asks for no credentials and calls no model.
+- It installs into a new `RemediationZero` directory under your home
+  directory, starts the dashboard in demo mode and opens the browser.
+- It accepts `--directory`, `--no-start` and `--yes`, and never overwrites an
+  existing directory. There is no upgrade or migration path. A failed install
+  may leave a partial new directory; inspect it before removing it.
+- The installer is unsigned. Its embedded SHA-256 checks detect corruption,
+  not a malicious replacement of the installer itself.
+
+The installer does not ship the synthetic corpus (`data/`) or the enrichment
+cache (`data/cache/`). See "Seed" and "Enrichment cache" below.
 
 Restart with `python3 /path/to/RemediationZero/start-remediation-zero.py`.
-Use `--saved` for saved suggestions, `--no-browser` to skip opening the browser,
-or `--port 8082` if the default port is occupied. Stop with Ctrl+C in that terminal.
-The installer accepts `--directory`, `--no-start` and explicit `--yes` options.
-It never overwrites an existing directory. There is no upgrade/migration workflow.
-No background service or OS configuration is installed. On failure it may leave
-a partial new directory; inspect it before removing it or choosing another path.
+Its flags are `--saved` or `--demo`, `--database DIR`, `--no-browser` and
+`--port PORT`. Stop it with Ctrl+C.
 
-The installer is unsigned. Embedded SHA-256 checks detect corruption, not a
-malicious replacement of the installer itself. Download only from a trusted
-distribution source. There is not yet a published release URL or platform-native
-installer. Python installation remains a prerequisite; Windows and macOS have
-not been exercised. Installing or configuring a model is still a separate step.
-
-Build from reviewed source:
-`python3 -m scripts.build_local_installer /absolute/path/install-remediation-zero.py`.
-
-This post-hackathon edition uses SQLite and a user-configured model endpoint.
-Python 3.12 is the tested runtime. No pip installation, Google account, API key,
-model download or network access is needed to initialize storage and view the
-synthetic dashboard. Run from the repository root:
+Build an installer from reviewed source:
 
 ```bash
-python3 -m scripts.local init
-python3 -m scripts.local serve --demo
+python3 -S -m scripts.build_local_installer /absolute/path/install-remediation-zero.py
+python3 -S -m scripts.verify_local_install
 ```
 
-Open http://127.0.0.1:8081. Demo mode shows illustrative fixtures, not saved
-assessment results. To view saved suggestions, omit `--demo`. The application
-binds only to loopback and does not serve arbitrary files. The only HTTP write
-path saves validated local preferences; it cannot change infrastructure or run a model.
-It has no user authentication and must not be reverse-proxied onto a network.
+## Commands
 
-## Connect a model
-
-Configure a full OpenAI-compatible chat-completions URL and a model already
-available at that endpoint. Example for a locally installed model server:
+Every command takes `--database DIR`, the workspace folder. The default is
+`remediation-zero`. Run them from the repository or installation folder:
 
 ```bash
-export RZ_MODEL_ENDPOINT=http://localhost:11434/v1/chat/completions
-export RZ_MODEL=your-installed-model-name
-python3 -S -m scripts.local check-models
-python3 -S -m scripts.local cycle --cycle 1
-python3 -S -m scripts.local serve
+python3 -S -m scripts.local init                     # create the workspace
+python3 -S -m scripts.local seed --corpus DIR        # load findings, assets, owners
+python3 -S -m scripts.local cycle --cycle N          # triage, chase, sweep, report
+python3 -S -m scripts.local rescan --cycle N --scan PATH --dry-run   # what would close
+python3 -S -m scripts.local rescan --cycle N --scan PATH             # apply it
+python3 -S -m scripts.local exception accept FINDING --ttl DAYS --by OWNER_ID \
+    --reason TEXT --cycle N [--approved-by-person]
+python3 -S -m scripts.local exception list
+python3 -S -m scripts.local approve FINDING --cycle N [--by NAME]
+python3 -S -m scripts.local serve [--demo] [--port PORT]
+python3 -S -m scripts.local check-models [--role ROLE]
 ```
 
-The commands (`--database DIR` names the workspace folder; the default is
-`remediation-zero`): `init`, `seed`, `cycle --cycle N`, `rescan --cycle N
---scan PATH [--dry-run]`, `exception accept|list`, `approve FINDING --cycle N
-[--by NAME]`, `serve` and `check-models`. A folder from an earlier version that
-held a single database file is refused, not converted; choose a new folder.
+Only `cycle` and `check-models` call a model, and a hosted endpoint may charge
+for both. `seed`, `rescan`, `exception` and `approve` work with no model
+configured. `cycle` with no proposer configured exits with
+`no proposer configured: set one in Settings, then run the cycle again`
+before it creates or writes anything.
 
-For a hosted endpoint use HTTPS and, if needed, set RZ_MODEL_API_KEY through
-your shell's secret-management mechanism. Credentials are never saved in SQLite.
-Compatibility varies; no real provider was
-called during validation. Redirects and inherited proxies are disabled. HTTP is
-allowed only on loopback. Responses are capped at 64 KiB, output at 2048 tokens,
-input at 32 KiB, and each request has a 60-second socket timeout (not an absolute
-wall-time deadline for a streaming malicious server).
+- **seed** loads `findings.json`, `assets.json` and `owners.json` from
+  `--corpus`. In a repository checkout the default is `data/`. In an installed
+  tree there is no `data/`, so `seed` without `--corpus` exits with
+  `no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)`.
+  A folder missing any of the three files is refused. Both refusals create
+  nothing.
+- **cycle** first assigns any approved decision not yet assigned. It then
+  triages only pending findings: open findings with no decision yet, and
+  findings whose risk acceptance lapsed (each lapse is re-triaged once). Chase,
+  the exception sweep and the report follow, in that order.
+- **rescan** is the only command that marks a finding resolved. Read the dry
+  run first: it writes nothing.
+- **exception accept** records a risk acceptance that expires after `--ttl`
+  days; the sweep in the next `cycle` past expiry reopens it. A KEV CVE needs
+  `--approved-by-person`.
+- **approve** records a person's approval of an `unreviewed` or
+  `held_for_approval` decision. See "Review" below.
+- **serve** shows the dashboard and Settings on `http://127.0.0.1:8081`. With
+  `--demo` it shows illustrative fixtures instead of saved records. It binds
+  only to loopback and has no user authentication, so do not reverse-proxy it
+  onto a network.
 
-Only `cycle` and `check-models` invoke a model; hosted endpoints can charge
-for them. `check-models` sends the bundled synthetic example. A decision that is
-unreviewed or held for a same-family review waits for a person: `approve` records
-that person's approval, and the next `cycle` assigns it. It uses four durable
-request slots per cycle, backoff, and the existing 600-second claim lease. A
-crashed request consumes a slot. Rerunning the same cycle reuses its checkpoint;
-changing endpoint/model/prompt in that cycle is rejected. A new cycle deliberately
-starts a new budget. There is no global spending cap. Do not delete storage to
-retry a failed request. Back up the database while the process is stopped.
+A `--database` that names a single database file from an earlier version is
+refused with "... is not a Remediation Zero workspace directory ...;
+nothing was changed." It is not converted. Choose a new or empty folder.
 
-## Trust and scope
+## Model roles
 
-Every generated suggestion is unreviewed, including well-formed model output.
-The model cannot execute tools, change infrastructure, mark findings resolved,
-or approve its own recommendation. Existing rejection checkpoints remain durable.
-SQLite creation uses a restrictive process umask in the CLI; existing database
-permissions and machine access remain the operator's responsibility.
+There are four roles. Configure each in Settings with a format
+(`openai_chat`, `anthropic_messages` or `gemini_api`), an endpoint, a model and
+a family:
 
-This slice is synthetic-only. There are no real infrastructure connectors,
-import workflow, local ingress screening, independent reviewer setup, complete
-inventory or scan freshness checks. Do not feed real client data into it yet.
-The standard-library HTTP server is a local preview server, not hosted service
-infrastructure. The existing Google Cloud runner and evidence console remain.
+| Role | Does | API key variable |
+|---|---|---|
+| proposer | Triage: severity, SLA, remediation, with cited evidence | `RZ_PROPOSER_API_KEY`, else `RZ_MODEL_API_KEY` |
+| reviewer | Ratifies or rejects each proposal | `RZ_REVIEWER_API_KEY` |
+| summarizer | Narrates the report's figures | `RZ_SUMMARIZER_API_KEY` |
+| guard | Screens untrusted text before any model sees it | `RZ_GUARD_API_KEY` |
 
-The repository already uses Apache-2.0. No license changes were made. An
-Ayliea-hosted offering is a future product direction, not an implemented service:
-it requires authentication, tenant isolation, hosted storage, billing, audit
-controls and operational review. None of those are implied by this local edition.
+API keys are read only from the environment. They are never written to the
+settings file, the workspace, a record or a log. `RZ_MODEL_ENDPOINT` and
+`RZ_MODEL` override the saved proposer connection. HTTP is allowed only on
+loopback; a hosted endpoint must use HTTPS. Redirects and inherited proxies are
+disabled. Requests are capped at 32 KiB in, 64 KiB back and 2048 output tokens,
+with a 60-second socket timeout. `check-models` sends the bundled synthetic
+example to each configured role. No real provider was called during validation.
 
-Next milestone: a validated synthetic finding-import contract and current-status
-projection, then explicit reviewer configuration before any approved guidance.
+With no summarizer, the report stores the metrics and a marker saying no
+summarizer is configured, in place of prose.
 
-## Settings (2026-10-24)
+## Review
 
-Open **Settings** in the local dashboard. Model connection stores the endpoint
-and model in a `.settings.json` file beside the selected database. API keys stay
-in `RZ_MODEL_API_KEY`; never paste a key into an endpoint URL. Environment
-`RZ_MODEL_ENDPOINT` and `RZ_MODEL` values override saved preferences when running
-`cycle` or `check-models`. Saving never contacts a provider. Optional sample checks remain
-explicit CLI operations and may cost money; the dashboard has no model test button.
+Every decision records how independent its review was:
 
-Application preferences set the installed launcher's default demo/saved mode,
-browser opening, and port on its next start. `--saved`, `--no-browser`, and
-`--port` launcher flags take precedence. Direct `scripts.local serve` continues
-to use its own CLI flags. The launcher always binds to loopback.
+- **Cross-family**: the reviewer's family differs from the proposer's. A
+  ratified decision is assigned and its SLA clock starts.
+- **Same family**: proposer and reviewer are the same family (or either is
+  `other`). The record and dashboard say "Reviewed by the same model family".
+  The same-family setting in Settings decides what happens next. With `wait`
+  (the default) a ratified proposal is held for a person
+  (`held_for_approval`). With `proceed` it is ratified, and still labelled
+  same-family.
+- **Unreviewed**: no reviewer is configured. The decision is `unreviewed` and
+  goes to the human queue.
 
-Data & storage, Safety & limits, and Updates explain current behavior. They do
-not implement backups, migrations, automatic updates, independent local review,
-or editable request budgets. Stop all processes before copying a database and
-its preferences. Preserve request history. There is no supported in-place upgrade;
-install a new preview in a separate directory and keep the old copy.
+A held or unreviewed decision is not assigned until a person approves it:
 
-Settings forms validate exact fields, endpoint and port constraints. Saves require
-a valid Host, matching Origin, and per-process unguessable form token. Writes are
-atomic and private (0600 on POSIX). No API key input or database reset control is
-provided. This is local preview access control, not authentication for public use.
+```bash
+python3 -S -m scripts.local approve RZ-0002 --cycle 2 --by "Your name"
+```
+
+The approval is its own record. The decision keeps its outcome, models and
+review label. The next `cycle` assigns it, and the dashboard shows the base
+label plus "approved by" the person. A ratified, rejected or unavailable
+decision cannot be approved. Neither can a closed finding, or a decision a
+newer one has superseded.
+
+A decision recorded `unavailable` (the reviewer could not be reached after its
+retries) is terminal locally. Nothing re-triages it, and it stays in the human
+queue.
+
+## Untrusted text
+
+Scanner comments and advisory prose are untrusted. Each finding's text goes to
+the guard model before triage. With no guard model configured, nothing is
+screened, so untrusted text is withheld from the models: each model sees a
+withheld notice in its place, and the structured fields.
+
+## Permissions
+
+The local permission boundary is enforced in the code by construction, not by
+the operating system: one local user owns every workspace file. Each agent's
+collections live in their own SQLite file, and each stage opens a store that
+can write only its own collections. The reporting stage cannot write tickets.
+The workspace folder is 0700 and each database file 0600 on POSIX.
+
+## Failed runs
+
+If a finding's run raises, the cycle stops, and the next `cycle` retries it.
+The failure is recorded once in `failed_runs`:
+
+| Field | Value |
+|---|---|
+| `finding_id` | The finding whose run stopped |
+| `cycle` | The cycle number |
+| `error_class` | The exception's class name only, never its message |
+| `real_ts`, `sim_ts` | When it was recorded |
+
+The dashboard lists these under "Runs that did not finish". The command line
+prints only the class name too, because a message can carry an endpoint.
+
+## Ticket delivery
+
+Delivery is dashboard-only by default: tickets, nudges and escalations are
+recorded and shown on the dashboard, and nothing leaves the machine. GitHub
+issues are opened only when both `GITHUB_TICKET_REPO` and `GITHUB_TOKEN` are set.
+
+## Enrichment cache
+
+The cache is `data/cache/` (CISA KEV, EPSS, NVD). It is read only and offline:
+the local edition never fetches it. The installer does not ship it. When a
+source is absent:
+
+- `cycle` logs `enrichment_absent` and prints a warning naming the cache path
+  and the sources that were not checked.
+- The triage prompt says the KEV status is unknown, not that the CVE is
+  absent from KEV.
+- Every risk acceptance requires `--approved-by-person`.
+
+## Interval runner
+
+With `cycle_interval_minutes` above 0 (up to 1440) in the workspace's
+`.settings.json`, the launcher runs one cycle every interval and calls your
+models. It also runs in demo mode. A run is skipped, not queued, while the
+previous one is still going. A failed run is logged by class name, and the
+runner continues. The default is 0, off.
+
+## Dashboard
+
+The dashboard shows the newest 60 decisions and failed runs, the newest 20
+scans and 10 reports, and up to 60 queue items, SLA clocks, tickets and
+exceptions. Older records stay in the workspace. Reading a page never calls a
+model.
+
+## Settings
+
+Settings stores each role's connection, the same-family policy and the startup
+preferences in `<workspace>.settings.json` beside the workspace folder. Saving
+never contacts a provider. Saves require a valid Host, a matching Origin and a
+per-process form token. Writes are atomic and private (0600 on POSIX). There is
+no API key field and no database reset control. This is local access control,
+not authentication for public use.
+
+Stop every process before copying a workspace and its settings. Do not delete
+storage to retry a failed request: rerunning a cycle reuses its checkpoints,
+and a new cycle starts a new request budget. There is no global spending cap.
+
+## Not yet built
+
+There are no real scanner connectors, no import workflow and no in-place
+upgrade. An Ayliea-hosted offering is a future direction; it would need
+authentication, tenant isolation, hosted storage, billing and audit controls,
+and none of those is implied here.

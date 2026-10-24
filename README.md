@@ -15,9 +15,10 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 ## Run the portable local edition
 
-The post-hackathon local preview includes the Ayliea-themed dashboard, Settings,
-SQLite storage, and an optional user-selected model endpoint. Python 3.12 or
-newer is required; no pip packages or Google Cloud account are needed.
+The post-hackathon local preview runs the remediation lifecycle on one machine:
+triage, review, ownership, chase, risk acceptances, rescans and reports, with
+SQLite storage and models you configure. Python 3.12 or newer is required; no
+pip packages or Google Cloud account are needed.
 
 From this repository folder:
 
@@ -31,16 +32,25 @@ The launcher opens `http://127.0.0.1:8081`. Stop with Ctrl+C; run the same comma
 to restart. Saved records and preferences remain in the installation folder,
 even when the launcher is started from another working directory.
 
-- Open **Settings** to configure a model endpoint and startup preferences.
+- Open **Settings** to configure the proposer, reviewer, summarizer and guard
+  models, and startup preferences.
 - Use `--saved` for saved records or `--demo` for illustrative examples.
 - Use `--no-browser`, `--port 8082`, or `--database /path/to/workspace-folder`
   when needed. Explicit launcher flags override saved preferences.
-- Model calls are separate, explicit operations; startup and Settings saves
-  never call a provider. API keys stay in the environment.
+- Model calls happen only in `cycle` and `check-models`
+  (`python3 -S -m scripts.local --help`), and in the optional interval runner.
+  Startup and Settings saves never call a provider. API keys stay in the
+  environment.
 
-This is a synthetic preview, not an infrastructure scanner. Local suggestions
-have no independent review. The original cloud evidence console below remains
-a separate application; these local Settings do not configure that service.
+Local review is labelled for what it is. When the reviewer's model family
+differs from the proposer's, the review is cross-family. When the families
+match, the decision is labelled "reviewed by the same model family" and, by
+default, waits for a person's approval. With no reviewer configured, the
+decision is unreviewed and waits for a person.
+
+This is a synthetic preview, not an infrastructure scanner. The original cloud
+evidence console below remains a separate application; these local Settings do
+not configure that service.
 
 ### Build and verify the downloadable installer
 
