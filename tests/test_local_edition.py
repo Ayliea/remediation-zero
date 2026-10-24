@@ -9,8 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from scripts.local import suggest
-from tools.adjudication import CapacityError, Proposal, Verdict
+from tools.adjudication import CapacityError, Verdict
 from tools.idempotency import CompletedCall, IdempotencyInProgress, derive_record
 from tools.inference_journal import InferenceJournal
 from tools.model_endpoint import ModelEndpoint
@@ -56,29 +55,6 @@ def test_outage_budget_and_rejection_survive_reopen(tmp_path):
             journal().call('review_2', Verdict, outage)
     assert len(calls) == 4
     assert journal().call('review_1', Verdict, lambda: pytest.fail('replayed model')) == rejection
-
-
-class Endpoint:
-    url = 'http://localhost:11434/v1/chat/completions'
-    model = 'test'
-    calls = 0
-
-    def propose(self, prompt, finding_id):
-        self.calls += 1
-        return Proposal(finding_id, 'medium', 14, 'Verify version first', ('synthetic evidence',), 'Exposure is unknown')
-
-
-def test_suggestion_replay_context_and_no_duplicate_record(tmp_path):
-    path = tmp_path / 'local.sqlite3'
-    endpoint = Endpoint()
-    assert suggest(SQLiteStore(path), endpoint, 1) == 'unreviewed'
-    assert suggest(SQLiteStore(path), endpoint, 1) == 'unreviewed'
-    assert endpoint.calls == 1
-    assert len(SQLiteStore(path).snapshot()['decisions']) == 1
-    endpoint.model = 'changed'
-    with pytest.raises(ValueError, match='changed'):
-        suggest(SQLiteStore(path), endpoint, 1)
-    assert endpoint.calls == 1
 
 
 @pytest.mark.parametrize('url', ['http://example.com/v1', 'https://user:pass@example.com/v1',

@@ -51,21 +51,29 @@ available at that endpoint. Example for a locally installed model server:
 ```bash
 export RZ_MODEL_ENDPOINT=http://localhost:11434/v1/chat/completions
 export RZ_MODEL=your-installed-model-name
-python3 -m scripts.local suggest-demo --cycle 1
-python3 -m scripts.local serve
+python3 -S -m scripts.local check-models
+python3 -S -m scripts.local cycle --cycle 1
+python3 -S -m scripts.local serve
 ```
+
+The commands (`--database DIR` names the workspace folder; the default is
+`remediation-zero`): `init`, `seed`, `cycle --cycle N`, `rescan --cycle N
+--scan PATH [--dry-run]`, `exception accept|list`, `approve FINDING --cycle N
+[--by NAME]`, `serve` and `check-models`. A folder from an earlier version that
+held a single database file is refused, not converted; choose a new folder.
 
 For a hosted endpoint use HTTPS and, if needed, set RZ_MODEL_API_KEY through
 your shell's secret-management mechanism. Credentials are never saved in SQLite.
-The endpoint must return plain JSON in message.content matching the schema in
-prompts/local_suggestion_v1.txt. Compatibility varies; no real provider was
+Compatibility varies; no real provider was
 called during validation. Redirects and inherited proxies are disabled. HTTP is
 allowed only on loopback. Responses are capped at 64 KiB, output at 2048 tokens,
 input at 32 KiB, and each request has a 60-second socket timeout (not an absolute
 wall-time deadline for a streaming malicious server).
 
-Only suggest-demo invokes a model. It sends the bundled synthetic example;
-hosted endpoints can charge for this explicit action. It uses four durable
+Only `cycle` and `check-models` invoke a model; hosted endpoints can charge
+for them. `check-models` sends the bundled synthetic example. A decision that is
+unreviewed or held for a same-family review waits for a person: `approve` records
+that person's approval, and the next `cycle` assigns it. It uses four durable
 request slots per cycle, backoff, and the existing 600-second claim lease. A
 crashed request consumes a slot. Rerunning the same cycle reuses its checkpoint;
 changing endpoint/model/prompt in that cycle is rejected. A new cycle deliberately
@@ -100,7 +108,7 @@ Open **Settings** in the local dashboard. Model connection stores the endpoint
 and model in a `.settings.json` file beside the selected database. API keys stay
 in `RZ_MODEL_API_KEY`; never paste a key into an endpoint URL. Environment
 `RZ_MODEL_ENDPOINT` and `RZ_MODEL` values override saved preferences when running
-`suggest-demo`. Saving never contacts a provider. Optional sample checks remain
+`cycle` or `check-models`. Saving never contacts a provider. Optional sample checks remain
 explicit CLI operations and may cost money; the dashboard has no model test button.
 
 Application preferences set the installed launcher's default demo/saved mode,

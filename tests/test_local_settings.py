@@ -194,12 +194,17 @@ def test_cli_uses_saved_connection_with_environment_precedence(tmp_path, monkeyp
     monkeypatch.delenv('RZ_MODEL_ENDPOINT', raising=False)
     monkeypatch.delenv('RZ_MODEL', raising=False)
     monkeypatch.setenv('RZ_MODEL_API_KEY', 'environment-only-secret')
-    monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'suggest-demo'])
+    # suggest-demo is retired; the cycle command now builds the proposer the same way.
+    monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'cycle', '--cycle', '1'])
+    import tools.model_roles as model_roles
+    monkeypatch.setattr(model_roles, 'build_adapter', lambda fmt, url, model, key: SimpleNamespace(
+        url=url, model=model, api_key=key))
     seen = []
-    def inspect_endpoint(store, endpoint, cycle):
+    def inspect_endpoint(ws, cycle, *, roles):
+        endpoint = roles.adapter('proposer')
         seen.append((endpoint.url, endpoint.model, endpoint.api_key))
-        return 'unreviewed'
-    monkeypatch.setattr(local, 'suggest', inspect_endpoint)
+        return {}
+    monkeypatch.setattr(local, 'run_local_cycle', inspect_endpoint)
     local.main()
     assert seen[-1] == ('http://localhost:11434/v1/chat/completions', 'saved-model', 'environment-only-secret')
     monkeypatch.setenv('RZ_MODEL', 'override-model')

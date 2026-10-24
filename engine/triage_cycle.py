@@ -256,32 +256,51 @@ def assign_if_ratified(ports: Ports, adjudication: Adjudication, cycle: int, *,
                        finding: Optional[dict] = None, assets: Optional[dict] = None,
                        owners: Optional[dict] = None,
                        assigner: Optional[AssignmentWriter] = None,
+                       approval: Optional[dict] = None,
                        ) -> Optional[tuple[str, Assignment]]:
     """(assignment_id, assignment) for a ratified decision, else None.
 
     Only a ratified decision proceeds to ownership. A finding in the human
     queue is waiting on a person, and assigning it would start an SLA clock
     against a decision nobody has made yet.
+
+    The one other way through is a person's approval (`approval`, the local
+    edition's `approvals/<decision_id>` record) of an unreviewed or held
+    decision. The decision itself is not changed: its outcome, models and
+    review independence stay exactly as recorded, and the approval is a
+    separate record. The cloud path never passes one.
     """
+    decision_id = f"{adjudication.finding_id}-c{cycle:03d}"
+    if approval is not None and approval.get("decision_id") != decision_id:
+        approval = None
     if adjudication.outcome.value == "ratified":
-        if owners is None:
-            owners = {o["owner_id"]: o for o in
-                      (d.to_dict() for d in ports.docs.collection("owners").stream())}
-        if assets is None:
-            assets = {a["asset_id"]: a for a in
-                      (d.to_dict() for d in ports.docs.collection("assets").stream())}
-        if finding is None:
-            finding = ports.docs.collection("findings").document(
-                adjudication.finding_id).get().to_dict()
-        if assigner is None:
-            assigner = AssignmentWriter(store=ports.journal, client=ports.docs,
-                                        clock=ports.clock)
-        assignment = resolve_owner(finding, assets, owners)
-        assignment_id = assigner.record(
-            assignment, cycle=cycle,
-            sla_days=adjudication.proposal.sla_days if adjudication.proposal else None)
-        return assignment_id, assignment
+        return _assign(ports, adjudication, cycle, finding, assets, owners, assigner)
+    elif approval is not None and adjudication.outcome.value in ("unreviewed", "held_for_approval"):
+        _log("approved_by_person", f"cycle-{cycle:03d}", adjudication.finding_id,
+             decision_id=decision_id, outcome=adjudication.outcome.value,
+             review_independence=adjudication.review_independence)
+        return _assign(ports, adjudication, cycle, finding, assets, owners, assigner)
     return None
+
+
+def _assign(ports, adjudication, cycle, finding, assets, owners, assigner):
+    if owners is None:
+        owners = {o["owner_id"]: o for o in
+                  (d.to_dict() for d in ports.docs.collection("owners").stream())}
+    if assets is None:
+        assets = {a["asset_id"]: a for a in
+                  (d.to_dict() for d in ports.docs.collection("assets").stream())}
+    if finding is None:
+        finding = ports.docs.collection("findings").document(
+            adjudication.finding_id).get().to_dict()
+    if assigner is None:
+        assigner = AssignmentWriter(store=ports.journal, client=ports.docs,
+                                    clock=ports.clock)
+    assignment = resolve_owner(finding, assets, owners)
+    assignment_id = assigner.record(
+        assignment, cycle=cycle,
+        sla_days=adjudication.proposal.sla_days if adjudication.proposal else None)
+    return assignment_id, assignment
 
 
 def close_cycle(ports: Ports, cycle: int, outcomes: dict, *, finding_ids: list,

@@ -145,7 +145,7 @@ python3 -m venv .venv
 
 # local edition (no pip packages, no cloud account)
 python3 -S start-remediation-zero.py          # launcher; opens http://127.0.0.1:8081
-python3 -S -m scripts.local --help            # init | serve | suggest-demo | check-models
+python3 -S -m scripts.local --help            # init | seed | cycle | rescan | exception | approve | serve | check-models
 python3 -S -m scripts.build_local_installer /abs/path/install-remediation-zero.py
 python3 -S -m scripts.verify_local_install
 

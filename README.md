@@ -33,7 +33,7 @@ even when the launcher is started from another working directory.
 
 - Open **Settings** to configure a model endpoint and startup preferences.
 - Use `--saved` for saved records or `--demo` for illustrative examples.
-- Use `--no-browser`, `--port 8082`, or `--database /path/to/workspace.sqlite3`
+- Use `--no-browser`, `--port 8082`, or `--database /path/to/workspace-folder`
   when needed. Explicit launcher flags override saved preferences.
 - Model calls are separate, explicit operations; startup and Settings saves
   never call a provider. API keys stay in the environment.
