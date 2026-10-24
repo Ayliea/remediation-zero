@@ -44,10 +44,12 @@ def demo_snapshot():
                  "proposed_severity": "high", "cycle": 1,
                  "rationale": "An outdated component on the example website needs attention.",
                  "proposed_remediation": "Ask your hosting provider to update the affected component, then request a new scan.",
-                 "cited_evidence": ["Illustrative scanner finding; not a real assessment."]},
+                 "cited_evidence": ["Illustrative scanner finding; not a real assessment."],
+                 "screening": {"screened": True, "blocked": False}},
                 {"finding_id": "DEMO-SERVER-02", "outcome": "unavailable",
                  "proposed_severity": "medium", "cycle": 1,
-                 "note": "The independent review could not finish."}]}
+                 "note": "The independent review could not finish.",
+                 "screening": {"screened": False, "blocked": True}}]}
 
 
 def recent_decisions(data):
