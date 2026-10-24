@@ -10,7 +10,7 @@ import json
 
 from tools.enrichment import Enrichment
 from tools.guardrail import GuardModelScreen
-from tools.inference import propose, render_finding, review
+from tools.inference import parse_review_strict, propose, render_finding, review
 from tools.model_roles import ROLES
 
 SAMPLE_FINDING = {'finding_id': 'DEMO-WEB-01', 'cve_id': 'CVE-2021-44228', 'scanner_severity': 'high',
@@ -26,6 +26,18 @@ SAMPLE_METRICS = {'period': 'demo', 'open_findings': 3, 'closed_findings': 1, 'o
 SAMPLE_GUARD_TEXT = 'The web server reports an outdated component version on port 8080.'
 
 
+class _Recorder:
+    """Passes calls through and keeps the last raw reply."""
+
+    def __init__(self, adapter):
+        self._adapter = adapter
+        self.reply = None
+
+    def complete(self, *args, **kwargs):
+        self.reply = self._adapter.complete(*args, **kwargs)
+        return self.reply
+
+
 def _finding_text():
     return render_finding(SAMPLE_FINDING, SAMPLE_ASSET, Enrichment(cve_id=SAMPLE_FINDING['cve_id']))
 
@@ -36,7 +48,10 @@ def _run(role, adapter):
         propose(_finding_text(), adapter, finding_id='DEMO-WEB-01', retry=False)
         return None
     if role == 'reviewer':
-        review(_finding_text() + '\n\nPROPOSAL\n' + json.dumps(SAMPLE_PROPOSAL, sort_keys=True), adapter, retry=False)
+        recorder = _Recorder(adapter)
+        review(_finding_text() + '\n\nPROPOSAL\n' + json.dumps(SAMPLE_PROPOSAL, sort_keys=True), recorder, retry=False)
+        # review() fails closed to a rejecting Verdict on any reply; ok means the reply matched the format.
+        parse_review_strict(recorder.reply or '')
         return None
     if role == 'summarizer':
         from tools.reports import write_summary  # lazy: pulls in Firestore until it is made optional

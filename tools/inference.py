@@ -300,12 +300,19 @@ REVIEW_PATTERN = re.compile(
 
 def parse_review_text(text: str) -> Verdict:
     """Parse exactly one complete reviewer record and fail closed."""
+    try:
+        return parse_review_strict(text)
+    except ValueError as exc:
+        return Verdict(ratified=False, reason=str(exc))
+
+
+def parse_review_strict(text: str) -> Verdict:
+    """Parse one reviewer record, raising ValueError when it does not match the format."""
     clean = _strip_fences(text.strip())
     matched = REVIEW_PATTERN.fullmatch(clean)
     if not matched:
-        return Verdict(
-            ratified=False,
-            reason=f"Reviewer response did not match the required three-line format: {clean[:300]}",
+        raise ValueError(
+            f"Reviewer response did not match the required three-line format: {clean[:300]}"
         )
 
     injection = _strip_fences(matched.group("injection").strip())

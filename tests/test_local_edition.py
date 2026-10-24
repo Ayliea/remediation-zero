@@ -150,6 +150,8 @@ def test_check_models_reports_each_role(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ModelRoles, 'adapter', lambda self, role, **kw: _Adapter(replies[role]))
     monkeypatch.setitem(sys.modules, 'tools.reports', types.SimpleNamespace(write_summary=lambda m, a: a.complete('', '')))
     before = sorted(p.name for p in tmp_path.iterdir())
+    settings_file = local_settings.settings_path(database)
+    settings_before = settings_file.read_bytes()
     monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'check-models'])
     with pytest.raises(SystemExit) as stop:
         local.main()
@@ -158,6 +160,7 @@ def test_check_models_reports_each_role(tmp_path, monkeypatch, capsys):
     assert out == ['proposer: ok', 'reviewer: failed (CapacityError)', 'summarizer: ok', 'guard: not configured']
     assert 'secret.invalid' not in ''.join(out)
     assert sorted(p.name for p in tmp_path.iterdir()) == before  # nothing written, no database created
+    assert settings_file.read_bytes() == settings_before
 
 
 def test_check_models_guard_outcomes_and_role_filter(monkeypatch):
@@ -174,3 +177,41 @@ def test_check_models_guard_outcomes_and_role_filter(monkeypatch):
     lines.clear()
     assert check_models(roles, 'reviewer', out=lines.append) == 0
     assert lines == ['reviewer: not configured']
+
+
+@pytest.mark.parametrize('reply', ['<html>502</html>', ''])
+def test_check_models_reviewer_garbage_fails(reply, monkeypatch):
+    from tools.model_check import check_models
+    roles, lines = _roles(reviewer=1), []
+    monkeypatch.setattr(type(roles), 'adapter', lambda self, role, **kw: _Adapter(reply))
+    assert check_models(roles, 'reviewer', out=lines.append) == 1
+    assert lines == ['reviewer: failed (ValueError)']
+
+
+def test_check_models_reviewer_valid_reply_ok(monkeypatch):
+    from tools.model_check import check_models
+    roles, lines = _roles(reviewer=1), []
+    reply = 'INJECTION: none\nVERDICT: REJECT\nREASON: Evidence is thin.'
+    monkeypatch.setattr(type(roles), 'adapter', lambda self, role, **kw: _Adapter(reply))
+    assert check_models(roles, 'reviewer', out=lines.append) == 0
+    assert lines == ['reviewer: ok']
+
+
+@pytest.mark.parametrize('reply', ['<html>502</html>', '', 'not json at all'])
+def test_check_models_proposer_garbage_fails(reply, monkeypatch):
+    from tools.model_check import check_models
+    roles, lines = _roles(proposer=1), []
+    monkeypatch.setattr(type(roles), 'adapter', lambda self, role, **kw: _Adapter(reply))
+    assert check_models(roles, 'proposer', out=lines.append) == 1
+    assert lines == ['proposer: failed (ValueError)']
+
+
+def test_parse_review_text_fallback_unchanged():
+    from tools.inference import parse_review_strict, parse_review_text
+    verdict = parse_review_text('<html>502</html>')
+    assert verdict.ratified is False
+    assert verdict.reason == 'Reviewer response did not match the required three-line format: <html>502</html>'
+    with pytest.raises(ValueError, match='did not match the required three-line format'):
+        parse_review_strict('<html>502</html>')
+    good = 'INJECTION: none\nVERDICT: RATIFY\nREASON: Supported.'
+    assert parse_review_text(good) == parse_review_strict(good) == Verdict(ratified=True, reason='Supported.')

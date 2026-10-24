@@ -316,3 +316,43 @@ def test_saving_makes_no_model_call(app):
     _, request = app
     fields = model_form(_token(request), reviewer_endpoint=LOCAL, reviewer_model='m')
     assert request('POST', '/settings', fields)[0] == 303
+
+
+def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch):
+    from urllib.parse import urlencode as encode
+    from scripts import local
+    path, request = app
+    token = _token(request)
+    valid = list(model_form(token).items())
+    pairs = valid + valid[:2]  # only valid field names, 21 pairs in all
+    assert len(pairs) == 21 and {k for k, _ in pairs} == {k for k, _ in valid}
+    seen = []
+    real = local.parse_qs
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get('max_num_fields'))
+        try:
+            return real(*args, **kwargs)
+        except ValueError:
+            seen.append('limit-raised')
+            raise
+    monkeypatch.setattr(local, 'parse_qs', spy)
+    assert request('POST', '/settings', pairs)[0] == 400
+    assert seen[-2:] == [20, 'limit-raised']
+    assert not path.exists()
+
+
+def test_endpoint_is_escaped_in_the_page(app):
+    path, request = app
+    value = copy.deepcopy(config.DEFAULTS)
+    value['roles']['proposer'] = proposer()
+    value['roles']['proposer']['endpoint'] = 'http://localhost:11434/v1/a"onfocus="x<b>'
+    path.write_text(json.dumps(value))
+    body = request()[1]
+    assert 'a"onfocus="x<b>' not in body
+    assert 'a&quot;onfocus=&quot;x&lt;b&gt;' in body
+
+
+def test_proposer_key_hint_names_the_fallback(app):
+    body = app[1]()[1]
+    assert 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' in body
+    assert 'Set RZ_REVIEWER_API_KEY before' in body

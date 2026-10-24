@@ -19,6 +19,7 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
     def form(contents):
         return f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}"><input type="hidden" name="section" value="{section}">{contents}<div class="row"><button type="submit">Save preferences</button><a href="/?view=settings&amp;section={section}">Cancel</a></div></form>'
     keys = keys or {}
+    key_hint = lambda r: 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' if r == 'proposer' else f'RZ_{r.upper()}_API_KEY'
     if section == 'model':
         body = '<h2>Your models, your choice</h2><p>Each role can use a local or hosted model. Hosted endpoints require HTTPS. Leave a role\'s endpoint and model blank to leave it not configured. Saving makes no model calls.</p>'
         blocks = ''
@@ -32,7 +33,7 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
                        f'<label>Endpoint URL<input name="{role}_endpoint" type="url" maxlength="2048" value="{e(cfg["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label>'
                        f'<label>Model name<input name="{role}_model" maxlength="200" value="{e(cfg["model"])}"></label>'
                        f'<label>Model family<select name="{role}_family">{fam}</select></label>'
-                       f'<p>Environment key: {"present" if keys.get(role) else "not set"}. Keys are never displayed or saved here. Set RZ_{role.upper()}_API_KEY before starting the app.</p></fieldset>')
+                       f'<p>Environment key: {"present" if keys.get(role) else "not set"}. Keys are never displayed or saved here. Set {key_hint(role)} before starting the app.</p></fieldset>')
         policy = values['same_family_policy']
         blocks += ('<fieldset class="role-block"><legend>Same-family reviews</legend>'
                    '<label>Same-family reviews<select name="same_family_policy">'
