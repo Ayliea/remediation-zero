@@ -116,6 +116,8 @@ def build_handlers(clients: dict) -> dict:
         finding, enrichment, verdict = screen_finding(
             ports, finding, cycle, cache.enrich(finding.get("cve_id", "")))
 
+        # Not the model input (triage_and_review re-renders from the screened
+        # fields); kept because the guard tests read it.
         scratch["rendered"] = rm.render_finding(finding, asset, enrichment)
         scratch["finding"] = finding
         scratch["asset"] = asset

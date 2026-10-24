@@ -100,6 +100,8 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
     # for. Re-running a cycle should cost nothing, so the completed-call
     # record is checked here too.
     restored = writer.restore(finding_id, cycle)
+    # Kept so the cloud read pattern is identical; its action= literal is the
+    # anchor tests/test_cycle_script.py checks against the writer's key.
     already = ports.journal.get(
         derive_key(finding_id=finding_id, action="decision", cycle=cycle)
     )

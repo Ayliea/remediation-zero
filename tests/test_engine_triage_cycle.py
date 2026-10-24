@@ -54,12 +54,13 @@ class FakeRoles(ModelRoles):
         return self._fakes[role]
 
 
-def roles_with(proposer=None, reviewer=None):
+def roles_with(proposer=None, reviewer=None, *, reviewer_family="claude"):
     endpoint = "http://127.0.0.1:9/v1"
     roles = FakeRoles(
         proposer=RoleConfig("proposer", "openai_chat", endpoint, "gpt-test", "gpt")
         if proposer is not None else None,
-        reviewer=RoleConfig("reviewer", "openai_chat", endpoint, "claude-test", "claude")
+        reviewer=RoleConfig("reviewer", "openai_chat", endpoint, "reviewer-test",
+                            reviewer_family)
         if reviewer is not None else None)
     object.__setattr__(roles, "_fakes", {"proposer": proposer, "reviewer": reviewer})
     object.__setattr__(roles, "_built", [])
@@ -177,6 +178,54 @@ def test_unreviewed_finding_goes_to_queue_not_assigned(ws):
     assert list(state["human_queue"]) == ["unreviewed-RZ-0001-c001"]
     assert state["assignments"] == {} and state["sla_clocks"] == {}
     assert roles._built == ["proposer"], "no reviewer adapter is built for an unreviewed role set"
+
+
+def test_same_family_hold_goes_to_queue_not_assigned(ws):
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    roles = roles_with(proposer, reviewer, reviewer_family="gpt")
+    assert roles.same_family_policy == "wait"
+
+    record = run(ports_for(ws, roles))
+
+    assert record["outcomes"] == {"held_for_approval": 1}
+    state = everything(ws)
+    assert state["decisions"]["RZ-0001-c001"][0]["review_independence"] == "same_family"
+    assert list(state["human_queue"]) == ["held-RZ-0001-c001"]
+    assert state["human_queue"]["held-RZ-0001-c001"][0]["kind"] == "same_family_review"
+    assert state["assignments"] == {} and state["sla_clocks"] == {}
+
+
+def test_resume_reconciles_missing_assignment(ws, monkeypatch, caplog):
+    """A crash between the decision write and the assignment write."""
+    from tools.assignments import AssignmentWriter
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    roles = roles_with(proposer, reviewer)
+    original = AssignmentWriter.record
+
+    def crash(*_, **__):
+        raise ConnectionError("interrupted before assignment")
+    monkeypatch.setattr(AssignmentWriter, "record", crash)
+    with pytest.raises(ConnectionError):
+        run(ports_for(ws, roles))
+    state = everything(ws)
+    assert state["decisions"]["RZ-0001-c001"][0]["outcome"] == "ratified"
+    assert state["assignments"] == {}
+    monkeypatch.setattr(AssignmentWriter, "record", original)
+    calls = (len(proposer.calls), len(reviewer.calls))
+    caplog.set_level(logging.INFO, logger="remediation_zero.cycle")
+
+    record = run(ports_for(ws, roles))
+
+    assert record["outcomes"] == {"skipped": 1}
+    state = everything(ws)
+    assert list(state["decisions"]) == ["RZ-0001-c001"]
+    assert state["assignments"]["RZ-0001-c001"][0]["owner_id"] == "own-01"
+    assert state["sla_clocks"][FINDING_ID][0]["sla_days"] == 7
+    assert (len(proposer.calls), len(reviewer.calls)) == calls == (1, 1)
+    events = [json.loads(r.getMessage())["event"] for r in caplog.records
+              if r.name == "remediation_zero.cycle"]
+    assert "assignment_reconciled" in events
+    assert events.index("assignment_reconciled") < events.index("skipped_already_adjudicated")
 
 
 def test_rerun_same_cycle_writes_nothing_new(ws):
