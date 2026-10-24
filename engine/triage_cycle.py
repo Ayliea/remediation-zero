@@ -396,7 +396,8 @@ def close_cycle(ports: Ports, cycle: int, outcomes: dict, *, finding_ids: list,
     # Not on a re-run. A second recollection of a cycle that adjudicated
     # nothing would sit alongside the first and describe the same cycle as
     # having done nothing, which is the kind of memory that is worse than none.
-    if not prior:
+    # No memory port (an edition that keeps none): nothing to file.
+    if not prior and ports.memory is not None:
         filed = ports.memory.remember_cycle(
             cycle_id=cycle_id, counts=dict(outcomes),
             real_ts=finished.real_ts, sim_ts=finished.sim_ts,

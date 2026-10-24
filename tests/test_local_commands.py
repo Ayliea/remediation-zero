@@ -163,6 +163,47 @@ def test_local_cycle_without_a_proposer_refuses_before_any_write(tmp_path, capsy
     assert not root.exists()
 
 
+def test_failed_triage_still_runs_chase_sweep_and_report(ws, monkeypatch, capsys):
+    """A finding whose run raises must not stop the rest of the lifecycle."""
+    from scripts import local
+    seeder = ws.docs_for("seed")
+    # A malformed reference record (no CVE) stops the second finding's triage.
+    seeder.collection("findings").document("RZ-0002").set({
+        "finding_id": "RZ-0002", "asset_id": "ast-01", "status": "open"})
+    seeder.close()
+    ran = []
+    for name in ("run_chase", "run_sweep", "run_report"):
+        real = getattr(local, name)
+        monkeypatch.setattr(local, name, lambda *a, _real=real, _name=name, **k:
+                            ran.append(_name) or _real(*a, **k))
+
+    with pytest.raises(KeyError):
+        local.run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+
+    assert ran == ["run_chase", "run_sweep", "run_report"]
+    # RZ-0001 was ratified before RZ-0002 raised, and chase opened its ticket.
+    assert docs(ws, "decisions")[f"{FINDING_ID}-c001"]["outcome"] == "ratified"
+    assert FINDING_ID in docs(ws, "tickets")
+    assert "report-c001" in docs(ws, "reports")
+    assert [r["finding_id"] for r in docs(ws, "failed_runs").values()] == ["RZ-0002"]
+
+    # A later stage failing too never hides the triage failure.
+    monkeypatch.setattr(local, "run_sweep",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sweep down")))
+    with pytest.raises(KeyError):
+        local.run_local_cycle(ws, 2, roles=cross_family(), clock=clock(), environ={})
+
+    # The command line still exits 1 with the triage error's class only.
+    monkeypatch.setattr(local, "run_local_cycle",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyError("cve_id")))
+    monkeypatch.setattr(local.ModelRoles, "from_settings", lambda *_a: cross_family())
+    monkeypatch.setattr("sys.argv", ["local", "--database", str(ws.root), "cycle", "--cycle", "2"])
+    with pytest.raises(SystemExit) as stop:
+        local.main()
+    assert stop.value.code == 1
+    assert "The cycle stopped (KeyError)" in capsys.readouterr().err
+
+
 def test_local_chase_dashboard_only_without_github_env(ws, monkeypatch):
     from engine.ports import NoDelivery
     from scripts import local

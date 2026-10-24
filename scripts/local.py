@@ -160,18 +160,33 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
             _log('enrichment_absent', f'cycle-{cycle:03d}', sources=missing)
             print(f'warning: enrichment cache not found at {enrichment_module.DEFAULT_CACHE_DIR}: '
                   f'{", ".join(missing)} were not checked', file=sys.stderr, flush=True)
-        record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs),
-                                  enrichment=enrichment)
+        # A finding that raises stops triage, not the lifecycle: chase, the
+        # sweep and the report read only what is stored, so they still run,
+        # and the triage error is raised afterwards (exit 1, class only).
+        triage_error = None
+        try:
+            record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs),
+                                      enrichment=enrichment)
+        except Exception as exc:  # noqa: BLE001 - re-raised below, after the other stages
+            triage_error = exc
 
         day = cycle_for_day(clock.now().real_ts)
-        chase_docs = docs_for('chase')
-        chased = run_chase(_ports(chase_docs, journal, clock,
-                                  delivery=chase_delivery(chase_docs, environ)), day)
-        swept = run_sweep(_ports(docs_for('sweep'), journal, clock), day)
-        run_report(_ports(docs_for('report'), journal, clock, roles=roles), cycle)
+        try:
+            chase_docs = docs_for('chase')
+            chased = run_chase(_ports(chase_docs, journal, clock,
+                                      delivery=chase_delivery(chase_docs, environ)), day)
+            swept = run_sweep(_ports(docs_for('sweep'), journal, clock), day)
+            run_report(_ports(docs_for('report'), journal, clock, roles=roles), cycle)
+        except Exception:
+            # The triage failure is the first cause; never let a later one hide it.
+            if triage_error is not None:
+                raise triage_error
+            raise
     finally:
         for store in stores:
             store.close()
+    if triage_error is not None:
+        raise triage_error
     return {'cycle': record['cycle_id'], 'outcomes': record['outcomes'], 'approved': approved,
             'chase_cycle': day, 'chase': chased, 'sweep': swept}
 

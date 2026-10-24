@@ -167,8 +167,11 @@ The workspace folder is 0700 and each database file 0600 on POSIX.
 
 ## Failed runs
 
-If a finding's run raises, the cycle stops, and the next `cycle` retries it.
-The failure is recorded once in `failed_runs`:
+If a finding's run raises, triage stops there, and the next `cycle` retries
+it. Chase, the exception sweep and the report still run for that cycle,
+because they read only what is already stored. The command then exits 1
+with the triage error's class name. The failure is recorded once in
+`failed_runs`:
 
 | Field | Value |
 |---|---|

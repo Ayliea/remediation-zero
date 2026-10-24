@@ -213,6 +213,21 @@ def test_same_family_hold_goes_to_queue_not_assigned(ws):
     assert state["assignments"] == {} and state["sla_clocks"] == {}
 
 
+def test_cycle_without_memory_skips_remembering(ws, caplog):
+    from dataclasses import replace
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    caplog.set_level(logging.INFO, logger="remediation_zero.cycle")
+    ports = replace(ports_for(ws, roles_with(proposer, reviewer)), memory=None)
+
+    record = run(ports)
+
+    assert record["outcomes"] == {"ratified": 1}
+    assert everything(ws)["memories"] == {}
+    events = [json.loads(r.getMessage())["event"] for r in caplog.records
+              if r.name == "remediation_zero.cycle"]
+    assert "cycle_remembered" not in events and events[-1] == "cycle_finished"
+
+
 def test_same_family_proceed_is_named_in_outcomes_and_memory(ws):
     proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
     roles = roles_with(proposer, reviewer, reviewer_family="gpt")
