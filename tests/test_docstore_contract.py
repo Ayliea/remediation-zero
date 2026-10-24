@@ -597,6 +597,46 @@ def test_sqlite_batch_cannot_commit_twice(tmp_path):
         store.close()
 
 
+def test_mixed_file_readonly_collection_still_refused(tmp_path):
+    """Ruling 18: beta shares a read-write file with alpha, so only the
+    PermissionError guards it. Every write path must still raise it."""
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    shared = tmp_path / "references.sqlite3"
+    files = {"alpha": shared, "beta": shared}
+    seed = SQLiteDocStore(files)
+    seed.collection("beta").document("ref").set({"v": 1})
+    seed.close()
+
+    store = SQLiteDocStore(files, writable=frozenset({"alpha"}))
+    try:
+        message = "^beta is read-only for this agent$"
+        ref = store.collection("beta").document("ref")
+        other = store.collection("beta").document("new")
+        writes = [
+            lambda: ref.create({"v": 2}),
+            lambda: other.create({"v": 2}),
+            lambda: ref.set({"v": 2}),
+            lambda: ref.set({"v": 2}, merge=True),
+            lambda: ref.update({"v": 2}),
+            ref.delete,
+            lambda: store.batch().create(other, {"v": 2}),
+            lambda: store.batch().set(ref, {"v": 2}),
+            lambda: store.batch().set(ref, {"v": 2}, merge=True),
+            lambda: store.batch().update(ref, {"v": 2}),
+            lambda: store.batch().delete(ref),
+        ]
+        for write in writes:
+            with pytest.raises(PermissionError, match=message):
+                write()
+        store.collection("alpha").document("ok").set({"v": 1})
+        assert [(r.id, r.to_dict()) for r in store.collection("beta").stream()] == [
+            ("ref", {"v": 1})]
+        assert ref.get().update_time == 1
+    finally:
+        store.close()
+
+
 def test_sqlite_docstore_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.sqlite_docstore"],
                    cwd=ROOT, check=True)

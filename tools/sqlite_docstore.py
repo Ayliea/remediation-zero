@@ -3,8 +3,9 @@
 # you may not use this file except in compliance with the License.
 """The neutral document store on SQLite, for the local edition.
 
-Two connections per store: a write connection over the files holding a
-writable collection, and a read connection over the rest. Each distinct
+Up to two connections per store: a write connection over the files holding a
+writable collection, and a read connection over the rest; a store with no
+files of one kind opens no connection for it. Each distinct
 database file is attached to one of them under a generated schema alias
 (`main`, `f1`, `f2`, ...; never a collection name), and each file holds one
 table:
@@ -24,14 +25,20 @@ crash with a rollback journal and a real file as `main`, so `main` is the first
 writable file. `busy_timeout=10000` lets a second writer wait for the first
 instead of failing with `database is locked`.
 
-Scoping (CLAUDE.md hard constraint 4): files holding no writable collection are
-attached `mode=ro` to the read connection, so SQLite itself refuses writes to them, and a write
-addressed to any collection outside `writable` raises `PermissionError` before
-any SQL runs.
+Scoping (CLAUDE.md hard constraint 4): a write addressed to any collection
+outside `writable` raises `PermissionError` before any SQL runs. A collection
+in a file that holds only read-only collections is refused twice: by that
+`PermissionError`, and by SQLite itself, because the file is attached
+`mode=ro` to the read connection. A read-only collection that shares a file
+with a writable one is guarded by the `PermissionError` alone, because that
+file is attached read-write. In the local layout that happens only in the
+references file (findings, assets, owners, scans, approvals), which is written
+by the seed, rescan and approve scripts and never by an agent. Agent files are
+never mixed (Ruling 18).
 
 `revision` counts writes to one document: 1 when a create, or a set that
-creates the document, writes it, then the previous value + 1 on every set or
-update, computed inside the write transaction. A delete removes the row, so a
+creates the document, first writes it, then the previous value + 1 on every set
+or update, computed inside the write transaction. A delete removes the row, so a
 later create starts at 1 again. It is surfaced as `Snapshot.update_time`, the
 name the protocol mirrors from Firestore, but here it is an opaque concurrency
 token, not a time. It is never shown and never used for a lifecycle decision;
