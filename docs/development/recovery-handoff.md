@@ -138,8 +138,10 @@ This discovery preceded the dashboard implementation below.
 
 ## Small-business owner dashboard
 
-ui/dashboard.py is a separate read-only FastAPI application. The existing
-ui/app.py console is unchanged. Overview, My infrastructure, Action list and
+The dashboard is mounted in the read-only console at `/dashboard`, sharing
+its snapshot cache, security headers and viewer-only service account. The
+console page at `/` is unchanged. Rendering lives in ui/dashboard_view.py,
+which the local SQLite edition also uses. Overview, My infrastructure, Action list and
 Activity reuse the existing snapshot shape. Recommendations are deduplicated
 within the latest 60 decisions and sorted by recorded severity; they are not
 represented as a complete open backlog. Unapproved proposals are withheld from
@@ -148,7 +150,8 @@ next-step instructions. Evidence and prior reviews remain expandable.
 Run locally with synthetic fixtures (no cloud reads):
 
 ```bash
-RZ_DASHBOARD_DEMO=1 .venv/bin/uvicorn ui.dashboard:app --host 127.0.0.1 --port 8081
+RZ_DASHBOARD_DEMO=1 .venv/bin/uvicorn ui.app:app --host 127.0.0.1 --port 8081
+# then open http://127.0.0.1:8081/dashboard
 ```
 
 The application labels the environment synthetic, escapes record text, has no

@@ -30,6 +30,8 @@ service account is read-only by construction, which is the point: the interface
 a stranger can reach must not be able to change the record it displays.
 """
 
+import json
+import logging
 import os
 from hashlib import sha256
 from datetime import datetime, timezone
@@ -42,10 +44,14 @@ from fastapi.responses import HTMLResponse, Response
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from ui.dashboard_view import VIEWS as DASHBOARD_VIEWS, demo_snapshot
+from ui.dashboard_view import render as render_dashboard
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(REPO_ROOT / ".env")
 
-app = FastAPI(title="Remediation Zero", docs_url=None, redoc_url=None)
+app = FastAPI(title="Remediation Zero", docs_url=None, redoc_url=None, openapi_url=None)
+logger = logging.getLogger("remediation_zero.console")
 
 SESSION_CREATED = float(os.environ.get("SESSION_CREATED_REAL_TS", "0") or 0)
 SESSION_ID = os.environ.get("ORCHESTRATOR_SESSION_ID", "unknown")
@@ -707,3 +713,44 @@ def index(request: Request):
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
     return HTMLResponse(body, headers=headers)
+
+
+# --- owner dashboard ----------------------------------------------------------
+# A plain-language view over the same snapshot, mounted here so it shares the
+# console's cache, headers and read-only service account. Rendering lives in
+# ui/dashboard_view.py, which the local SQLite edition also uses.
+
+DASHBOARD_LOGO = REPO_ROOT / "ui" / "assets" / "remediation-zero-logo.png"
+
+
+@app.get("/dashboard/logo.png")
+def dashboard_logo():
+    return Response(content=DASHBOARD_LOGO.read_bytes(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+def dashboard_unavailable(exc: Exception, view: str) -> HTMLResponse:
+    """The snapshot could not be read. Never render this as an empty success."""
+    # The class name only: str(exc) can carry a project path or query detail,
+    # and the page itself must say nothing beyond "unknown".
+    logger.warning(json.dumps({"event": "dashboard_snapshot_failed",
+                               "error": type(exc).__name__, "view": view},
+                              sort_keys=True))
+    page = render_dashboard({}, view, unavailable=True, base="/dashboard",
+                            logo_url="/dashboard/logo.png")
+    return HTMLResponse(page, status_code=503, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard(request: Request):
+    view = request.query_params.get("view", "overview")
+    if view not in DASHBOARD_VIEWS:
+        return HTMLResponse("View not found", status_code=404)
+    demo = os.environ.get("RZ_DASHBOARD_DEMO") == "1"
+    try:
+        data = demo_snapshot() if demo else cached_snapshot()
+    except Exception as exc:
+        return dashboard_unavailable(exc, view)
+    page = render_dashboard(data, view, demo=demo, base="/dashboard",
+                            logo_url="/dashboard/logo.png")
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})

@@ -24,7 +24,7 @@ that reinstalling cannot overwrite preferences. CI has not run remotely yet.
 ## What stays separate
 
 - `ui/app.py` and the original Dockerfile remain the preserved cloud evidence console.
-- `ui/dashboard.py` is a read-only FastAPI adapter; it has no local Settings writes.
+- The cloud dashboard is mounted read-only at `/dashboard` in `ui/app.py`; it has no Settings writes.
 - The local SQLite edition is not a new cloud backend and does not synchronize
   its database or settings with Firestore.
 - Real scanner ingestion, independent local review, the approved inventory

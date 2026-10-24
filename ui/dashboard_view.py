@@ -3,6 +3,7 @@
 # you may not use this file except in compliance with the License.
 """Pure dashboard rendering without cloud packages."""
 import base64
+import json
 from functools import lru_cache
 from pathlib import Path
 from html import escape
@@ -80,27 +81,30 @@ def decision_card(row):
 <p>A reviewed recommendation does not mean the fix was applied or verified.</p></details></article>'''
 
 
-def render(data, view="overview", demo=False, unavailable=False, settings_html=None):
+def render(data, view="overview", demo=False, unavailable=False, settings_html=None,
+           base="/", logo_url=None):
+    # base: where this page is mounted. logo_url: a served, cacheable logo; the
+    # local server has no static route, so it falls back to an inline data URI.
     counts = data.get("counts", {})
     rows = recent_decisions(data)
     views = dict(VIEWS, settings="Settings") if settings_html is not None else VIEWS
-    nav = "".join(f'<a href="/?view={key}" aria-current="{"page" if key == view else "false"}">{label}</a>' for key, label in views.items())
+    nav = "".join(f'<a href="{base}?view={key}" aria-current="{"page" if key == view else "false"}">{label}</a>' for key, label in views.items())
     notice = ("Demo · Illustrative data only. No infrastructure is connected." if demo else
               "Synthetic environment · Read-only. These records do not assess your business infrastructure.")
     if unavailable:
-        body = '<section class="card"><h2>We couldn’t load your records</h2><p>Security status is unknown. Refresh to try again. An unavailable check does not mean there are no issues.</p><a href="/">Try again</a></section>'
+        body = f'<section class="card"><h2>We couldn’t load your records</h2><p>Security status is unknown. Refresh to try again. An unavailable check does not mean there are no issues.</p><a href="{base}">Try again</a></section>'
     elif view == "settings":
         body = settings_html
     elif view == "overview":
         focus = decision_card(rows[0]) if rows else '<section class="card"><h2>No recent recommendations yet</h2><p>We still need evidence to understand what needs attention.</p></section>'
         body = f'''<div class="overview-grid"><section class="overview-main">{focus}
-<a class="button" href="/?view=actions">Review next steps</a><p class="muted">No changes will be made.</p>
-<h2>Also needs attention</h2><div class="task-links"><a href="/?view=actions">Review incomplete checks</a>
-<a href="/?view=infrastructure">Confirm what has been scanned</a><a href="/?view=activity">See previous reviews</a></div></section>
+<a class="button" href="{base}?view=actions">Review next steps</a><p class="muted">No changes will be made.</p>
+<h2>Also needs attention</h2><div class="task-links"><a href="{base}?view=actions">Review incomplete checks</a>
+<a href="{base}?view=infrastructure">Confirm what has been scanned</a><a href="{base}?view=activity">See previous reviews</a></div></section>
 <section class="notice"><h2>What we still need to check</h2><p>A few gaps need a closer look.</p>
 <ul class="coverage-list"><li><strong>Scan coverage</strong><span>Not confirmed in this view</span></li>
 <li><strong>Current exposure</strong><span>Unknown</span></li><li><strong>Connection health</strong><span>Not available in this view</span></li></ul>
-<p>No issues shown does not mean everything is secure.</p><a href="/?view=infrastructure">Review coverage</a></section></div>
+<p>No issues shown does not mean everything is secure.</p><a href="{base}?view=infrastructure">Review coverage</a></section></div>
 <details><summary>Recorded totals</summary><p>Assets: {text(counts.get('assets', 'Unknown'))} · Findings: {text(counts.get('findings', 'Unknown'))} · Marked resolved: {text(data.get('resolved_total', 'Unknown'))}</p></details>'''
     elif view == "actions":
         body = '<p>Latest decision per finding within the most recent 60 decisions. This is not a complete list of open issues; resolved findings may still appear.</p>'
@@ -113,7 +117,6 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
     elif view == "infrastructure":
         body = f'<section class="card"><h2>{text(counts.get("assets", "Unknown"))} assets recorded</h2><p>Asset names, connection health, and a complete coverage comparison are not supplied by this snapshot. Inventory count alone does not prove these assets have been checked.</p></section><section class="notice"><h2>Coverage needs confirmation</h2><p>Ask your IT provider to compare your infrastructure inventory with scan coverage. Scan freshness is not evaluated here.</p></section><h2>Recent scan evidence</h2>'
         for scan in data.get("scans", []):
-            import json
             body += f'<details class="card"><summary>Scan recorded: {stamp(scan.get("real_ts"), scan.get("sim_ts"))}</summary><pre>{text(json.dumps(scan, indent=2, default=str))}</pre></details>'
         if not data.get("scans"):
             body += '<p class="card">No scan records returned. We cannot confirm what was checked.</p>'
@@ -124,4 +127,4 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
     title = 'Your next security step' if view == 'overview' else views[view]
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{views[view]} · Remediation Zero</title><style>
-{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="data:image/png;base64,{logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div><h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · Synthetic preview · Infrastructure changes disabled · Model connection optional.</footer></main></div></body></html>'''
+{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="{logo_url or "data:image/png;base64," + logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div><h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · Synthetic preview · Infrastructure changes disabled · Model connection optional.</footer></main></div></body></html>'''

@@ -11,7 +11,8 @@ RUN pip install --no-cache-dir -r requirements-ui.txt
 
 # Ship only the application. Development probes and local verification helpers
 # do not belong in the public, read-only console image.
-COPY ui/app.py ./ui/app.py
+COPY ui/app.py ui/dashboard_view.py ui/theme.css ./ui/
+COPY ui/assets/remediation-zero-logo.png ./ui/assets/
 
 # Cloud Run supplies PORT. Single worker: the console is read-mostly and
 # scaling out costs more than it saves at this traffic.
