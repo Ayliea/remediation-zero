@@ -205,6 +205,11 @@ def test_held_and_unreviewed_never_pass_ratified_gate(outcome):
 
 def test_cycle_script_assignment_gate_is_a_positive_equality():
     """The tick driver assigns only on `== "ratified"`; never on a negation."""
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "cycle.py").read_text()
-    gates = re.findall(r"if [\w.]*outcome\.value ([!=]=) \"(\w+)\":", source)
-    assert gates == [("==", "ratified"), ("==", "ratified")]
+    root = Path(__file__).resolve().parents[1]
+    gate = r"if [\w.]*outcome\.value ([!=]=) \"(\w+)\":"
+    source = (root / "engine" / "triage_cycle.py").read_text()
+    gates = re.findall(gate, source)
+    assert gates == [("==", "ratified")]
+    for script in ("cycle.py", "graph_cycle.py"):
+        wiring = (root / "scripts" / script).read_text()
+        assert not [g for g in re.findall(gate, wiring) if g[0] == "!="], script

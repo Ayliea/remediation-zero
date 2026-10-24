@@ -32,7 +32,7 @@ from pathlib import Path
 from tools.idempotency import derive_key
 
 ROOT = Path(__file__).resolve().parents[1]
-CYCLE_SOURCE = (ROOT / "scripts" / "cycle.py").read_text()
+CYCLE_SOURCE = (ROOT / "engine" / "triage_cycle.py").read_text()
 DECISIONS_SOURCE = (ROOT / "tools" / "decisions.py").read_text().split("    def record(", 1)[1]
 
 

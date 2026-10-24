@@ -15,7 +15,8 @@
 """Run one remediation cycle.
 
 Reads findings from Firestore, enriches them from the local cache, puts each
-through triage and adversarial review, and records the adjudication.
+through triage and adversarial review, and records the adjudication. The
+lifecycle itself is `engine.triage_cycle`; this script supplies the cloud parts.
 
 Safe to re-run. Every decision write is keyed on the finding, the action and
 the cycle number, so running the same cycle twice produces the same decisions
@@ -26,7 +27,6 @@ import argparse
 import json
 import logging
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,38 +34,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from engine.ports import NoDelivery, NoTelemetry, Ports
+from engine.triage_cycle import _log, run_triage_cycle  # noqa: F401  (_log re-exported)
 from scripts import quiet_sdk_logging
-from tools import inference
 from tools import review_models as rm
 from tools.model_roles import ModelRoles
-from tools.adjudication import adjudicate
 from tools.clock import SimClock
+from tools.docstore import FirestoreDocStore
 from tools.fleet_memory import FleetMemory
-from tools.cycles import merge_cycle_record
-from tools.assignments import AssignmentWriter
-from tools.decisions import DecisionWriter
 from tools.enrichment import EnrichmentCache
-from tools.idempotency import derive_key
 from tools.guardrail import ModelArmorGuard
-from tools.model_armor import ModelArmor, apply_verdict
-from tools.ownership import resolve_owner
+from tools.model_armor import ModelArmor
 from tools.store import FirestoreIdempotencyStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-logger = logging.getLogger("remediation_zero.cycle")
-
-
-def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
-    """Structured only. Every line carries the finding and the cycle, so one
-    finding's journey is greppable end to end."""
-    logger.info(
-        json.dumps(
-            {"event": event, "cycle_id": cycle_id, "finding_id": finding_id, **fields},
-            sort_keys=True,
-            default=str,
-        )
-    )
 
 
 def main() -> int:
@@ -86,188 +68,32 @@ def main() -> int:
     cache = EnrichmentCache()
     genai_client = rm._client()
     roles = ModelRoles.from_env(os.environ)
-    proposer = roles.adapter("proposer", vertex_client=genai_client)
-    # No reviewer role: no adapter is built, and adjudication ends unreviewed.
-    reviewer = (None if roles.independence() == "unreviewed"
-                else roles.adapter("reviewer", vertex_client=genai_client))
 
     armor = ModelArmor()
     import subprocess
     armor_token = subprocess.run(
         ["gcloud", "auth", "application-default", "print-access-token"],
         capture_output=True, text=True, check=False).stdout.strip()
-    guard = ModelArmorGuard(armor, lambda: armor_token)
 
-    store = FirestoreIdempotencyStore(client=client, clock=clock)
-    writer = DecisionWriter(store=store, client=client, clock=clock)
-    assigner = AssignmentWriter(store=store, client=client, clock=clock)
-
-    cycle_id = f"cycle-{args.cycle:03d}"
-    started = clock.now()
-    _log("cycle_started", cycle_id, "-", clock_mode=clock.mode.value,
-         limit=args.limit, real_ts=started.real_ts, sim_ts=started.sim_ts)
+    # The cloud parts. The stage builds its writers over these, so every
+    # decision and assignment key is exactly what it was. This path emits no
+    # spans and delivers nothing; delivery belongs to chase.
+    ports = Ports(
+        docs=FirestoreDocStore(client),
+        journal=FirestoreIdempotencyStore(client=client, clock=clock),
+        clock=clock,
+        roles=roles,
+        guard=ModelArmorGuard(armor, lambda: armor_token),
+        delivery=NoDelivery(),
+        memory=FleetMemory(),
+        telemetry=NoTelemetry(),
+    )
 
     finding_ids = [f"RZ-{i:04d}" for i in range(args.start, args.start + args.limit)]
-    assets = {a["asset_id"]: a for a in
-              (d.to_dict() for d in client.collection("assets").stream())}
-    owners = {o["owner_id"]: o for o in
-              (d.to_dict() for d in client.collection("owners").stream())}
-
-    outcomes: dict[str, int] = {}
-
-    for finding_id in finding_ids:
-        snapshot = client.collection("findings").document(finding_id).get()
-        if not snapshot.exists:
-            _log("finding_missing", cycle_id, finding_id)
-            continue
-
-        # Short-circuit before any model call, not just before the write.
-        # The guard around the write is what makes the state correct, but it
-        # only fires after triage and review have already run and been paid
-        # for. Re-running a cycle should cost nothing, so the completed-call
-        # record is checked here too.
-        restored = writer.restore(finding_id, args.cycle)
-        already = store.get(
-            derive_key(finding_id=finding_id, action="decision", cycle=args.cycle)
-        )
-        if restored is not None:
-            # A durable decision is not proof that downstream assignment ran.
-            # Resume that idempotent effect without repeating paid inference.
-            if restored.outcome.value == "ratified":
-                assignment = resolve_owner(snapshot.to_dict(), assets, owners)
-                assignment_id = assigner.record(
-                    assignment, cycle=args.cycle,
-                    sla_days=restored.proposal.sla_days if restored.proposal else None)
-                _log("assignment_reconciled", cycle_id, finding_id,
-                     assignment_id=assignment_id, needs_human=assignment.needs_human)
-            _log("skipped_already_adjudicated", cycle_id, finding_id,
-                 decision_id=f"{finding_id}-c{args.cycle:03d}")
-            outcomes["skipped"] = outcomes.get("skipped", 0) + 1
-            continue
-
-        finding = snapshot.to_dict()
-        asset = assets.get(finding["asset_id"], {})
-        enrichment = cache.enrich(finding["cve_id"])
-
-        # The untrusted-content boundary. Both scanner prose and cached vendor
-        # advisory prose originated outside this system. Screen them together
-        # before either model sees either one; structured scores and booleans
-        # remain typed data rather than instructions.
-        raw_comment = finding.get("scanner_comment") or ""
-        raw_description = enrichment.description or ""
-        boundary_text = (
-            f"SCANNER COMMENT\n{raw_comment}\n\n"
-            f"NVD DESCRIPTION\n{raw_description}"
-        )
-        verdict = guard.screen(boundary_text)
-        finding = dict(finding)
-        finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
-        enrichment = replace(
-            enrichment, description=apply_verdict(raw_description, verdict)
-        )
-        if verdict.blocked or not verdict.screened:
-            _log("untrusted_text_screened", cycle_id, finding_id,
-                 blocked=verdict.blocked, screened=verdict.screened,
-                 confidence=verdict.confidence, reasons=list(verdict.reasons))
-
-        rendered = rm.render_finding(finding, asset, enrichment)
-
-        _log("triage_started", cycle_id, finding_id, cve_id=finding["cve_id"],
-             in_kev=enrichment.in_kev, epss=enrichment.epss_score)
-
-        try:
-            adjudication = writer.adjudicate_once(
-                finding,
-                triage=lambda _f: inference.propose(
-                    rendered, proposer,
-                    finding_id=finding_id, retry=False,
-                ),
-                review=None if reviewer is None else lambda _f, p: inference.review(
-                    rendered + "\n\nPROPOSAL\n" + json.dumps(
-                        {"severity": p.severity, "sla_days": p.sla_days,
-                         "remediation": p.remediation, "evidence": list(p.evidence),
-                         "rationale": p.rationale}, indent=2),
-                    reviewer, retry=False),
-                cycle=args.cycle,
-                context=inference.inference_fingerprint(rendered, roles),
-                roles=roles,
-            )
-        except Exception as exc:
-            # Model failures have durable evidence. Persistence failure must
-            # stop execution for replay, never manufacture another escalation.
-            _log("finding_failed", cycle_id, finding_id,
-                 error=f"{type(exc).__name__}: {exc}"[:300])
-            raise
-
-        document_id = writer.record(adjudication, cycle=args.cycle)
-        adjudication = writer.restore(finding_id, args.cycle)
-        outcomes[adjudication.outcome.value] = outcomes.get(
-            adjudication.outcome.value, 0) + 1
-
-        # Only a ratified decision proceeds to ownership. A finding in the
-        # human queue is waiting on a person, and assigning it would start an
-        # SLA clock against a decision nobody has made yet.
-        if adjudication.outcome.value == "ratified":
-            assignment = resolve_owner(finding, assets, owners)
-            assignment_id = assigner.record(
-                assignment, cycle=args.cycle,
-                sla_days=adjudication.proposal.sla_days if adjudication.proposal else None)
-            _log("assigned", cycle_id, finding_id,
-                 owner_id=assignment.owner_id, team=assignment.team,
-                 needs_human=assignment.needs_human,
-                 assignment_id=assignment_id, reason=assignment.reason[:120])
-
-        _log("adjudicated", cycle_id, finding_id,
-             outcome=adjudication.outcome.value,
-             attempts=adjudication.attempts,
-             severity=adjudication.proposal.severity if adjudication.proposal else None,
-             decision_id=document_id,
-             rejections=[v.reason[:120] for v in adjudication.verdicts if not v.ratified])
-
-    finished = clock.now()
-
-    # The cycle record is the one write that is not keyed on a finding, so it
-    # needs its own protection. A re-run adjudicates nothing and would
-    # otherwise overwrite the original outcomes with {"skipped": n}, destroying
-    # the record of what the cycle actually did. First run wins; later runs
-    # append their timestamps and leave the outcomes alone.
-    cycle_ref = client.collection("cycles").document(cycle_id)
-    existing = cycle_ref.get()
-    prior = existing.to_dict() if existing.exists else None
-    fresh = {
-        "cycle_id": cycle_id,
-        "cycle": args.cycle,
-        "finding_ids": finding_ids,
-        "outcomes": outcomes,
-        "clock_mode": clock.mode.value,
-        "started_real_ts": started.real_ts,
-        "started_sim_ts": started.sim_ts,
-        "finished_real_ts": finished.real_ts,
-        "finished_sim_ts": finished.sim_ts,
-    }
-    cycle_ref.set(merge_cycle_record(prior, fresh))
-    if prior:
-        _log("cycle_rerun", cycle_id, "-", outcomes=outcomes,
-             preserved_outcomes=prior.get("outcomes"))
-
-    # File the cycle into Memory Bank before reporting it finished. This is
-    # the fleet's cross-session recollection: the process that ran this cycle
-    # exits, and Firestore keeps the rows, but the rows are not context. A
-    # failure here is logged and does not fail the cycle — memory is context
-    # and Firestore is the record.
-    # Not on a re-run. A second recollection of a cycle that adjudicated
-    # nothing would sit alongside the first and describe the same cycle as
-    # having done nothing, which is the kind of memory that is worse than none.
-    if not prior:
-        filed = FleetMemory().remember_cycle(
-            cycle_id=cycle_id, counts=dict(outcomes),
-            real_ts=finished.real_ts, sim_ts=finished.sim_ts,
-        )
-        _log("cycle_remembered", cycle_id, "-", filed=filed)
-
-    _log("cycle_finished", cycle_id, "-", outcomes=outcomes,
-         elapsed_real_s=round(finished.real_ts - started.real_ts, 1))
-    print(json.dumps({"cycle": cycle_id, "outcomes": outcomes}, sort_keys=True))
+    record = run_triage_cycle(ports, args.cycle, finding_ids=finding_ids,
+                              enrichment=cache, vertex_client=genai_client)
+    print(json.dumps({"cycle": record["cycle_id"], "outcomes": record["outcomes"]},
+                     sort_keys=True))
     return 0
 
 

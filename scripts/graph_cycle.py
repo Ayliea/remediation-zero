@@ -42,9 +42,11 @@ from google.genai import types
 from agents.orchestrator.graph import (
     HUMAN_QUEUE, RATIFIED, UNAVAILABLE, CycleState, build_graph, describe,
 )
+from engine.ports import NoDelivery, Ports
+from engine.triage_cycle import assign_if_ratified, screen_finding, triage_and_review
 from scripts import quiet_sdk_logging
-from tools import inference
 from tools import review_models as rm
+from tools import telemetry
 from tools.model_roles import ModelRoles
 from tools.adjudication import (
     AdjudicationOutcome, CapacityError, Proposal, Verdict, adjudicate,
@@ -52,10 +54,11 @@ from tools.adjudication import (
 from tools.assignments import AssignmentWriter
 from tools.clock import SimClock
 from tools.decisions import DecisionWriter
+from tools.docstore import as_docstore
 from tools.enrichment import EnrichmentCache
+from tools.fleet_memory import FleetMemory
 from tools.guardrail import ModelArmorGuard
-from tools.model_armor import ModelArmor, apply_verdict
-from tools.ownership import resolve_owner
+from tools.model_armor import ModelArmor
 from tools.store import FirestoreIdempotencyStore
 from tools.telemetry import (cycle_id, configure_tracing, finding_span,
                             flush, set_outcome)
@@ -91,11 +94,16 @@ def build_handlers(clients: dict) -> dict:
     genai_client = clients["genai"]
     armor = clients["armor"]
     armor_token = clients["armor_token"]
-    guard = ModelArmorGuard(armor, lambda: armor_token)
     writer = clients["decisions"]
     assigner = clients["assignments"]
     cycle_id = clients["cycle_id"]
     scratch = clients["scratch"]
+    # The cloud parts. Roles stay lazy: they are resolved in `review`, so a
+    # caller that never reaches review needs no model configuration.
+    ports = Ports(docs=as_docstore(db), journal=clients.get("store"), clock=clock,
+                  roles=clients.get("roles"),
+                  guard=ModelArmorGuard(armor, lambda: armor_token),
+                  delivery=NoDelivery(), memory=FleetMemory(), telemetry=telemetry)
 
     def screen(finding_id: str, cycle: int) -> str:
         restored = writer.restore(finding_id, cycle)
@@ -105,21 +113,13 @@ def build_handlers(clients: dict) -> dict:
         finding = db.collection("findings").document(finding_id).get().to_dict() or {}
         asset = db.collection("assets").document(
             finding.get("asset_id", "")).get().to_dict() or {}
-        enrichment = cache.enrich(finding.get("cve_id", ""))
-
-        raw = finding.get("scanner_comment") or ""
-        raw_description = enrichment.description or ""
-        verdict = guard.screen(
-            f"SCANNER COMMENT\n{raw}\n\nNVD DESCRIPTION\n{raw_description}"
-        )
-        finding = dict(finding)
-        finding["scanner_comment"] = apply_verdict(raw, verdict)
-        enrichment = replace(
-            enrichment, description=apply_verdict(raw_description, verdict)
-        )
+        finding, enrichment, verdict = screen_finding(
+            ports, finding, cycle, cache.enrich(finding.get("cve_id", "")))
 
         scratch["rendered"] = rm.render_finding(finding, asset, enrichment)
         scratch["finding"] = finding
+        scratch["asset"] = asset
+        scratch["enrichment"] = enrichment
         _log("screened", cycle_id, finding_id,
              blocked=verdict.blocked, screened=verdict.screened,
              confidence=verdict.confidence)
@@ -147,29 +147,12 @@ def build_handlers(clients: dict) -> dict:
             scratch["adjudication"] = restored
             ctx.route = _route(restored.outcome.value)
             return restored.outcome.value
-        rendered = scratch["rendered"]
         roles = clients.get("roles") or ModelRoles.from_env(
             {"REASONING_MODEL": clients["reasoning_model"],
              "REVIEWER_MODEL": clients["reviewer_model"]})
-        proposer = roles.adapter("proposer", vertex_client=genai_client)
-        reviewer = (None if roles.independence() == "unreviewed"
-                    else roles.adapter("reviewer", vertex_client=genai_client))
-        result = writer.adjudicate_once(
-            scratch["finding"],
-            triage=lambda _f: inference.propose(
-                rendered, proposer,
-                finding_id=finding_id, retry=False,
-            ),
-            review=None if reviewer is None else lambda _f, p: inference.review(
-                rendered + "\n\nPROPOSAL\n" + json.dumps(
-                    {"severity": p.severity, "sla_days": p.sla_days,
-                     "remediation": p.remediation, "evidence": list(p.evidence),
-                     "rationale": p.rationale}, indent=2),
-                reviewer, retry=False),
-            cycle=cycle,
-            context=inference.inference_fingerprint(rendered, roles),
-            roles=roles,
-        )
+        result = triage_and_review(
+            replace(ports, roles=roles), scratch["finding"], scratch["asset"],
+            scratch["enrichment"], cycle, writer=writer, vertex_client=genai_client)
         scratch["adjudication"] = result
         _log("adjudicated", cycle_id, finding_id,
              outcome=result.outcome.value, attempts=result.attempts,
@@ -183,18 +166,13 @@ def build_handlers(clients: dict) -> dict:
         return "recorded"
 
     def assign(finding_id: str, cycle: int) -> str:
-        owners = {o["owner_id"]: o for o in
-                  (d.to_dict() for d in db.collection("owners").stream())}
-        assets = {a["asset_id"]: a for a in
-                  (d.to_dict() for d in db.collection("assets").stream())}
-        finding = scratch.get("finding") or db.collection("findings").document(finding_id).get().to_dict()
-        assignment = resolve_owner(finding, assets, owners)
-        proposal = scratch["adjudication"].proposal
-        assignment_id = assigner.record(
-            assignment, cycle=cycle,
-            sla_days=proposal.sla_days if proposal else None)
-        _log("assigned", cycle_id, finding_id, owner_id=assignment.owner_id,
-             needs_human=assignment.needs_human, assignment_id=assignment_id)
+        assigned = assign_if_ratified(ports, scratch["adjudication"], cycle,
+                                      finding=scratch.get("finding") or None,
+                                      assigner=assigner)
+        if assigned is not None:
+            assignment_id, assignment = assigned
+            _log("assigned", cycle_id, finding_id, owner_id=assignment.owner_id,
+                 needs_human=assignment.needs_human, assignment_id=assignment_id)
         return "assigned"
 
     def queue(finding_id: str, cycle: int) -> str:
@@ -230,6 +208,7 @@ async def run(finding_id: str, cycle: int) -> int:
             capture_output=True, text=True, check=False).stdout.strip(),
         "decisions": DecisionWriter(store=store, client=db, clock=clock),
         "assignments": AssignmentWriter(store=store, client=db, clock=clock),
+        "store": store,
         "roles": ModelRoles.from_env(os.environ),
         "reasoning_model": os.environ["REASONING_MODEL"],
         "reviewer_model": os.environ["REVIEWER_MODEL"],
