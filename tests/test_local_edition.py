@@ -115,3 +115,62 @@ def test_no_third_party_packages_needed(tmp_path):
                              str(tmp_path / 'fresh.sqlite3'), 'init'], cwd=root, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert 'No model calls made' in result.stdout
+
+
+def _roles(**models):
+    from tools.model_roles import ModelRoles, RoleConfig
+    local = 'http://localhost:11434/v1/chat/completions'
+    return ModelRoles(**{r: RoleConfig(r, 'openai_chat', local, 'm-' + r, 'other') for r in models})
+
+
+class _Adapter:
+    def __init__(self, reply):
+        self.reply = reply
+
+    def complete(self, system, user, json_output=False):
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def test_check_models_reports_each_role(tmp_path, monkeypatch, capsys):
+    import sys
+    import types
+    from scripts import local
+    from tools import local_settings
+    from tools.model_check import SAMPLE_PROPOSAL
+    from tools.model_roles import ModelRoles
+    database = tmp_path / 'w.sqlite3'
+    roles = {r: dict(format='openai_chat', endpoint='http://localhost:1/v1/chat/completions', model='m-' + r, family='other')
+             for r in ('proposer', 'reviewer', 'summarizer')}
+    roles['guard'] = None
+    local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, roles=roles))
+    replies = {'proposer': json.dumps(SAMPLE_PROPOSAL), 'reviewer': CapacityError('queue full at http://secret.invalid'),
+               'summarizer': 'Three findings are open.'}
+    monkeypatch.setattr(ModelRoles, 'adapter', lambda self, role, **kw: _Adapter(replies[role]))
+    monkeypatch.setitem(sys.modules, 'tools.reports', types.SimpleNamespace(write_summary=lambda m, a: a.complete('', '')))
+    before = sorted(p.name for p in tmp_path.iterdir())
+    monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'check-models'])
+    with pytest.raises(SystemExit) as stop:
+        local.main()
+    out = capsys.readouterr().out.splitlines()
+    assert stop.value.code == 1
+    assert out == ['proposer: ok', 'reviewer: failed (CapacityError)', 'summarizer: ok', 'guard: not configured']
+    assert 'secret.invalid' not in ''.join(out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == before  # nothing written, no database created
+
+
+def test_check_models_guard_outcomes_and_role_filter(monkeypatch):
+    from tools.model_check import check_models
+    lines = []
+    roles = _roles(guard=1)
+    cases = [('VERDICT: SAFE\nREASON:', 0, 'guard: ok'), ('garbage', 1, 'guard: failed (GuardUnusable)'),
+             ('VERDICT: UNSAFE\nREASON: looks hostile', 1, 'guard: failed (GuardBlockedBenign)')]
+    for reply, code, line in cases:
+        lines.clear()
+        monkeypatch.setattr(type(roles), 'adapter', lambda self, role, reply=reply, **kw: _Adapter(reply))
+        assert check_models(roles, 'guard', out=lines.append) == code
+        assert lines == [line]
+    lines.clear()
+    assert check_models(roles, 'reviewer', out=lines.append) == 0
+    assert lines == ['reviewer: not configured']

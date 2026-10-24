@@ -16,11 +16,13 @@ from tools.idempotency import derive_record
 from tools.inference_journal import InferenceJournal
 from tools.model_endpoint import ModelEndpoint
 from tools import local_settings
-from tools.model_roles import suggest_family
+from tools.model_check import check_models
+from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
 from ui.settings_view import SECTIONS, render_settings
 from tools.sqlite_store import SQLiteStore
 from ui.dashboard_view import VIEWS, demo_snapshot, render
 
+MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
 PROMPT = Path(__file__).resolve().parents[1] / 'prompts/local_suggestion_v1.txt'
 
 
@@ -65,7 +67,7 @@ def handler(store, demo, config_path=None):
                 if config_path:
                     settings_html = render_settings(local_settings.load(config_path), section if section in SECTIONS else 'model', token,
                         message='Preferences saved. No model calls were made.' if parse_qs(parsed.query).get('saved') == ['1'] else '',
-                        key_present=bool(os.environ.get('RZ_MODEL_API_KEY')),
+                        keys={role: key_present(role, os.environ) for role in ROLES},
                         overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')))
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html)
                 status = 200
@@ -94,7 +96,7 @@ def handler(store, demo, config_path=None):
                 if (not 0 < length <= 8192 or self.headers.get('Transfer-Encoding')
                         or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
                     raise ValueError()
-                fields = parse_qs(self.rfile.read(length).decode('utf-8'), keep_blank_values=True, strict_parsing=True, max_num_fields=10)
+                fields = parse_qs(self.rfile.read(length).decode('utf-8'), keep_blank_values=True, strict_parsing=True, max_num_fields=20)
                 if any(len(v) != 1 for v in fields.values()):
                     raise ValueError()
                 fields = {k: v[0] for k, v in fields.items()}
@@ -103,11 +105,13 @@ def handler(store, demo, config_path=None):
                     return
                 section = fields.pop('section', '')
                 values = local_settings.load(config_path)
-                if section == 'model' and set(fields) == {'endpoint', 'model'}:
-                    # The existing form edits the proposer only; other v2 fields stay as saved.
-                    values['roles']['proposer'] = None if not (fields['endpoint'] or fields['model']) else {
-                        'format': 'openai_chat', 'endpoint': fields['endpoint'], 'model': fields['model'],
-                        'family': suggest_family(fields['model'])}
+                if section == 'model' and set(fields) == MODEL_FIELDS:
+                    for role in ROLES:
+                        endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
+                        values['roles'][role] = None if not (endpoint or model) else {
+                            'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
+                            'family': fields[role + '_family'] or suggest_family(model)}
+                    values['same_family_policy'] = fields['same_family_policy']
                 elif section == 'application' and set(fields) in ({'mode', 'port'}, {'mode', 'port', 'open_browser'}):
                     if fields.get('open_browser', 'yes') != 'yes':
                         raise ValueError()
@@ -140,11 +144,16 @@ def main():
     serve.add_argument('--port', type=int, default=8081)
     run = commands.add_parser('suggest-demo', help='Explicitly call your configured endpoint with the bundled synthetic example')
     run.add_argument('--cycle', type=int, default=1)
+    check = commands.add_parser('check-models', help='Explicitly send the bundled synthetic example to each configured model role')
+    check.add_argument('--role', choices=ROLES, help='Check only this role')
     args = parser.parse_args()
     os.umask(0o077)
     try:
         config_path = local_settings.settings_path(args.database)
         preferences = local_settings.load(config_path)
+        if args.command == 'check-models':
+            # Reads settings only; writes nothing to the workspace.
+            raise SystemExit(check_models(ModelRoles.from_settings(preferences, os.environ), args.role))
         if args.command == 'suggest-demo':
             saved = preferences['roles']['proposer'] or {'endpoint': '', 'model': ''}
             endpoint = ModelEndpoint(os.environ.get('RZ_MODEL_ENDPOINT', saved['endpoint']), os.environ.get('RZ_MODEL', saved['model']), os.environ.get('RZ_MODEL_API_KEY'))

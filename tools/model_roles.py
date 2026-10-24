@@ -59,6 +59,11 @@ def _key_names(role):
     return names + ['RZ_MODEL_API_KEY'] if role == 'proposer' else names
 
 
+def key_present(role, environ):
+    """Whether an API key is set for the role. Reports presence only, never the value."""
+    return any(bool(environ.get(n)) for n in _key_names(role))
+
+
 @dataclass(frozen=True)
 class ModelRoles:
     proposer: RoleConfig | None = None

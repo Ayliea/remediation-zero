@@ -17,8 +17,9 @@ FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 's
          'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py',
          'tools/models/__init__.py', 'tools/models/_common.py', 'tools/models/openai_chat.py',
          'tools/models/anthropic_messages.py', 'tools/models/gemini_api.py',
-         'tools/local_settings.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
-         'prompts/local_suggestion_v1.txt', 'prompts/guard_v1.md')
+         'tools/local_settings.py', 'tools/model_check.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
+         'prompts/local_suggestion_v1.txt', 'prompts/guard_v1.md',
+         'prompts/triage.md', 'prompts/reviewer.md', 'prompts/reporting.md')
 
 
 def build(destination):

@@ -4,25 +4,48 @@
 """Local settings pages. Rendering never contacts a model."""
 from html import escape
 
+from tools.model_roles import FAMILIES, ROLES
+from tools.models import FORMATS
+
 SECTIONS = {'model': 'Model connection', 'storage': 'Data & storage',
             'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
 
 
-def render_settings(values, section, token, *, message='', key_present=False, overrides=False):
+def render_settings(values, section, token, *, message='', keys=None, overrides=False):
     e = lambda v: escape(str(v), quote=True)
     tabs = '<nav class="settings-tabs" aria-label="Settings sections">' + ''.join(
         f'<a href="/?view=settings&amp;section={k}" aria-current="{"page" if k == section else "false"}">{v}</a>'
         for k, v in SECTIONS.items()) + '</nav>'
     def form(contents):
         return f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}"><input type="hidden" name="section" value="{section}">{contents}<div class="row"><button type="submit">Save preferences</button><a href="/?view=settings&amp;section={section}">Cancel</a></div></form>'
-    connection = values['roles']['proposer'] or {'endpoint': '', 'model': ''}
+    keys = keys or {}
     if section == 'model':
-        body = '<h2>Your model, your choice</h2><p>Use a local or hosted OpenAI-compatible chat-completions endpoint. Saving makes no model calls.</p>'
-        body += form(f'<label>Endpoint URL<input name="endpoint" type="url" maxlength="2048" value="{e(connection["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label><p class="muted">Use the full chat-completions URL. Hosted endpoints require HTTPS. Leave both fields blank to disconnect.</p><label>Model name<input name="model" maxlength="200" value="{e(connection["model"])}"></label>')
-        body += f'<h3>API key</h3><p>Environment key: {"present" if key_present else "not set"}. Keys are never displayed or saved here. Set RZ_MODEL_API_KEY before starting the app.</p><p>Connection status: Not tested. Saving does not verify availability.</p>'
+        body = '<h2>Your models, your choice</h2><p>Each role can use a local or hosted model. Hosted endpoints require HTTPS. Leave a role\'s endpoint and model blank to leave it not configured. Saving makes no model calls.</p>'
+        blocks = ''
+        for role in ROLES:
+            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': ''}
+            fmt = ''.join(f'<option value="{e(f)}" {"selected" if cfg["format"] == f else ""}>{e(f)}</option>' for f in FORMATS)
+            fam = '<option value="">Detect from model name</option>' + ''.join(
+                f'<option value="{e(f)}" {"selected" if cfg["family"] == f else ""}>{e(f)}</option>' for f in FAMILIES)
+            blocks += (f'<fieldset class="role-block"><legend>{role.capitalize()}</legend>'
+                       f'<label>Format<select name="{role}_format">{fmt}</select></label>'
+                       f'<label>Endpoint URL<input name="{role}_endpoint" type="url" maxlength="2048" value="{e(cfg["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label>'
+                       f'<label>Model name<input name="{role}_model" maxlength="200" value="{e(cfg["model"])}"></label>'
+                       f'<label>Model family<select name="{role}_family">{fam}</select></label>'
+                       f'<p>Environment key: {"present" if keys.get(role) else "not set"}. Keys are never displayed or saved here. Set RZ_{role.upper()}_API_KEY before starting the app.</p></fieldset>')
+        policy = values['same_family_policy']
+        blocks += ('<fieldset class="role-block"><legend>Same-family reviews</legend>'
+                   '<label>Same-family reviews<select name="same_family_policy">'
+                   f'<option value="wait" {"selected" if policy == "wait" else ""}>Wait for a person (recommended)</option>'
+                   f'<option value="proceed" {"selected" if policy == "proceed" else ""}>Proceed automatically</option></select></label>'
+                   '<p>A model reviewing reasoning from its own family shares its blind spots.</p></fieldset>')
+        body += form(blocks)
+        if values['roles']['reviewer'] is None:
+            body += '<p class="notice">No reviewer configured: every suggestion waits for a person.</p>'
+        body += '<p>Connection status: Not tested. Saving does not verify availability.</p>'
         if overrides:
-            body += '<p class="notice">RZ_MODEL_ENDPOINT or RZ_MODEL is set in this process. Environment values override saved preferences for command-line runs.</p>'
-        body += '<details><summary>Run an optional sample check</summary><p>From your installation folder, run <code>python3 -m scripts.local suggest-demo</code>. This sends the bundled synthetic example to your endpoint and may incur provider charges. On Windows, use <code>py -3.12</code>. Use the same database and environment as the dashboard. No check runs when you open this page.</p><p>Existing cycles replay saved results. Changing the endpoint or model requires a new cycle; do not delete history to bypass limits.</p></details>'
+            body += '<p class="notice">RZ_MODEL_ENDPOINT or RZ_MODEL is set in this process. Environment values override the saved proposer for command-line runs.</p>'
+        body += '<details><summary>Run an optional sample check</summary><p>From your installation folder, run <code>python3 -m scripts.local check-models</code> (add <code>--role reviewer</code> to check one role). This sends the bundled synthetic example to each configured model and may incur provider charges. On Windows, use <code>py -3.12</code>. Use the same database and environment as the dashboard. No check runs when you open this page.</p></details>'
     elif section == 'application':
         options = ''.join(f'<option value="{v}" {"selected" if values["mode"] == v else ""}>{label}</option>' for v, label in [('demo','Demo examples'),('saved','Saved records')])
         body = '<h2>Make it yours</h2><p>These preferences apply the next time you start the installed launcher. Command-line flags take priority.</p>'
