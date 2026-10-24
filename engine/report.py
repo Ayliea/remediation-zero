@@ -55,6 +55,11 @@ def run_report(ports: Ports, cycle: int, *, writer: Optional[ReportWriter] = Non
     # No summarizer role: no adapter is built and the report carries metrics alone.
     if roles is None or roles.summarizer is None:
         summarizer = None
+        # Local only: the cloud script refuses before this without its model.
+        logger.info(json.dumps({
+            "event": "summary_skipped", "reason": "no summarizer configured",
+            "cycle_id": cycle_id(cycle), "finding_id": "-",
+        }, sort_keys=True))
     else:
         # The Vertex client is built only when the role is a Vertex one.
         is_vertex = roles.summarizer.format == "vertex"

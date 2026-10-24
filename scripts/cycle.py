@@ -67,6 +67,11 @@ def main() -> int:
     client = firestore.Client()
     cache = EnrichmentCache()
     genai_client = rm._client()
+    # Fail fast, as before the engine existed (Ruling 40): the cloud always has
+    # both models, so a missing one is a KeyError here, before any write or log
+    # line, never an unreviewed cycle.
+    for name in ("REASONING_MODEL", "REVIEWER_MODEL"):
+        os.environ[name]
     roles = ModelRoles.from_env(os.environ)
 
     armor = ModelArmor()

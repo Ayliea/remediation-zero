@@ -60,6 +60,10 @@ def main() -> int:
     client = firestore.Client()
     reports_client = firestore.Client(database=REPORTS_DATABASE)
 
+    # Fail fast, as before the engine existed (Ruling 40): the cloud summary
+    # always has its model, so a missing one is a KeyError before any write or
+    # log line, never a report without prose.
+    os.environ["REASONING_MODEL"]
     roles = ModelRoles.from_env(os.environ)
     store = FirestoreIdempotencyStore(client=reports_client, clock=clock)
     # The cloud parts: reads from the operational database, the report and
