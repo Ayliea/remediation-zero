@@ -3,9 +3,11 @@
 # you may not use this file except in compliance with the License.
 """The neutral document store on SQLite, for the local edition.
 
-One connection per store. Each distinct database file is attached under a
-generated schema alias (`main`, `f1`, `f2`, ...; never a collection name), and
-each file holds one table:
+Two connections per store: a write connection over the files holding a
+writable collection, and a read connection over the rest. Each distinct
+database file is attached to one of them under a generated schema alias
+(`main`, `f1`, `f2`, ...; never a collection name), and each file holds one
+table:
 
     docs(collection TEXT, id TEXT, data TEXT NOT NULL, revision INTEGER NOT NULL,
          PRIMARY KEY(collection, id))
@@ -15,7 +17,7 @@ after `json.loads`; there are no indexes beyond the primary key and no filter
 operator beyond `==`, because the writers use nothing more.
 
 Atomicity: every write, single or batched, runs inside `BEGIN IMMEDIATE ...
-COMMIT` on the one connection, so a batch spanning several attached files
+COMMIT` on the write connection, so a batch spanning several attached files
 commits in all of them or none. Files use the rollback journal
 (`journal_mode=DELETE`); SQLite only makes a multi-file commit atomic across a
 crash with a rollback journal and a real file as `main`, so `main` is the first
@@ -23,7 +25,7 @@ writable file. `busy_timeout=10000` lets a second writer wait for the first
 instead of failing with `database is locked`.
 
 Scoping (CLAUDE.md hard constraint 4): files holding no writable collection are
-attached `mode=ro`, so SQLite itself refuses writes to them, and a write
+attached `mode=ro` to the read connection, so SQLite itself refuses writes to them, and a write
 addressed to any collection outside `writable` raises `PermissionError` before
 any SQL runs.
 
@@ -78,50 +80,78 @@ class SQLiteDocStore(DocStoreBase):
         self.files = {name: Path(path) for name, path in files.items()}
         self._writable = frozenset(self.files if writable is None else writable)
 
+        unknown = self._writable - set(self.files)
+        if unknown:
+            raise ValueError(f"writable collection(s) {', '.join(sorted(unknown))} "
+                             "have no database file")
+
+        # One entry per database file. An existing file is keyed by device and
+        # inode, so a hardlink or a second spelling of a path is attached once.
         by_file: dict = {}
         for name, path in self.files.items():
-            by_file.setdefault(path.resolve(), []).append(name)
-        rw = {path for path, names in by_file.items()
-              if any(name in self._writable for name in names)}
-        for path, names in by_file.items():
-            if path not in rw and not path.exists():
+            if path.exists():
+                st = path.stat()
+                key: tuple = (st.st_dev, st.st_ino)
+            else:
+                key = ("path", str(path.resolve()))
+            by_file.setdefault(key, (path.resolve(), []))[1].append(name)
+        rw = [entry for entry in by_file.values()
+              if any(name in self._writable for name in entry[1])]
+        ro = [entry for entry in by_file.values() if entry not in rw]
+        for path, names in ro:
+            if not path.exists():
                 raise FileNotFoundError(
                     f"{path} does not exist; the read-only collection(s) "
                     f"{', '.join(sorted(names))} need their database file "
                     f"created before a store can open it read-only")
 
-        # A fixed global order (writable files sorted, then read-only files)
-        # makes every store take its write locks in the same order.
-        ordered = sorted(rw, key=str) + sorted(set(by_file) - rw, key=str)
-        aliases = ["main"] + [f"f{i}" for i in range(1, len(ordered))]
-        self._alias = {name: alias for path, alias in zip(ordered, aliases)
-                       for name in by_file[path]}
-
+        # Two connections (Ruling 17). The write connection attaches only files
+        # holding a writable collection, so BEGIN IMMEDIATE never opens a read
+        # transaction on a file this store cannot write; that read lock would
+        # block another store's commit to that file until this one finished.
+        # The read connection attaches the rest `mode=ro` and reads in
+        # autocommit, holding a lock only for the statement. Within a store,
+        # write locks are taken in the sorted order of its writable files.
         self._lock = threading.RLock()
-        mode = {path: "rwc" if path in rw else "ro" for path in ordered}
-        self._conn = sqlite3.connect(_uri(ordered[0], mode[ordered[0]]), uri=True,
-                                     timeout=BUSY_TIMEOUT_MS / 1000,
-                                     isolation_level=None, check_same_thread=False)
+        self._conn_for: dict = {}
+        self._write_conn = self._open(sorted(rw, key=lambda e: str(e[0])), "rwc")
+        self._read_conn = None
         try:
-            self._conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
-            for path, alias in zip(ordered[1:], aliases[1:]):
-                self._conn.execute(f"ATTACH DATABASE ? AS {alias}",
-                                   (_uri(path, mode[path]),))
-            for path, alias in zip(ordered, aliases):
-                if mode[path] == "rwc":
-                    got = self._conn.execute(
-                        f"PRAGMA {alias}.journal_mode=DELETE").fetchone()[0]
+            self._read_conn = self._open(sorted(ro, key=lambda e: str(e[0])), "ro")
+        except BaseException:
+            if self._write_conn is not None:
+                self._write_conn.close()
+            raise
+
+    def _open(self, entries: list, mode: str) -> Optional[sqlite3.Connection]:
+        """One connection over `entries`, aliased `main`, `f1`, `f2`, ..."""
+        if not entries:
+            return None
+        aliases = ["main"] + [f"f{i}" for i in range(1, len(entries))]
+        conn = sqlite3.connect(_uri(entries[0][0], mode), uri=True,
+                               timeout=BUSY_TIMEOUT_MS / 1000,
+                               isolation_level=None, check_same_thread=False)
+        try:
+            conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+            for (path, _), alias in zip(entries[1:], aliases[1:]):
+                conn.execute(f"ATTACH DATABASE ? AS {alias}", (_uri(path, mode),))
+            for (path, names), alias in zip(entries, aliases):
+                if mode == "rwc":
+                    got = conn.execute(f"PRAGMA {alias}.journal_mode=DELETE").fetchone()[0]
                     if got.lower() != "delete":
                         raise RuntimeError(f"{path} stayed in journal mode {got}")
-                    self._conn.execute(_SCHEMA.format(alias=alias))
+                    conn.execute(_SCHEMA.format(alias=alias))
+                for name in names:
+                    self._conn_for[name] = (conn, alias)
         except BaseException:
-            self._conn.close()
+            conn.close()
             raise
+        return conn
 
     # --- the neutral API ---------------------------------------------------
 
     def collection(self, name: str) -> "_Query":
-        self._alias_of(name)
+        self._conn_of(name)
         return _Query(self, name)
 
     def batch(self) -> "_Batch":
@@ -129,57 +159,61 @@ class SQLiteDocStore(DocStoreBase):
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            for conn in (self._write_conn, self._read_conn):
+                if conn is not None:
+                    conn.close()
 
     # --- internals ---------------------------------------------------------
 
-    def _alias_of(self, collection: str) -> str:
+    def _conn_of(self, collection: str) -> tuple:
+        """The connection holding `collection`'s file, and its schema alias."""
         try:
-            return self._alias[collection]
+            return self._conn_for[collection]
         except KeyError:
             raise KeyError(f"{collection} has no database file in this store") from None
 
     def _require_writable(self, collection: str) -> None:
-        self._alias_of(collection)
+        self._conn_of(collection)
         if collection not in self._writable:
             raise PermissionError(f"{collection} is read-only for this agent")
 
     def _read(self, collection: str, doc_id: str) -> Optional[tuple]:
-        alias = self._alias_of(collection)
+        conn, alias = self._conn_of(collection)
         with self._lock:
-            return self._conn.execute(
+            return conn.execute(
                 f"SELECT data, revision FROM {alias}.docs "
                 "WHERE collection = ? AND id = ?", (collection, doc_id)).fetchone()
 
     def _rows(self, collection: str) -> list:
-        alias = self._alias_of(collection)
+        conn, alias = self._conn_of(collection)
         with self._lock:
-            return self._conn.execute(
+            return conn.execute(
                 f"SELECT id, data, revision FROM {alias}.docs WHERE collection = ?",
                 (collection,)).fetchall()
 
     def _commit(self, ops: list) -> None:
         if not ops:
             return
+        conn = self._write_conn  # every op passed _require_writable
         with self._lock:
             try:
-                self._conn.execute("BEGIN IMMEDIATE")
+                conn.execute("BEGIN IMMEDIATE")
                 for op in ops:
                     self._apply(*op)
-                self._conn.execute("COMMIT")
+                conn.execute("COMMIT")
             except BaseException:
-                if self._conn.in_transaction:
+                if conn.in_transaction:
                     try:
-                        self._conn.execute("ROLLBACK")
+                        conn.execute("ROLLBACK")
                     except sqlite3.Error:
                         pass  # the original error is the one worth raising
                 raise
 
     def _apply(self, kind: str, collection: str, doc_id: str,
                data: Optional[dict], merge: bool) -> None:
-        alias = self._alias_of(collection)
+        conn, alias = self._conn_of(collection)
         if kind == "delete":
-            self._conn.execute(f"DELETE FROM {alias}.docs WHERE collection = ? AND id = ?",
+            conn.execute(f"DELETE FROM {alias}.docs WHERE collection = ? AND id = ?",
                                (collection, doc_id))
             return
         row = self._read(collection, doc_id)
@@ -198,7 +232,7 @@ class SQLiteDocStore(DocStoreBase):
                 _assign(new, key.split("."), value)
         else:
             raise ValueError(f"unknown write: {kind}")
-        self._conn.execute(
+        conn.execute(
             f"INSERT OR REPLACE INTO {alias}.docs (collection, id, data, revision) "
             "VALUES (?, ?, ?, ?)",
             (collection, doc_id, json.dumps(new, sort_keys=True),
@@ -211,6 +245,8 @@ def _op(store: SQLiteDocStore, kind: str, ref: "_Document",
     store._require_writable(ref._collection)
     if kind in ("create", "set") and not merge and _contains_delete(data):
         raise ValueError("DELETE_FIELD is only allowed in update or set(merge=True)")
+    if kind == "update" and not data:
+        raise ValueError("update needs at least one field")
     if kind == "update" and any(_contains_delete(v) for v in data.values()
                                 if v is not DELETE_FIELD):
         raise ValueError("DELETE_FIELD must be a field's whole value in update")
@@ -410,9 +446,11 @@ class _Batch:
     """Writes are checked as they are added and applied in order at `commit()`."""
 
     def __init__(self, store: SQLiteDocStore) -> None:
-        self._store, self._ops = store, []
+        self._store, self._ops, self._committed = store, [], False
 
     def _ref(self, ref: Any) -> _Document:
+        if self._committed:
+            raise ValueError("batch already committed")
         if not isinstance(ref, _Document) or ref._store is not self._store:
             raise TypeError("a batch takes references from the same store")
         return ref
@@ -430,4 +468,9 @@ class _Batch:
         self._ops.append(_op(self._store, "delete", self._ref(ref)))
 
     def commit(self) -> None:
+        """Apply every write or none. A failed commit may be retried; a
+        successful one may not be repeated."""
+        if self._committed:
+            raise ValueError("batch already committed")
         self._store._commit(self._ops)
+        self._committed = True

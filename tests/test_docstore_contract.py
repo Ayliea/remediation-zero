@@ -423,9 +423,9 @@ def test_sqlite_read_only_collection_refuses_writes(tmp_path):
 def test_sqlite_read_only_file_is_refused_by_sqlite_too(tmp_path):
     store = _read_only_store(tmp_path)
     try:
-        alias = store._alias_of("beta")
+        conn, alias = store._conn_of("beta")
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
-            store._conn.execute(
+            conn.execute(
                 f"INSERT INTO {alias}.docs VALUES (?, ?, ?, ?)",
                 ("beta", "x", "{}", 0.0))
     finally:
@@ -493,6 +493,106 @@ def test_sqlite_shared_file_for_two_collections(tmp_path):
         store.collection("beta").document("d").set({"v": "b"})
         assert [r.to_dict() for r in store.collection("alpha").stream()] == [{"v": "a"}]
         assert [r.to_dict() for r in store.collection("beta").stream()] == [{"v": "b"}]
+    finally:
+        store.close()
+
+
+def test_sqlite_mirrored_writability_no_lock(tmp_path):
+    """A writes alpha and reads beta; B writes beta and reads alpha (Ruling 17).
+
+    A read-only collection must not sit inside the writer's BEGIN IMMEDIATE,
+    or each store's read lock blocks the other's commit.
+    """
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    files = _files(tmp_path)
+    SQLiteDocStore(files).close()
+    rounds = 30
+    barrier = threading.Barrier(2)
+    errors = []
+    plan = {"alpha": "beta", "beta": "alpha"}
+
+    def worker(mine: str) -> None:
+        store = SQLiteDocStore(files, writable=frozenset({mine}))
+        try:
+            barrier.wait()
+            for i in range(rounds):
+                store.collection(mine).document(f"d{i}").set({"i": i})
+                list(store.collection(plan[mine]).stream())
+                store.collection(plan[mine]).count().get()
+        except Exception as exc:  # noqa: BLE001 - recorded for the assert
+            errors.append(f"{mine}: {type(exc).__name__}: {exc}")
+        finally:
+            store.close()
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in plan]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert not any(t.is_alive() for t in threads)
+    assert errors == []
+    store = SQLiteDocStore(files)
+    try:
+        for name in plan:
+            assert store.collection(name).count().get()[0][0].value == rounds
+    finally:
+        store.close()
+
+
+def test_sqlite_hardlinked_file_is_one_database(tmp_path):
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    first = tmp_path / "one.sqlite3"
+    SQLiteDocStore({"alpha": first}).close()
+    link = tmp_path / "link.sqlite3"
+    os.link(first, link)
+    store = SQLiteDocStore({"alpha": first, "beta": link})
+    try:
+        batch = store.batch()
+        batch.set(store.collection("alpha").document("d"), {"v": 1})
+        batch.set(store.collection("beta").document("d"), {"v": 2})
+        batch.commit()
+        assert _get(store, "alpha", "d") == {"v": 1}
+        assert _get(store, "beta", "d") == {"v": 2}
+    finally:
+        store.close()
+
+
+def test_sqlite_writable_name_without_file_is_refused(tmp_path):
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    with pytest.raises(ValueError, match="gamma"):
+        SQLiteDocStore(_files(tmp_path), writable=frozenset({"alpha", "beta", "gamma"}))
+
+
+def test_sqlite_update_with_no_fields_is_an_error(tmp_path):
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    store = SQLiteDocStore(_files(tmp_path))
+    try:
+        ref = store.collection("alpha").document("d")
+        ref.set({"v": 1})
+        with pytest.raises(ValueError):
+            ref.update({})
+        with pytest.raises(ValueError):
+            store.batch().update(ref, {})
+    finally:
+        store.close()
+
+
+def test_sqlite_batch_cannot_commit_twice(tmp_path):
+    from tools.sqlite_docstore import SQLiteDocStore
+
+    store = SQLiteDocStore(_files(tmp_path))
+    try:
+        batch = store.batch()
+        batch.set(store.collection("alpha").document("d"), {"v": 1})
+        batch.commit()
+        with pytest.raises(ValueError, match="^batch already committed$"):
+            batch.commit()
+        with pytest.raises(ValueError, match="^batch already committed$"):
+            batch.set(store.collection("alpha").document("e"), {"v": 2})
     finally:
         store.close()
 
