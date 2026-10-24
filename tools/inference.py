@@ -180,38 +180,38 @@ def render_finding(
 
 
 def extract_json_object(text: str) -> dict:
-    """The one JSON object in a model answer.
+    """The one JSON object in a model answer, failing closed.
 
-    Strips a single surrounding code fence. If what remains is not a JSON
-    object, takes the span from the first ``{`` to the last ``}`` -- only when
-    that span is the sole top-level object.
+    Strips a single surrounding code fence. If the remainder is not itself a
+    JSON object, decodes once from the first ``{`` and accepts it only when no
+    array precedes it and no other structure follows it. Scanning never
+    resumes after a failed decode: the answer may echo untrusted scanner text,
+    and an object nested in malformed or array-wrapped output must not be
+    promoted to the proposal.
 
     Raises:
-        ValueError: when there is no object, or more than one.
+        ValueError: for anything but a single, complete top-level object.
     """
-    clean = _strip_fences(text or "")
+    text = _strip_fences(text.strip())
     try:
-        value = json.loads(clean)
+        value = json.loads(text)
     except ValueError:
-        value = None
+        pass
     else:
         if not isinstance(value, dict):
             raise ValueError("model answer is not a JSON object")
         return value
-    decoder = json.JSONDecoder()
-    found = []
-    index = clean.find("{")
-    while index != -1:
-        try:
-            obj, end = decoder.raw_decode(clean, index)
-        except ValueError:
-            index = clean.find("{", index + 1)
-            continue
-        found.append(obj)
-        index = clean.find("{", end)
-    if len(found) != 1:
-        raise ValueError("model answer must contain exactly one JSON object")
-    return found[0]
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("model answer contains no JSON object")
+    if "[" in text[:start]:
+        raise ValueError("model answer has an array before the object")
+    obj, end = json.JSONDecoder().raw_decode(text, start)
+    if not isinstance(obj, dict):
+        raise ValueError("model answer is not a JSON object")
+    if any(ch in text[end:] for ch in "{}[]"):
+        raise ValueError("model answer has more than one JSON structure")
+    return obj
 
 
 def propose(

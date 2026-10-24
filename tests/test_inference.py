@@ -58,5 +58,29 @@ def test_extract_json_object_rejects_array():
         inference.extract_json_object('[{"a":1}]')
 
 
+def test_extract_json_object_rejects_truncated_outer_with_inner_object():
+    with pytest.raises(ValueError):
+        inference.extract_json_object('{"a": {"b":1}, "c": ')
+
+
+def test_extract_json_object_rejects_garbage_then_object():
+    with pytest.raises(ValueError):
+        inference.extract_json_object('{oops} {"a":1}')
+
+
+def test_extract_json_object_rejects_array_in_prose():
+    with pytest.raises(ValueError):
+        inference.extract_json_object('Result: [{"a":1}]')
+
+
+def test_extract_json_object_rejects_trailing_object_after_prose():
+    with pytest.raises(ValueError):
+        inference.extract_json_object('Here: {"a":1} and also {"b":2}')
+
+
+def test_extract_json_object_keeps_nested_object_whole():
+    assert inference.extract_json_object('Result: {"a": {"b": 1}} done.') == {"a": {"b": 1}}
+
+
 def test_inference_module_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.inference"], cwd=REPO_ROOT, check=True)
