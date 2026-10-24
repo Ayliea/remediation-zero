@@ -98,3 +98,108 @@ def test_changed_roles_mid_cycle_requires_human_review(tmp_path):
 
 def test_module_is_standard_library_only():
     subprocess.run([sys.executable, '-S', '-c', 'import tools.model_roles'], cwd=REPO_ROOT, check=True)
+
+
+# --- from_settings: what RZ_MODEL / RZ_MODEL_ENDPOINT override ---------------
+
+OTHER = 'https://models.example.invalid/v1/chat/completions'
+
+
+def saved(model='llama3.1', family='llama', endpoint=URL):
+    return {'roles': {'proposer': {'format': 'openai_chat', 'endpoint': endpoint,
+                                   'model': model, 'family': family},
+                      'reviewer': None, 'summarizer': None, 'guard': None},
+            'same_family_policy': 'wait'}
+
+
+def test_from_settings_without_overrides_is_the_saved_proposer():
+    built = ModelRoles.from_settings(saved(), {})
+    assert built.proposer == role('proposer', 'llama3.1', 'llama')
+
+
+def test_rz_model_overrides_the_saved_model_and_resuggests_the_family():
+    built = ModelRoles.from_settings(saved(), {'RZ_MODEL': 'qwen2.5-coder'})
+    assert (built.proposer.model, built.proposer.family) == ('qwen2.5-coder', 'qwen')
+    assert built.proposer.endpoint == URL and built.proposer.format == 'openai_chat'
+
+
+def test_rz_model_equal_to_the_saved_model_keeps_the_chosen_family():
+    # The person chose "other" for a llama-named model; the same name keeps it.
+    built = ModelRoles.from_settings(saved(family='other'), {'RZ_MODEL': 'llama3.1'})
+    assert built.proposer.family == 'other'
+
+
+def test_rz_model_endpoint_overrides_only_the_endpoint():
+    built = ModelRoles.from_settings(saved(family='other'), {'RZ_MODEL_ENDPOINT': OTHER})
+    assert built.proposer == role('proposer', 'llama3.1', 'other', endpoint=OTHER)
+
+
+def test_both_overrides_apply_together():
+    built = ModelRoles.from_settings(saved(), {'RZ_MODEL_ENDPOINT': OTHER, 'RZ_MODEL': 'gpt-4o'})
+    assert built.proposer == role('proposer', 'gpt-4o', 'gpt', endpoint=OTHER)
+
+
+def test_rz_model_with_nothing_saved_needs_an_endpoint():
+    empty = dict(saved(), roles={'proposer': None, 'reviewer': None, 'summarizer': None, 'guard': None})
+    with pytest.raises(ValueError):
+        ModelRoles.from_settings(empty, {'RZ_MODEL': 'gpt-4o'})
+    built = ModelRoles.from_settings(empty, {'RZ_MODEL': 'gpt-4o', 'RZ_MODEL_ENDPOINT': OTHER})
+    assert built.proposer == role('proposer', 'gpt-4o', 'gpt', endpoint=OTHER)
+
+
+def test_overrides_touch_only_the_proposer():
+    settings = saved()
+    settings['roles']['reviewer'] = {'format': 'openai_chat', 'endpoint': URL,
+                                     'model': 'claude-x', 'family': 'claude'}
+    built = ModelRoles.from_settings(settings, {'RZ_MODEL': 'gpt-4o'})
+    assert built.reviewer == role('reviewer', 'claude-x', 'claude')
+
+
+# --- the adapter reads keys from the environ it was built with ---------------
+
+
+def test_adapter_uses_the_environ_from_settings_not_the_process(monkeypatch):
+    import tools.model_roles as model_roles
+    seen = []
+    monkeypatch.setattr(model_roles, 'build_adapter',
+                        lambda fmt, url, model, key: seen.append(key) or object())
+    monkeypatch.setenv('RZ_PROPOSER_API_KEY', 'process-key')
+    monkeypatch.delenv('RZ_MODEL_API_KEY', raising=False)
+    built = ModelRoles.from_settings(saved(), {'RZ_PROPOSER_API_KEY': 'passed-key'})
+    built.adapter('proposer')
+    assert seen == ['passed-key']
+    ModelRoles.from_settings(saved(), {}).adapter('proposer')
+    assert seen == ['passed-key', None]
+    # Never shown: the environ is not part of the roles' repr or equality.
+    assert 'passed-key' not in repr(built)
+    assert built == ModelRoles.from_settings(saved(), {})
+
+
+def test_adapter_without_an_environ_reads_the_process(monkeypatch):
+    import tools.model_roles as model_roles
+    seen = []
+    monkeypatch.setattr(model_roles, 'build_adapter',
+                        lambda fmt, url, model, key: seen.append(key) or object())
+    monkeypatch.setenv('RZ_PROPOSER_API_KEY', 'process-key')
+    ModelRoles(proposer=role('proposer', 'p', 'gpt')).adapter('proposer')
+    assert seen == ['process-key']
+
+
+def test_run_local_cycle_builds_adapters_from_its_environ(tmp_path, monkeypatch):
+    import tools.model_roles as model_roles
+    from scripts import local
+    from tools import local_settings
+    from tools.local_layout import Workspace
+    ws = Workspace(tmp_path / 'workspace')
+    local_settings.save(local_settings.settings_path(ws.root), dict(local_settings.DEFAULTS, **saved()))
+    seen = []
+
+    def stop(fmt, url, model, key):
+        seen.append(key)
+        raise RuntimeError('stop before any model call')
+
+    monkeypatch.setattr(model_roles, 'build_adapter', stop)
+    monkeypatch.setenv('RZ_PROPOSER_API_KEY', 'process-key')
+    with pytest.raises(RuntimeError, match='stop before'):
+        local.run_local_cycle(ws, 1, environ={'RZ_PROPOSER_API_KEY': 'passed-key'})
+    assert seen == ['passed-key']

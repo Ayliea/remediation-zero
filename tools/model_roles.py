@@ -7,7 +7,8 @@ Standard library only. The Vertex adapter is imported lazily, so the local
 edition never needs a cloud SDK. Provenance carries no endpoint and no key.
 """
 import os
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 
 from tools.model_transport import validate_endpoint
 from tools.models import FORMATS, build_adapter
@@ -71,6 +72,9 @@ class ModelRoles:
     summarizer: RoleConfig | None = None
     guard: RoleConfig | None = None
     same_family_policy: str = 'wait'
+    #: Where adapter() reads API keys; None means the process environment.
+    #: Never shown (repr=False) and not part of equality or the fingerprint.
+    environ: Mapping[str, str] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if self.same_family_policy not in POLICIES:
@@ -98,7 +102,8 @@ class ModelRoles:
         if config.format == 'vertex':
             from tools.vertex_models import VertexAdapter
             return VertexAdapter(vertex_client, config.model)
-        key = next((os.environ[n] for n in _key_names(role) if os.environ.get(n)), None)
+        environ = os.environ if self.environ is None else self.environ
+        key = next((environ[n] for n in _key_names(role) if environ.get(n)), None)
         if key and ('\n' in key or '\r' in key):
             raise ValueError('Invalid API key')
         return build_adapter(config.format, config.endpoint, config.model, key)
@@ -139,4 +144,5 @@ class ModelRoles:
                 'proposer', saved.format if saved else 'openai_chat',
                 endpoint or (saved.endpoint if saved else ''), use_model,
                 saved.family if same else suggest_family(use_model))
-        return cls(**built, same_family_policy=settings.get('same_family_policy', 'wait'))
+        return cls(**built, same_family_policy=settings.get('same_family_policy', 'wait'),
+                   environ=environ)
