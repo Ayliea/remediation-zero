@@ -89,7 +89,7 @@ def test_unsafe_endpoint_config_rejected(url):
 
 
 def test_endpoint_contract_and_no_secret_in_errors(monkeypatch):
-    import tools.model_endpoint as module
+    import tools.model_transport as module
     requests = []
     payload = {'finding_id': 'A', 'severity': 'high', 'sla_days': 7,
                'remediation': 'Verify first', 'evidence': ['example'], 'rationale': 'Example only'}
