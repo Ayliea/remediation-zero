@@ -52,6 +52,29 @@ def test_chase_cannot_write_decisions(ws):
         store.close()
 
 
+def test_dashboard_stage_writes_nothing(ws):
+    """Ruling 43: the dashboard reads every collection and holds no write access."""
+    assert STAGE_WRITES["dashboard"] == set()
+    store = ws.docs_for("dashboard")
+    try:
+        for name in ALL:
+            ref = store.collection(name).document("X-1")
+            with pytest.raises(PermissionError):
+                ref.set({"a": 1})
+            with pytest.raises(PermissionError):
+                ref.create({"a": 1})
+            batch = store.batch()
+            with pytest.raises(PermissionError):
+                batch.set(ref, {"a": 1})
+                batch.commit()
+            conn, alias = store._conn_of(name)
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                conn.execute(f"INSERT INTO {alias}.docs (collection, id, data, revision) "
+                             f"VALUES ('{name}', 'X-1', '{{}}', 1)")
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("stage", sorted(STAGE_WRITES))
 def test_every_stage_reads_every_collection(ws, stage):
     store = ws.docs_for(stage)

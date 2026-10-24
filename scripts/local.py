@@ -424,7 +424,7 @@ def main():
             finally:
                 ports.docs.close()
         elif args.command == 'serve':
-            docs = ws.docs_for('report')  # the dashboard reads; it writes no record
+            docs = ws.docs_for('dashboard')  # reads only: no collection is writable
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
             with HTTPServer(('127.0.0.1', args.port), handler(_View(docs), args.demo, config_path, command)) as server:
                 print(f'Local synthetic preview: http://127.0.0.1:{server.server_port}', flush=True)

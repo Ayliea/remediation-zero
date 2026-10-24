@@ -784,6 +784,51 @@ def test_cloud_snapshot_orders_cycles_by_their_real_fields(monkeypatch):
     assert cycle_orders == ["started_real_ts", "finished_sim_ts"]
 
 
+def test_serve_reads_through_the_dashboard_stage(ws, monkeypatch):
+    """Ruling 43: the served snapshot store cannot write any record."""
+    from scripts import local
+    stages, served = [], []
+    real_docs_for = Workspace.docs_for
+
+    def recording(self, stage):
+        stages.append(stage)
+        return real_docs_for(self, stage)
+
+    class FakeServer:
+        def __init__(self, address, handler_class):
+            self.server_port = address[1]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def serve_forever(self):
+            served.append(True)
+
+    captured = {}
+    real_handler = local.handler
+
+    def capture(store, *args, **kwargs):
+        captured["store"] = store
+        return real_handler(store, *args, **kwargs)
+
+    monkeypatch.setattr(Workspace, "docs_for", recording)
+    monkeypatch.setattr(local, "HTTPServer", FakeServer)
+    monkeypatch.setattr(local, "handler", capture)
+    monkeypatch.setattr("sys.argv", ["local", "--database", str(ws.root), "serve", "--port", "18081"])
+    local.main()
+
+    assert served == [True]
+    assert stages == ["dashboard"]
+    docs = captured["store"]._docs
+    with pytest.raises(PermissionError):
+        docs.collection("decisions").document("X-1").set({"a": 1})
+    assert captured["store"].snapshot()["counts"]["findings"] == 1
+    docs.close()
+
+
 def test_failed_runs_shown_on_dashboard(ws):
     from engine.snapshot import snapshot
     from scripts.local import run_local_cycle

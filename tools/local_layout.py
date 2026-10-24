@@ -53,6 +53,8 @@ STAGE_WRITES = {
     "seed": {"findings", "assets", "owners"},
     "approve": {"approvals"},
     "exception_accept": {"exceptions"} | set(SHARED),
+    # The served dashboard reads everything and writes nothing (Ruling 43).
+    "dashboard": set(),
 }
 SHARED_FILE = "shared"
 
