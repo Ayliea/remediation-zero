@@ -33,6 +33,14 @@ from tools.finding_lookup import FindingNotFound, lookup_finding
 SOURCE = (Path(__file__).resolve().parents[1] / "tools" / "finding_lookup.py").read_text()
 
 
+@pytest.fixture(autouse=True)
+def no_ambient_armor_credentials(monkeypatch):
+    import tools.finding_lookup as fl
+    def unavailable():
+        raise RuntimeError("offline test: no Model Armor credentials")
+    monkeypatch.setattr(fl, "_armor_token", unavailable)
+
+
 class FakeDoc:
     def __init__(self, data):
         self._data = data

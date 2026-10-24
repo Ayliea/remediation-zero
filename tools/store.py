@@ -94,6 +94,20 @@ class FirestoreIdempotencyStore:
             }
         )
 
+    def reserve_once(self, record: IdempotencyRecord) -> bool:
+        """Reserve an irreversible request slot before inference, never a lease."""
+        stamp = self._clock.now()
+        try:
+            self._collection.document(record.key).create({
+                "finding_id": record.finding_id, "action": record.action,
+                "cycle": record.cycle, "scheme": record.scheme,
+                "result": None, "status": "completed",
+                "real_ts": stamp.real_ts, "sim_ts": stamp.sim_ts,
+            })
+        except AlreadyExists:
+            return False
+        return True
+
     def acquire(self, record: IdempotencyRecord) -> CallClaim:
         """Atomically acquire a bounded lease for one effect.
 

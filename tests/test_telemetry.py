@@ -47,7 +47,8 @@ def test_a_span_actually_carries_the_finding_and_cycle():
     )
 
     exporter = InMemorySpanExporter()
-    provider = TracerProvider()
+    from opentelemetry.sdk.trace.sampling import ALWAYS_ON
+    provider = TracerProvider(sampler=ALWAYS_ON)
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
     # Not set_tracer_provider: that is a no-op when a provider already exists,

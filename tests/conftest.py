@@ -22,6 +22,10 @@ behaviour that matters, and there is a test asserting exactly that.
 """
 
 import os
+import runpy
+from pathlib import Path
+
+_OFFLINE = runpy.run_path(str(Path(__file__).with_name("offline_guard.py")))
 
 import pytest
 
@@ -44,3 +48,13 @@ def unconfigured_env(monkeypatch):
     """Strip configuration, for tests asserting that startup refuses."""
     monkeypatch.delenv("REASONING_MODEL", raising=False)
     return monkeypatch
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if _OFFLINE["violations"]:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter:
+            reporter.write_sep("=", "Forbidden offline-test operations")
+            for stack in _OFFLINE["violations"]:
+                reporter.write(stack)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

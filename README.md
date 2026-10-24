@@ -13,6 +13,52 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 
 ---
 
+## Run the portable local edition
+
+The post-hackathon local preview includes the Ayliea-themed dashboard, Settings,
+SQLite storage, and an optional user-selected model endpoint. Python 3.12 or
+newer is required; no pip packages or Google Cloud account are needed.
+
+From this repository folder:
+
+```bash
+python3 -S start-remediation-zero.py
+# Windows:
+py -3.12 -S start-remediation-zero.py
+```
+
+The launcher opens `http://127.0.0.1:8081`. Stop with Ctrl+C; run the same command
+to restart. Saved records and preferences remain in the installation folder,
+even when the launcher is started from another working directory.
+
+- Open **Settings** to configure a model endpoint and startup preferences.
+- Use `--saved` for saved records or `--demo` for illustrative examples.
+- Use `--no-browser`, `--port 8082`, or `--database /path/to/workspace.sqlite3`
+  when needed. Explicit launcher flags override saved preferences.
+- Model calls are separate, explicit operations; startup and Settings saves
+  never call a provider. API keys stay in the environment.
+
+This is a synthetic preview, not an infrastructure scanner. Local suggestions
+have no independent review. The original cloud evidence console below remains
+a separate application; these local Settings do not configure that service.
+
+### Build and verify the downloadable installer
+
+```bash
+python3 -S -m scripts.build_local_installer /absolute/path/install-remediation-zero.py
+python3 -S -m scripts.verify_local_install
+```
+
+The generated script installs without downloading packages. It shows its plan
+before proceeding and refuses to overwrite existing directories. Use a separate
+directory for a newer preview; an in-place upgrade is not implemented. Installer
+signing and a public release download are not yet configured.
+
+[Local setup and configuration](docs/development/local-edition.md) ·
+[Integration status and release gates](docs/development/platform-integration.md)
+
+---
+
 ## Judge it in 90 seconds
 
 1. **[Open the live evidence ledger](https://remediation-zero-console-978104855285.us-central1.run.app).** The first screen shows the real/scenario clock pair, the latest rescan's 106 confirmed remediations beside 102 findings it refuses to call fixed, and the human queue.

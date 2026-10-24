@@ -200,6 +200,9 @@ class IdempotencyStore(Protocol):
     def put(self, completed: "CompletedCall") -> None:
         """Record a completed call. Called only after the effect succeeded."""
 
+    def reserve_once(self, record: IdempotencyRecord) -> bool:
+        """Create an irreversible reservation; False if already reserved."""
+
     def acquire(self, record: IdempotencyRecord) -> "CallClaim":
         """Atomically claim `record`, or return its completed result/busy state."""
 
@@ -263,6 +266,13 @@ class InMemoryIdempotencyStore:
     def put(self, completed: CompletedCall) -> None:
         with self._lock:
             self._calls[completed.key] = completed
+
+    def reserve_once(self, record: IdempotencyRecord) -> bool:
+        with self._lock:
+            if record.key in self._calls or record.key in self._claims:
+                return False
+            self._calls[record.key] = CompletedCall(record, None)
+            return True
 
     def acquire(self, record: IdempotencyRecord) -> CallClaim:
         with self._lock:

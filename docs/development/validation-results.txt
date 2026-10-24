@@ -1,0 +1,87 @@
+Reconstruction validation, 2026-10-23
+Base: 6204de04193af56732a28d6b77e3ae720fe51a4a
+
+Fresh full offline suite:
+670 passed, 2 warnings in 22.44s
+Warnings: Starlette/httpx test client deprecation; ADK BaseAgentConfig deprecation.
+No network/credential/inference guard violations were recorded.
+
+Fresh emulator stdout:
+Synthetic emulator project: demo-rz-aa06c76624e9484c
+Contention deferrals: 4
+PASS concurrent request reservations
+Contention deferrals: 1
+PASS concurrent claims and stale worker suppression
+PASS atomic batch rollback on queue conflict
+Contention deferrals: 0
+Post-contention recovery attempts: 0
+PASS rejection/outage persistence and concurrent duplicate suppression
+PASS checkpoint replay and durable outage retry limits
+
+Earlier reconstructed emulator attempt failed after three passing checks:
+AssertionError: no writer committed
+Every terminal contender deferred under contention. The harness was updated to
+require eventual persistence after at most four post-race recovery attempts;
+the successful run above did not need that recovery branch.
+
+git diff --check passed.
+The final patch is checked and applied in a separate clean worktree at the base.
+Changed source bytes are compared with the rebuilt checkout during packaging.
+See the recovery handoff for scope and remaining gaps. Historical 718-test
+results belong to the lost implementation and are not claimed for this rebuild.
+
+Follow-up: interrupted assignment recovery
+New regression tests before fix: 2 failed (missing assignment on resumed cycle).
+After fix: 50 passed, 1 warning in 1.51s.
+Command: .venv/bin/pytest -q tests/test_recovery_rebuild.py tests/test_assignments.py tests/test_cycle_script.py
+Covered owned/unowned assets, no extra inference, no duplicate escalation,
+and stable assignment/SLA timestamps across subsequent reruns.
+The 670-test full result and five emulator checks above precede this follow-up.
+The current patch is rechecked and applied to the original base during packaging.
+
+Follow-up: killed worker and lease expiry
+Command: .venv/bin/pytest -q tests/test_emulator_validation.py tests/test_recovery_rebuild.py tests/test_store.py tests/test_clock.py
+71 passed, 1 existing ADK deprecation warning in 1.81s.
+Emulator: all six checks passed in synthetic project demo-rz-ce1f23d81dc54dab.
+Reservation contention deferrals: 5; claim deferrals: 0; terminal deferrals: 1.
+Post-contention recovery attempts: 0.
+PASS process kill, live-lease deferral and real lease expiry (10-second test lease)
+The five baseline emulator checks also passed in this follow-up run.
+Production lease remains 600 seconds; exact 600-second timing was not exercised.
+
+Portable local edition validation:
+82 targeted tests passed, 2 existing warnings in 2.13s.
+Four real loopback HTTP views and Host rejection passed with Python -S.
+Full suite: 689 passed, 1 failed, 2 existing warnings in 23.30s.
+Failure: missing .env.example entries for four new settings (including prior dashboard setting).
+After documenting settings: all 4 tests/test_env_example.py checks passed in 0.03s.
+No full rerun after the documentation-only fix. No live model calls.
+
+Installer follow-up: 36 targeted tests passed, 1 existing warning in 2.19s.
+Real installed-launcher HTTP check passed with Python -S (third-party packages disabled).
+Validated cancellation, non-overwrite behavior, reproducible payload, corrupted
+checksum rejection and initialization of the installed edition. Linux only;
+Windows/macOS and browser auto-opening not validated. No model calls.
+
+2026-10-24 — Settings implementation
+43 targeted tests passed, 1 pre-existing Starlette deprecation warning (1.48s).
+Covers private atomic persistence, invalid preferences, forged Host/Origin/token,
+Unicode and duplicate fields, unknown keys, no key disclosure, and no model calls.
+Fresh offline installer + installed Python -S launcher: all five Settings pages,
+real HTTP save, forged Origin rejection, saved mode/port/browser preferences passed.
+git diff --check passed.
+Browser visual QA and Windows/macOS execution remain unverified.
+No dependencies, paid model calls, pushes, deployment or cloud changes.
+Full offline suite: 712 passed, 2 existing deprecation warnings in 23.36s.
+After adding CLI saved-preference/environment-precedence coverage: all 21 Settings
+tests passed in 0.22s. This added test was not part of the earlier full-suite count.
+
+2026-10-24 — Repository integration
+Root launcher shared by checkout and installed bundle; path-independent database
+selection, explicit demo/saved override, port validation, child failure propagation.
+New standard-library-only installation/HTTP check passed on Linux using Python -S.
+Targeted suite: 48 passed, 1 existing warning in 1.55s.
+Full offline suite: 717 passed, 2 existing warnings in 23.63s.
+Compile checks and git diff --check passed. ui/app.py and both Dockerfiles unchanged.
+Linux/Windows/macOS CI matrix authored but not executed remotely.
+No public branch, commit, PR, release, model call, or cloud change performed.

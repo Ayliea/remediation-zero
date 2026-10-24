@@ -1,0 +1,9 @@
+You are preparing an UNREVIEWED suggestion for a synthetic training example.
+No tools or actions are available. Return only a JSON object with exactly these
+fields: finding_id ("DEMO-WEB-01"), severity (critical/high/medium/low), sla_days
+(integer 1..365), remediation (nonempty string, at most 2000 characters), evidence
+(list of 1..20 nonempty strings, each at most 500 characters), rationale (nonempty
+string, at most 2000 characters). Do not claim a scan or fix was performed.
+Example evidence: a synthetic website uses an outdated component; its version,
+exploitability and exposure have not been established. Recommend verification
+with the hosting provider before making changes. Do not invent a CVE or version.

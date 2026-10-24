@@ -97,7 +97,9 @@ class Verdict:
     reason: str
 
     def __post_init__(self) -> None:
-        if not self.reason.strip():
+        if not isinstance(self.ratified, bool):
+            raise ValueError("verdict ratified must be a bool")
+        if not isinstance(self.reason, str) or not self.reason.strip():
             raise ValueError(
                 "A verdict must state a reason. An unexplained rejection is "
                 "not reviewable and cannot be acted on."
@@ -120,6 +122,18 @@ class Adjudication:
 MAX_REVIEW_ATTEMPTS = 2
 
 
+class RetryStateError(RuntimeError):
+    """Persistence is unavailable or busy; do not invent a terminal verdict."""
+
+
+class AdjudicationFailure(ValueError):
+    """Model/validation failure carrying all evidence obtained so far."""
+
+    def __init__(self, adjudication: Adjudication):
+        self.adjudication = adjudication
+        super().__init__(adjudication.note)
+
+
 def adjudicate(
     finding: Mapping[str, Any],
     triage: Callable[[Mapping[str, Any]], Proposal],
@@ -140,21 +154,35 @@ def adjudicate(
     Returns:
         The adjudication record, including every reason given.
     """
+    if (isinstance(max_capacity_retries, bool)
+            or not isinstance(max_capacity_retries, int)
+            or not 1 <= max_capacity_retries <= 3):
+        raise ValueError("max_capacity_retries must be an integer between 1 and 3")
     verdicts: list[Verdict] = []
     proposal: Optional[Proposal] = None
 
     for attempt in range(1, MAX_REVIEW_ATTEMPTS + 1):
-        proposal = triage(finding)
-        expected_finding_id = str(finding.get("finding_id", "")).strip()
-        if proposal.finding_id != expected_finding_id:
-            raise ValueError(
-                "proposal finding_id does not match the finding being adjudicated"
-            )
+        try:
+            candidate = triage(finding)
+            if not isinstance(candidate, Proposal):
+                raise ValueError("triage must return Proposal")
+            if candidate.finding_id != str(finding.get("finding_id", "")).strip():
+                raise ValueError("proposal finding_id does not match the finding being adjudicated")
+            proposal = candidate
+        except (RetryStateError, AdjudicationFailure):
+            raise
+        except Exception as exc:
+            raise AdjudicationFailure(Adjudication(
+                str(finding.get("finding_id", "")), AdjudicationOutcome.HUMAN_QUEUE,
+                proposal, tuple(verdicts), attempt,
+                f"triage failed: {type(exc).__name__}: {exc}")) from exc
 
         verdict = None
         for capacity_attempt in range(1, max_capacity_retries + 1):
             try:
                 verdict = review(finding, proposal)
+                if not isinstance(verdict, Verdict):
+                    raise ValueError("review must return Verdict")
                 break
             except CapacityError as exc:
                 if capacity_attempt >= max_capacity_retries:
@@ -168,6 +196,13 @@ def adjudicate(
                         attempts=attempt,
                         note=f"reviewer unavailable after {capacity_attempt} attempts: {exc}",
                     )
+            except (RetryStateError, AdjudicationFailure):
+                raise
+            except Exception as exc:
+                raise AdjudicationFailure(Adjudication(
+                    str(finding.get("finding_id", "")), AdjudicationOutcome.HUMAN_QUEUE,
+                    proposal, tuple(verdicts), attempt,
+                    f"reviewer failed: {type(exc).__name__}: {exc}")) from exc
 
         assert verdict is not None
         verdicts.append(verdict)
