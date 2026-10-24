@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 """The guardrail port: Model Armor in the cloud, a guard model or nothing locally."""
+import http.client
 import subprocess
 import sys
 from pathlib import Path
@@ -174,3 +175,11 @@ def test_guard_prompt_says_not_to_quote_and_keeps_the_marker_whole():
     prompt = (REPO_ROOT / "prompts" / "guard_v1.md").read_text()
     assert "Do not quote" in prompt
     assert f"`{FENCE_BEGIN}`" in prompt and f"`{FENCE_END}`" in prompt
+
+
+@pytest.mark.parametrize("exc", [ConnectionResetError("reset"), OSError("socket"),
+                                 http.client.RemoteDisconnected("gone"),
+                                 http.client.IncompleteRead(b"")])
+def test_guard_transport_failure_withholds_unscreened(exc):
+    """A disconnect mid-response must fail closed, not abort the finding."""
+    _unusable(GuardModelScreen(FakeAdapter(exc=exc)).screen("x"))

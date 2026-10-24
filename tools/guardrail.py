@@ -7,6 +7,7 @@ Cloud: Model Armor. Local: a user-configured guard model, or nothing, in which
 case the text is withheld. Every failure path is blocked and unscreened, so a
 guard that cannot answer never lets text through. Standard library only.
 """
+import http.client
 from typing import Callable, Protocol
 
 from tools.adjudication import CapacityError
@@ -82,7 +83,8 @@ class GuardModelScreen:
         user = "\n".join((FENCE_BEGIN, _defang_fence(text), FENCE_END))
         try:
             response = self._adapter.complete(_load(_PROMPT), user, json_output=False)
-        except (CapacityError, ValueError):
+        except (CapacityError, ValueError, OSError, http.client.HTTPException):
+            # A disconnect mid-response included: withhold, never pass through.
             return _UNUSABLE
         return _parse(response)
 

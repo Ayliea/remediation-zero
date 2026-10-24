@@ -84,3 +84,24 @@ def test_extract_json_object_keeps_nested_object_whole():
 
 def test_inference_module_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.inference"], cwd=REPO_ROOT, check=True)
+
+
+def test_a_capacity_error_is_capacity_whatever_its_text():
+    from tools.adjudication import CapacityError
+    assert inference._is_capacity(CapacityError("Model endpoint temporarily unavailable"))
+    assert not inference._is_capacity(ValueError("Model endpoint rejected request"))
+
+
+def test_backoff_retries_a_transport_capacity_error(monkeypatch):
+    from tools.adjudication import CapacityError
+    monkeypatch.setattr(inference.time, "sleep", lambda _s: None)
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise CapacityError("Model endpoint temporarily unavailable")
+        return "ok"
+
+    assert inference._with_backoff(flaky, what="proposer") == "ok"
+    assert len(calls) == 3

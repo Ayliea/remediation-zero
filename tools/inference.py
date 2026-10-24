@@ -83,7 +83,10 @@ def _is_capacity(exc: Exception) -> bool:
 
     Gemma MaaS returns 429 RESOURCE_EXHAUSTED under load. That is never a
     verdict, so it has to be recognisable before anything else interprets it.
+    A transport `CapacityError` is load whatever its message says.
     """
+    if isinstance(exc, CapacityError):
+        return True
     text = str(exc)
     return "429" in text or "RESOURCE_EXHAUSTED" in text or "queue is full" in text
 

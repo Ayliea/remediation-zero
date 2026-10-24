@@ -59,7 +59,7 @@ def test_rejects_credentials_query_fragment(url):
         validate_endpoint(url)
 
 
-@pytest.mark.parametrize('code', [408, 429, 500, 502, 503, 504])
+@pytest.mark.parametrize('code', [408, 429, 500, 502, 503, 504, 529])
 def test_overload_is_capacity(monkeypatch, code):
     _stub(monkeypatch, _http_error(code))
     with pytest.raises(CapacityError):
@@ -71,6 +71,21 @@ def test_unreachable_and_timeout_are_capacity(monkeypatch, exc):
     _stub(monkeypatch, exc)
     with pytest.raises(CapacityError):
         post_json('https://m.test/v1', {}, {})
+
+
+@pytest.mark.parametrize('code', [501, 505, 520, 599])
+def test_every_server_error_is_capacity(monkeypatch, code):
+    _stub(monkeypatch, _http_error(code))
+    with pytest.raises(CapacityError):
+        post_json('https://m.test/v1', {}, {})
+
+
+@pytest.mark.parametrize('code', [400, 404, 499, 600])
+def test_client_errors_outside_408_429_are_rejection(monkeypatch, code):
+    _stub(monkeypatch, _http_error(code))
+    with pytest.raises(ValueError, match='rejected request') as info:
+        post_json('https://m.test/v1', {}, {})
+    assert not isinstance(info.value, CapacityError)
 
 
 def test_other_http_error_is_rejection(monkeypatch):

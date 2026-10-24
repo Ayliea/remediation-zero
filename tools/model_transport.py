@@ -19,7 +19,12 @@ MAX_INPUT_BYTES = 32768
 MAX_RESPONSE_BYTES = 65536
 MAX_OUTPUT_TOKENS = 2048
 TIMEOUT_SECONDS = 60
-_CAPACITY_CODES = {408, 429, 500, 502, 503, 504}
+
+
+# Load, not a verdict: request timeout, rate limit, and every server error
+# (500-599, including vendor overload codes such as 529).
+def _is_capacity_code(code):
+    return code in (408, 429) or 500 <= code <= 599
 
 
 class NoRedirects(HTTPRedirectHandler):
@@ -59,7 +64,7 @@ def post_json(url, body, headers):
         with _open(Request(url, data=data, headers=headers), timeout=TIMEOUT_SECONDS) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
-        if exc.code in _CAPACITY_CODES:
+        if _is_capacity_code(exc.code):
             raise CapacityError('Model endpoint temporarily unavailable') from None
         raise ValueError('Model endpoint rejected request') from None
     except (URLError, TimeoutError):
