@@ -14,10 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 'scripts/__init__.py', 'scripts/local.py', 'tools/__init__.py',
          'tools/clock.py', 'tools/idempotency.py', 'tools/adjudication.py',
          'tools/inference_journal.py', 'tools/sqlite_store.py', 'tools/model_endpoint.py', 'tools/model_transport.py', 'tools/model_roles.py',
+         'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py',
          'tools/models/__init__.py', 'tools/models/_common.py', 'tools/models/openai_chat.py',
          'tools/models/anthropic_messages.py', 'tools/models/gemini_api.py',
          'tools/local_settings.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
-         'prompts/local_suggestion_v1.txt')
+         'prompts/local_suggestion_v1.txt', 'prompts/guard_v1.md')
 
 
 def build(destination):

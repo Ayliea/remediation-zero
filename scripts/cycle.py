@@ -46,6 +46,7 @@ from tools.assignments import AssignmentWriter
 from tools.decisions import DecisionWriter
 from tools.enrichment import EnrichmentCache
 from tools.idempotency import derive_key
+from tools.guardrail import ModelArmorGuard
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
@@ -95,6 +96,7 @@ def main() -> int:
     armor_token = subprocess.run(
         ["gcloud", "auth", "application-default", "print-access-token"],
         capture_output=True, text=True, check=False).stdout.strip()
+    guard = ModelArmorGuard(armor, lambda: armor_token)
 
     store = FirestoreIdempotencyStore(client=client, clock=clock)
     writer = DecisionWriter(store=store, client=client, clock=clock)
@@ -157,7 +159,7 @@ def main() -> int:
             f"SCANNER COMMENT\n{raw_comment}\n\n"
             f"NVD DESCRIPTION\n{raw_description}"
         )
-        verdict = armor.screen(boundary_text, armor_token)
+        verdict = guard.screen(boundary_text)
         finding = dict(finding)
         finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
         enrichment = replace(

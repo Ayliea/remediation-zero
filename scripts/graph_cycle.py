@@ -53,6 +53,7 @@ from tools.assignments import AssignmentWriter
 from tools.clock import SimClock
 from tools.decisions import DecisionWriter
 from tools.enrichment import EnrichmentCache
+from tools.guardrail import ModelArmorGuard
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.ownership import resolve_owner
 from tools.store import FirestoreIdempotencyStore
@@ -90,6 +91,7 @@ def build_handlers(clients: dict) -> dict:
     genai_client = clients["genai"]
     armor = clients["armor"]
     armor_token = clients["armor_token"]
+    guard = ModelArmorGuard(armor, lambda: armor_token)
     writer = clients["decisions"]
     assigner = clients["assignments"]
     cycle_id = clients["cycle_id"]
@@ -107,9 +109,8 @@ def build_handlers(clients: dict) -> dict:
 
         raw = finding.get("scanner_comment") or ""
         raw_description = enrichment.description or ""
-        verdict = armor.screen(
-            f"SCANNER COMMENT\n{raw}\n\nNVD DESCRIPTION\n{raw_description}",
-            armor_token,
+        verdict = guard.screen(
+            f"SCANNER COMMENT\n{raw}\n\nNVD DESCRIPTION\n{raw_description}"
         )
         finding = dict(finding)
         finding["scanner_comment"] = apply_verdict(raw, verdict)
