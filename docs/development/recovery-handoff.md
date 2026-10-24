@@ -138,9 +138,9 @@ This discovery preceded the dashboard implementation below.
 
 ## Small-business owner dashboard
 
-The dashboard is mounted in the read-only console at `/dashboard`, sharing
-its snapshot cache, security headers and viewer-only service account. The
-console page at `/` is unchanged. Rendering lives in ui/dashboard_view.py,
+The dashboard is mounted at `/` in the read-only console app, sharing its
+snapshot cache, security headers and viewer-only service account. The evidence
+console page is at `/console`, and `/dashboard` permanently redirects to `/`. Rendering lives in ui/dashboard_view.py,
 which the local SQLite edition also uses. Overview, My infrastructure, Action list and
 Activity reuse the existing snapshot shape. Recommendations are deduplicated
 within the latest 60 decisions and sorted by recorded severity; they are not
@@ -151,7 +151,7 @@ Run locally with synthetic fixtures (no cloud reads):
 
 ```bash
 RZ_DASHBOARD_DEMO=1 .venv/bin/uvicorn ui.app:app --host 127.0.0.1 --port 8081
-# then open http://127.0.0.1:8081/dashboard
+# then open http://127.0.0.1:8081/
 ```
 
 The application labels the environment synthetic, escapes record text, has no

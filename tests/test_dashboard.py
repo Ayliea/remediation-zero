@@ -13,14 +13,14 @@ from ui import dashboard_view
 def test_demo_navigation_without_cloud(monkeypatch, view):
     monkeypatch.setenv("RZ_DASHBOARD_DEMO", "1")
     monkeypatch.setattr(console, "cached_snapshot", lambda: pytest.fail("cloud read in demo"))
-    response = TestClient(console.app).get("/dashboard", params={"view": view})
+    response = TestClient(console.app).get("/", params={"view": view})
     assert response.status_code == 200
     assert "Illustrative data only" in response.text
     assert response.headers["cache-control"] == "no-store"
     assert "script-src 'none'" in response.headers["content-security-policy"]
     assert 'alt="Remediation Zero by Ayliea"' in response.text
-    assert 'src="/dashboard/logo.png"' in response.text and "base64," not in response.text
-    assert 'href="/dashboard?view=' in response.text and 'href="/?view=' not in response.text
+    assert 'src="/logo.png"' in response.text and "base64," not in response.text
+    assert 'href="/?view=' in response.text and 'href="/dashboard?view=' not in response.text
     assert '--heading:#1b2a4a' in response.text
     assert '<details open' not in response.text
 
@@ -31,7 +31,7 @@ def test_failure_is_not_empty_success(monkeypatch, caplog):
         raise RuntimeError("secret diagnostic detail")
     monkeypatch.setattr(console, "cached_snapshot", fail)
     with caplog.at_level("WARNING", logger="remediation_zero.console"):
-        response = TestClient(console.app).get("/dashboard")
+        response = TestClient(console.app).get("/")
     assert response.status_code == 503
     assert response.headers["cache-control"] == "no-store"
     logged = [json.loads(r.getMessage()) for r in caplog.records
@@ -66,13 +66,13 @@ def test_recent_history_deduplicates_but_activity_preserves_rejection():
 def test_no_write_endpoints(monkeypatch):
     monkeypatch.setenv("RZ_DASHBOARD_DEMO", "1")
     client = TestClient(console.app)
-    assert client.post("/dashboard").status_code == 405
-    assert client.get("/dashboard?view=invalid").status_code == 404
+    assert client.post("/").status_code == 405
+    assert client.get("/?view=invalid").status_code == 404
     assert client.get("/openapi.json").status_code == 404
 
 
 def test_logo_is_served_cacheable():
-    response = TestClient(console.app).get("/dashboard/logo.png")
+    response = TestClient(console.app).get("/logo.png")
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert "max-age" in response.headers["cache-control"]
@@ -100,3 +100,12 @@ def test_dashboard_labels_same_family():
     assert page.count("Recommendation reviewed") == 1
     assert "HELD_FIX" not in page
     assert "<b>E</b>" not in page and "&lt;b&gt;E&lt;/b&gt;" in page
+
+
+def test_old_dashboard_url_redirects_permanently_and_keeps_the_view():
+    client = TestClient(console.app)
+    response = client.get("/dashboard?view=actions", follow_redirects=False)
+    assert response.status_code == 308
+    assert response.headers["location"] == "/?view=actions"
+    bare = client.get("/dashboard", follow_redirects=False)
+    assert bare.status_code == 308 and bare.headers["location"] == "/"

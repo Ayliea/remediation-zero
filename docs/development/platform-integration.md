@@ -42,8 +42,9 @@ reinstalling cannot overwrite preferences. That job has not run remotely.
 ## What stays separate
 
 - `ui/app.py` and the original Dockerfile remain the cloud evidence console.
-- The cloud dashboard is mounted read-only at `/dashboard` in `ui/app.py`; it
-  has no Settings writes.
+- The cloud dashboard is mounted read-only at `/` in `ui/app.py`, as the local
+  edition's is; the evidence console is at `/console`, and `/dashboard`
+  permanently redirects to `/`. It has no Settings writes.
 - The local SQLite edition is not a cloud backend and does not synchronize its
   workspace or settings with Firestore.
 - Real scanner ingestion, an import workflow, the approved inventory designs

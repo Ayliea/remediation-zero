@@ -38,9 +38,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
+from concurrent.futures import ThreadPoolExecutor
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -61,6 +63,14 @@ _reports_client: firestore.Client | None = None
 _snapshot_cache: tuple[float, dict] | None = None
 _snapshot_lock = Lock()
 CACHE_SECONDS = 10
+
+#: How long a page waits for the Firestore projection. An expired Google login
+#: blocks inside the credential refresh, where no per-call timeout reaches, and
+#: the page hung with it. Past this the page says "unknown" (503) instead.
+SNAPSHOT_TIMEOUT_SECONDS = 15
+# One worker, so a read that never returns holds at most one thread. Requests
+# arriving behind it wait their own bounded time and get the same 503.
+_snapshot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot")
 
 #: Reports live in their own database. See tools/reports.py for why.
 REPORTS_DATABASE = "reports"
@@ -253,7 +263,9 @@ def cached_snapshot(now_real_ts: float | None = None) -> dict:
         cached = _snapshot_cache
         if cached is not None and cached[0] > now_real_ts:
             return cached[1]
-        value = snapshot()
+        # TimeoutError propagates to the route, which renders "unknown".
+        value = _snapshot_executor.submit(snapshot).result(
+            timeout=SNAPSHOT_TIMEOUT_SECONDS)
         _snapshot_cache = (now_real_ts + CACHE_SECONDS, value)
         return value
 
@@ -703,9 +715,27 @@ async def defensive_headers(request: Request, call_next):
     return response
 
 
-@app.get("/", response_class=HTMLResponse)
+CONSOLE_UNAVAILABLE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<title>Remediation Zero · evidence console</title></head><body>'
+    '<h1>Evidence unavailable</h1><p>The records could not be read, so their '
+    'state is unknown. This is not an empty result. Refresh to try again.</p>'
+    '</body></html>'
+)
+
+
+@app.get("/console", response_class=HTMLResponse)
 def index(request: Request):
-    body = render(cached_snapshot())
+    try:
+        data = cached_snapshot()
+    except Exception as exc:
+        # The class name only, as on the dashboard: str(exc) can carry detail
+        # the public page and its log must not.
+        logger.warning(json.dumps({"event": "console_snapshot_failed",
+                                   "error": type(exc).__name__}, sort_keys=True))
+        return HTMLResponse(CONSOLE_UNAVAILABLE, status_code=503,
+                            headers={"Cache-Control": "no-store"})
+    body = render(data)
     etag = f'"{sha256(body.encode("utf-8")).hexdigest()}"'
     headers = {
         "Cache-Control": f"public, max-age={CACHE_SECONDS}, stale-while-revalidate=20",
@@ -717,14 +747,15 @@ def index(request: Request):
 
 
 # --- owner dashboard ----------------------------------------------------------
-# A plain-language view over the same snapshot, mounted here so it shares the
-# console's cache, headers and read-only service account. Rendering lives in
+# A plain-language view over the same snapshot, mounted at the root as the local
+# edition's is, sharing the console's cache, headers and read-only service
+# account. The evidence console lives at /console. Rendering lives in
 # ui/dashboard_view.py, which the local SQLite edition also uses.
 
 DASHBOARD_LOGO = REPO_ROOT / "ui" / "assets" / "remediation-zero-logo.png"
 
 
-@app.get("/dashboard/logo.png")
+@app.get("/logo.png")
 def dashboard_logo():
     return Response(content=DASHBOARD_LOGO.read_bytes(), media_type="image/png",
                     headers={"Cache-Control": "public, max-age=86400"})
@@ -737,12 +768,19 @@ def dashboard_unavailable(exc: Exception, view: str) -> HTMLResponse:
     logger.warning(json.dumps({"event": "dashboard_snapshot_failed",
                                "error": type(exc).__name__, "view": view},
                               sort_keys=True))
-    page = render_dashboard({}, view, unavailable=True, base="/dashboard",
-                            logo_url="/dashboard/logo.png")
+    page = render_dashboard({}, view, unavailable=True, base="/",
+                            logo_url="/logo.png")
     return HTMLResponse(page, status_code=503, headers={"Cache-Control": "no-store"})
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard")
+def dashboard_moved(request: Request):
+    """The dashboard's old address. Permanent, and the ?view= query survives."""
+    query = request.url.query
+    return RedirectResponse("/" + (f"?{query}" if query else ""), status_code=308)
+
+
+@app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request):
     view = request.query_params.get("view", "overview")
     if view not in DASHBOARD_VIEWS:
@@ -752,6 +790,6 @@ def dashboard(request: Request):
         data = demo_snapshot() if demo else cached_snapshot()
     except Exception as exc:
         return dashboard_unavailable(exc, view)
-    page = render_dashboard(data, view, demo=demo, base="/dashboard",
-                            logo_url="/dashboard/logo.png")
+    page = render_dashboard(data, view, demo=demo, base="/",
+                            logo_url="/logo.png")
     return HTMLResponse(page, headers={"Cache-Control": "no-store"})

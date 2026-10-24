@@ -91,7 +91,7 @@ requirement.
 | Guardrails | Model Armor on all implemented untrusted ingress |
 | Secrets | Secret Manager, granted per agent on the secret itself |
 | Telemetry | Cloud Trace, Cloud Logging |
-| Interface | Cloud Run: evidence console at `/`, owner dashboard at `/dashboard` |
+| Interface | Cloud Run: owner dashboard at `/`, evidence console at `/console` (`/dashboard` redirects to `/`) |
 | Infrastructure | Terraform in `infra/` |
 | Language | Python 3.12.3 locally; ADK requires >=3.10 |
 
@@ -149,7 +149,7 @@ python3 -S -m scripts.local --help            # init | seed | cycle | rescan | e
 python3 -S -m scripts.build_local_installer /abs/path/install-remediation-zero.py
 python3 -S -m scripts.verify_local_install
 
-# console + dashboard dev server, synthetic data, no cloud reads on /dashboard
+# dashboard (/) + console (/console) dev server; synthetic data, no cloud reads on /
 RZ_DASHBOARD_DEMO=1 .venv/bin/uvicorn ui.app:app --host 127.0.0.1 --port 8095 --reload --reload-dir ui --reload-dir tools
 
 # cloud edition
