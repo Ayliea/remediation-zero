@@ -173,7 +173,7 @@ def snapshot() -> dict:
     decisions = rows("decisions", newest_by="real_ts")
     tickets = rows("tickets")
     exceptions = rows("exceptions")
-    cycles = rows("cycles", newest_by="real_ts")
+    cycles = rows("cycles", newest_by="started_real_ts")  # Ruling 42: cycles have no real_ts
     # The scan manifests. Their stored counts are read, never recomputed: the
     # rescan wrote what it concluded, and a console that re-derives it can
     # disagree with the record it exists to display.
@@ -198,7 +198,7 @@ def snapshot() -> dict:
         newest_value(client, "sla_clocks", "started_sim_ts"),
         newest_value(client, "decisions", "sim_ts"),
         newest_value(client, "exceptions", "accepted_sim_ts"),
-        newest_value(client, "cycles", "sim_ts"),
+        newest_value(client, "cycles", "finished_sim_ts"),
         newest_value(report_client, "reports", "sim_ts"),
     )
 

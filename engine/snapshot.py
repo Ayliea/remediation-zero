@@ -38,7 +38,7 @@ def snapshot(docs: DocStore) -> dict:
     decisions = rows("decisions", newest_by="real_ts")
     tickets = rows("tickets")
     exceptions = rows("exceptions")
-    cycles = rows("cycles", newest_by="real_ts")
+    cycles = rows("cycles", newest_by="started_real_ts")  # Ruling 42: cycles have no real_ts
     scans = rows("scans", limit=20, newest_by="real_ts")
     reports = rows("reports", limit=10, newest_by="real_ts")
     failed_runs = rows("failed_runs", newest_by="real_ts")
@@ -58,7 +58,7 @@ def snapshot(docs: DocStore) -> dict:
         newest_value("sla_clocks", "started_sim_ts"),
         newest_value("decisions", "sim_ts"),
         newest_value("exceptions", "accepted_sim_ts"),
-        newest_value("cycles", "sim_ts"),
+        newest_value("cycles", "finished_sim_ts"),
         newest_value("reports", "sim_ts"),
     )
 

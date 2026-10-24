@@ -744,6 +744,46 @@ def test_snapshot_has_cloud_keys(ws, monkeypatch):
     assert local["failed_runs"] == []
 
 
+def test_snapshot_returns_a_stored_cycle(ws):
+    """Ruling 42: cycle records carry started_real_ts, never real_ts."""
+    from engine.snapshot import snapshot
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=cross_family(), clock=SimClock(ClockMode.SIM), environ={})
+    stored = docs(ws, "cycles")["cycle-001"]
+    store = ws.docs_for("report")
+    data = snapshot(store)
+    store.close()
+    assert [c["cycle_id"] for c in data["cycles"]] == ["cycle-001"]
+    assert data["sim_now"] >= stored["finished_sim_ts"]
+
+
+class _RecordingQuery(_EmptyQuery):
+    def __init__(self, name, seen):
+        self.name, self.seen = name, seen
+
+    def order_by(self, field, **_kwargs):
+        self.seen.append((self.name, field))
+        return self
+
+
+class _RecordingClient:
+    def __init__(self):
+        self.seen = []
+
+    def collection(self, name):
+        return _RecordingQuery(name, self.seen)
+
+
+def test_cloud_snapshot_orders_cycles_by_their_real_fields(monkeypatch):
+    import ui.app as cloud
+    client = _RecordingClient()
+    monkeypatch.setattr(cloud, "db", lambda: client)
+    monkeypatch.setattr(cloud, "reports_db", lambda: _EmptyClient())
+    cloud.snapshot()
+    cycle_orders = [field for name, field in client.seen if name == "cycles"]
+    assert cycle_orders == ["started_real_ts", "finished_sim_ts"]
+
+
 def test_failed_runs_shown_on_dashboard(ws):
     from engine.snapshot import snapshot
     from scripts.local import run_local_cycle
