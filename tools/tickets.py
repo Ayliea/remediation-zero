@@ -289,7 +289,9 @@ class TicketWriter:
                 )
                 batch.update(
                     self._db.collection(SLA_COLLECTION).document(finding_id),
-                    {"status": "breached"}
+                    {"status": "breached",
+                     "breached_real_ts": stamp.real_ts,
+                     "breached_sim_ts": now_sim_ts}
                 )
                 batch.commit()
                 self._deliver(ticket_ref, pending)

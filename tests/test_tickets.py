@@ -231,6 +231,16 @@ def test_escalation_marks_the_sla_clock_breached(writer, client):
     assert client.docs[(SLA_COLLECTION, "RZ-1")]["status"] == "breached"
 
 
+def test_escalation_stamps_the_breach_with_both_times(writer, client):
+    # Constraint 2: the breach is a lifecycle event, so it records when it
+    # really happened and where the scenario was, not just the new status.
+    act(writer, ChaseAction.ESCALATE, state(ticket_open=True), now=1040 * DAY)
+
+    clock = client.docs[(SLA_COLLECTION, "RZ-1")]
+    assert isinstance(clock["breached_real_ts"], float) and clock["breached_real_ts"] > 0
+    assert clock["breached_sim_ts"] == 1040 * DAY
+
+
 def test_the_human_queue_entry_says_why_a_person_is_needed(writer, client):
     act(writer, ChaseAction.HUMAN_QUEUE, state(ticket_open=True),
         now=1020 * DAY)

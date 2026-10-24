@@ -121,6 +121,7 @@ class ExceptionWriter:
                 {
                     "finding_id": finding_id,
                     "status": "accepted",
+                    "paused_real_ts": stamp.real_ts,
                     "paused_sim_ts": stamp.sim_ts,
                 },
                 merge=True,
@@ -151,7 +152,9 @@ class ExceptionWriter:
                 merge=True,
             )
             self._db.collection(SLA_COLLECTION).document(finding_id).set(
-                {"finding_id": finding_id, "status": "reopened_pending_triage"},
+                {"finding_id": finding_id, "status": "reopened_pending_triage",
+                 "reopened_real_ts": stamp.real_ts,
+                 "reopened_sim_ts": now_sim_ts},
                 merge=True,
             )
             self._db.collection(HUMAN_QUEUE).document(

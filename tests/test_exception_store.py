@@ -240,3 +240,25 @@ def test_accepting_and_reopening_do_not_share_a_key(writer, client):
     from tools.idempotency import derive_key
     assert derive_key("RZ-1", "accept_risk", 3) != derive_key(
         "RZ-1", "reopen_exception", 3)
+
+
+# --- both clocks on the deadline-clock stub ------------------------------------
+# Constraint 2: a persisted lifecycle record carries real_ts and sim_ts. The
+# stubs used to carry the scenario time alone (accept) or no time at all
+# (reopen), so nothing recorded when the pause or the reopening really happened.
+
+def test_accepting_stamps_the_paused_clock_with_both_times(writer, client):
+    accept(writer)
+    stub = client.docs[(SLA_COLLECTION, "RZ-1")]
+    assert isinstance(stub["paused_real_ts"], float) and stub["paused_real_ts"] > 0
+    assert stub["paused_sim_ts"] == client.docs[(COLLECTION, "RZ-1")]["accepted_sim_ts"]
+
+
+def test_reopening_stamps_the_clock_with_both_times(writer, client):
+    lapsed = Exception_(finding_id="RZ-1", accepted_by="dev@example.invalid",
+                        reason="Change window.", accepted_sim_ts=1000 * DAY,
+                        ttl_days=30)
+    writer.reopen(lapsed, cycle=9, now_sim_ts=1031 * DAY)
+    stub = client.docs[(SLA_COLLECTION, "RZ-1")]
+    assert isinstance(stub["reopened_real_ts"], float) and stub["reopened_real_ts"] > 0
+    assert stub["reopened_sim_ts"] == 1031 * DAY
