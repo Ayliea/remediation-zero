@@ -148,6 +148,55 @@ def test_stage_writes_reference_known_collections():
         assert writes <= set(owners), stage
 
 
+def test_init_refuses_nonempty_foreign_directory(tmp_path):
+    root = tmp_path / "myproject"
+    root.mkdir()
+    root.chmod(0o755)
+    (root / "notes.txt").write_text("hi")
+    with pytest.raises(ValueError, match="not a Remediation Zero workspace"):
+        Workspace(root).init()
+    assert sorted(p.name for p in root.iterdir()) == ["notes.txt"]
+    if os.name == "posix":
+        assert root.stat().st_mode & 0o777 == 0o755
+
+
+def test_init_adopts_empty_directory(tmp_path):
+    root = tmp_path / "empty"
+    root.mkdir()
+    root.chmod(0o755)
+    Workspace(root).init()
+    assert (root / "shared.sqlite3").exists() and (root / "chase.sqlite3").exists()
+    if os.name == "posix":
+        assert root.stat().st_mode & 0o777 == 0o700
+
+
+def test_init_reopens_existing_workspace(ws):
+    store = ws.docs_for("chase")
+    store.collection("tickets").document("T-1").set({"a": 1})
+    store.close()
+    (ws.root / "extra.txt").write_text("x")  # a workspace may hold other files
+    ws.init()
+    store = ws.docs_for("report")
+    try:
+        assert store.collection("tickets").document("T-1").get().to_dict() == {"a": 1}
+    finally:
+        store.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks and modes")
+def test_init_refuses_symlinked_database_file(ws, tmp_path):
+    ws.init()
+    target = tmp_path / "scratch.sqlite3"
+    target.write_bytes(b"")
+    target.chmod(0o644)
+    link = ws.file_for("tickets")
+    link.unlink()
+    link.symlink_to(target)
+    with pytest.raises(OSError):
+        ws.init()
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
 def test_local_layout_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.local_layout"],
                    cwd=REPO_ROOT, check=True)

@@ -70,8 +70,8 @@ from tools.docstore import (
 
 BUSY_TIMEOUT_MS = 10000
 DOCS_SCHEMA = ("CREATE TABLE IF NOT EXISTS {alias}.docs(collection TEXT, id TEXT, "
-           "data TEXT NOT NULL, revision INTEGER NOT NULL, "
-           "PRIMARY KEY(collection, id))")
+                "data TEXT NOT NULL, revision INTEGER NOT NULL, "
+                "PRIMARY KEY(collection, id))")
 _ABSENT = object()
 
 

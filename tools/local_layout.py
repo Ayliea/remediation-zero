@@ -17,7 +17,10 @@ has the shared file read-only can still record an idempotency key.
 Permissions: the workspace directory is 0700 and every database file 0600,
 including files recreated after deletion. Files are created with an explicit
 `os.open(..., 0o600)` before SQLite opens them (no process-wide umask change),
-and SQLite's journal files inherit the database file's mode.
+and SQLite's journal files inherit the database file's mode. Every `init()`
+tightens an existing file back to 0600: that is the intended default for
+customer data, not an accident. A root is adopted only if it is new, empty, or
+already holds `shared.sqlite3`; any other directory is refused untouched.
 
 No clock is read here. Standard library only.
 """
@@ -56,9 +59,13 @@ SHARED_FILE = "shared"
 
 def _private_file(path: Path) -> None:
     """Create `path` with mode 0600 if absent; tighten it if it exists."""
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
-    os.close(fd)
-    os.chmod(path, 0o600)
+    # O_NOFOLLOW: a symlinked database file fails (ELOOP) rather than having
+    # its target chmodded. fchmod acts on the descriptor, not the path.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
 
 
 class Workspace:
@@ -78,6 +85,17 @@ class Workspace:
 
     def init(self) -> None:
         """Create the directory, every file and its tables. Safe to repeat."""
+        self._init()
+
+    def _init(self) -> SQLiteStore:
+        """`init()`, returning the journal store it built."""
+        # Ruling 20: adopt a root only if it is new, empty, or already a
+        # workspace (shared.sqlite3 is the marker). Never chmod a foreign dir.
+        if self.root.exists():
+            names = os.listdir(self.root)
+            if names and f"{SHARED_FILE}.sqlite3" not in names:
+                raise ValueError(f"{self.root} is not empty and is not a Remediation Zero "
+                                 "workspace; choose an empty or new directory")
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
         for stem in (*AGENT_FILES, SHARED_FILE):
@@ -89,7 +107,7 @@ class Workspace:
                 conn.commit()
             finally:
                 conn.close()
-        SQLiteStore(self._path(SHARED_FILE))  # creates the journal tables
+        return SQLiteStore(self._path(SHARED_FILE))  # creates the journal tables
 
     def docs_for(self, stage: str) -> SQLiteDocStore:
         writable = STAGE_WRITES[stage]  # KeyError for an unknown stage
@@ -98,5 +116,4 @@ class Workspace:
         return SQLiteDocStore(files, writable=frozenset(writable))
 
     def journal(self) -> SQLiteStore:
-        self.init()
-        return SQLiteStore(self._path(SHARED_FILE))
+        return self._init()
