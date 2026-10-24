@@ -63,7 +63,13 @@ def _private_file(path: Path) -> None:
     # its target chmodded. fchmod acts on the descriptor, not the path.
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        os.fchmod(fd, 0o600)
+        # Windows (before Python 3.13) has no fchmod; there chmod only toggles
+        # the read-only bit, and privacy comes from the user profile's ACLs,
+        # not POSIX modes.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
+        else:
+            os.chmod(path, 0o600)
     finally:
         os.close(fd)
 

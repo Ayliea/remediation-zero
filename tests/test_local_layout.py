@@ -197,6 +197,13 @@ def test_init_refuses_symlinked_database_file(ws, tmp_path):
     assert target.stat().st_mode & 0o777 == 0o644
 
 
+def test_private_file_works_without_fchmod(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "fchmod", raising=False)
+    ws = Workspace(tmp_path / "ws")
+    ws.init()
+    assert ws.file_for("tickets").exists() and ws.file_for("human_queue").exists()
+
+
 def test_local_layout_is_stdlib_only():
     subprocess.run([sys.executable, "-S", "-c", "import tools.local_layout"],
                    cwd=REPO_ROOT, check=True)
