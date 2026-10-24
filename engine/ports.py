@@ -84,13 +84,19 @@ class NoDelivery:
 
 @dataclass(frozen=True)
 class Ports:
+    """What one edition hands the engine.
+
+    A stage that needs a port raises `ValueError` if it is None; the cloud
+    scripts pass None for ports a stage never reads.
+    """
+
     docs: DocStore
-    journal: Any
+    journal: Optional[Any]
     clock: SimClock
     roles: Optional[ModelRoles]
     guard: Guardrail
     delivery: TicketDelivery
-    memory: Memory
+    memory: Optional[Memory]
     telemetry: Telemetry
     #: Local wiring sets this; the engine checks it rather than the store type.
     record_failed_runs: bool = False

@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 from engine.ports import Ports
 from tools.metrics import compute_metrics
 from tools.reports import ReportWriter, write_summary
+from tools.telemetry import cycle_id
 
 logger = logging.getLogger("remediation_zero.reporting")
 
@@ -68,8 +69,7 @@ def run_report(ports: Ports, cycle: int, *, writer: Optional[ReportWriter] = Non
     document_id = writer.record(metrics=metrics, summary=summary, cycle=cycle)
 
     logger.info(json.dumps({
-        # Same rendering as tools.telemetry.cycle_id for an int cycle.
-        "event": "report_written", "cycle_id": f"cycle-{int(cycle):03d}",
+        "event": "report_written", "cycle_id": cycle_id(cycle),
         "finding_id": "-", "report_id": document_id,
         "decisions": metrics["decisions_total"],
         "disagreement_rate": round(metrics["disagreement_rate"], 3),

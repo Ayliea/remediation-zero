@@ -49,6 +49,9 @@ def load_scan(path: Path) -> dict:
 
 def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
     """Reconcile `scan` against `findings` and, unless `dry_run`, record it."""
+    if not dry_run and ports.journal is None:
+        # Refuse before any read or write: every apply write is keyed.
+        raise ValueError("rescan apply needs a journal")
     cycle_id = f"cycle-{cycle:03d}"
 
     previous = [doc.to_dict() for doc in ports.docs.collection("findings").stream()]

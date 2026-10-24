@@ -366,3 +366,19 @@ def test_installed_local_edition_can_import_the_stages(tmp_path):
          "import engine.chase, engine.sweep, engine.report, engine.rescan, engine.seed"],
         cwd=destination, capture_output=True, text=True, timeout=30)
     assert imported.returncode == 0, imported.stderr
+
+
+def test_rescan_apply_without_journal_refuses_before_writing(ws):
+    from dataclasses import replace
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    ports = replace(ports_for(ws, "rescan", clock), journal=None)
+    before = dump(ws)
+
+    with pytest.raises(ValueError, match="rescan apply needs a journal"):
+        run_rescan(ports, 12, SCAN, dry_run=False)
+
+    after = dump(ws)
+    assert {k: len(v) for k, v in after.items()} == {k: len(v) for k, v in before.items()}
+    assert after == before
