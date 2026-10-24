@@ -21,6 +21,8 @@ from a reviewer that ratified everything.
 """
 
 import pytest
+from types import SimpleNamespace
+from google.api_core.exceptions import AlreadyExists
 
 from tools.adjudication import (
     Adjudication,
@@ -46,6 +48,15 @@ class FakeDoc:
         self._log.append(self._key)
         self._docs[self._key] = dict(data)
 
+    def get(self):
+        data = self._docs.get(self._key)
+        return SimpleNamespace(exists=data is not None, to_dict=lambda: data)
+
+    def create(self, data):
+        if self._key in self._docs:
+            raise AlreadyExists("exists")
+        self.set(data)
+
 
 class FakeCollection:
     def __init__(self, docs, name, log):
@@ -54,6 +65,10 @@ class FakeCollection:
     def document(self, doc_id):
         return FakeDoc(self._docs, (self._name, doc_id), self._log)
 
+    def stream(self):
+        return [FakeDoc(self._docs, key, self._log).get()
+                for key in self._docs if key[0] == self._name]
+
 
 class FakeClient:
     def __init__(self):
@@ -61,6 +76,24 @@ class FakeClient:
 
     def collection(self, name):
         return FakeCollection(self.docs, name, self.writes)
+
+    def batch(self):
+        return FakeBatch(self)
+
+
+class FakeBatch:
+    """Atomic-create contract double, not a substitute for emulator checks."""
+    def __init__(self, client):
+        self.client, self.pending = client, []
+
+    def create(self, ref, data):
+        self.pending.append((ref, data))
+
+    def commit(self):
+        if any(ref._key in self.client.docs for ref, _ in self.pending):
+            raise AlreadyExists("exists")
+        for ref, data in self.pending:
+            ref.create(data)
 
 
 PROPOSAL = Proposal(finding_id="RZ-1", severity="high", sla_days=7,

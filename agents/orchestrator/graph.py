@@ -100,13 +100,12 @@ def build_graph(handlers: dict[str, Any]) -> Workflow:
             retry_config=retry,
         )
 
-    # Screening is pure with respect to system state: it reads untrusted text
-    # and decides whether a model may see it, so re-running it on resume is
-    # safe and is the cheaper option than persisting its verdict.
+    # Screening restores completed decisions before reading untrusted text;
+    # restore may repair a missing escalation through create-only persistence.
     screen = node("screen", rerun_on_resume=True)
 
-    # Triage writes nothing, so it may re-run. Review does not write either,
-    # but both call models, so both carry the retry config.
+    # Review checkpoints bounded inference and commits evidence before routing.
+    # Re-entry reuses those checkpoints; node retries cannot reset the budget.
     triage = node("triage", rerun_on_resume=True, retry=MODEL_RETRY)
     review = node("review", rerun_on_resume=True, retry=MODEL_RETRY)
 

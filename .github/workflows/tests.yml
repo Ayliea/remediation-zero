@@ -88,3 +88,19 @@ jobs:
         run: |
           terraform -chdir=infra init -backend=false -input=false
           terraform -chdir=infra validate
+
+  portable-install:
+    # No pip, credentials, cloud clients, deployment, or model calls.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify portable installation and local settings
+        run: python -S -m scripts.verify_local_install

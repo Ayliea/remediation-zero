@@ -82,6 +82,10 @@ def build_handlers(clients: dict) -> dict:
     scratch = clients["scratch"]
 
     def screen(finding_id: str, cycle: int) -> str:
+        restored = writer.restore(finding_id, cycle)
+        if restored is not None:
+            scratch["adjudication"] = restored
+            return "screened"
         finding = db.collection("findings").document(finding_id).get().to_dict() or {}
         asset = db.collection("assets").document(
             finding.get("asset_id", "")).get().to_dict() or {}
@@ -123,19 +127,26 @@ def build_handlers(clients: dict) -> dict:
         silently. That failure is quiet, so the route is set on every path
         through this function rather than only on the interesting ones.
         """
+        restored = writer.restore(finding_id, cycle)
+        if restored is not None:
+            scratch["adjudication"] = restored
+            ctx.route = restored.outcome.value
+            return restored.outcome.value
         rendered = scratch["rendered"]
-        result = adjudicate(
+        result = writer.adjudicate_once(
             scratch["finding"],
             triage=lambda _f: rm.propose(
                 rendered, clients["reasoning_model"], genai_client,
-                finding_id=finding_id,
+                finding_id=finding_id, retry=False,
             ),
             review=lambda _f, p: rm.review(
                 rendered + "\n\nPROPOSAL\n" + json.dumps(
                     {"severity": p.severity, "sla_days": p.sla_days,
                      "remediation": p.remediation, "evidence": list(p.evidence),
                      "rationale": p.rationale}, indent=2),
-                clients["reviewer_model"], genai_client),
+                clients["reviewer_model"], genai_client, retry=False),
+            cycle=cycle,
+            context=rm.inference_fingerprint(rendered, clients["reasoning_model"], clients["reviewer_model"]),
         )
         scratch["adjudication"] = result
         _log("adjudicated", cycle_id, finding_id,
@@ -154,7 +165,8 @@ def build_handlers(clients: dict) -> dict:
                   (d.to_dict() for d in db.collection("owners").stream())}
         assets = {a["asset_id"]: a for a in
                   (d.to_dict() for d in db.collection("assets").stream())}
-        assignment = resolve_owner(scratch["finding"], assets, owners)
+        finding = scratch.get("finding") or db.collection("findings").document(finding_id).get().to_dict()
+        assignment = resolve_owner(finding, assets, owners)
         proposal = scratch["adjudication"].proposal
         assignment_id = assigner.record(
             assignment, cycle=cycle,
@@ -173,13 +185,7 @@ def build_handlers(clients: dict) -> dict:
     def unavailable(finding_id: str, cycle: int) -> str:
         """The reviewer could not be reached. Not a rejection, not a
         ratification, and deliberately its own destination."""
-        stamp = clock.now()
-        db.collection("human_queue").document(
-            f"reviewer-unavailable-{finding_id}-c{cycle:03d}").set({
-                "finding_id": finding_id, "cycle": cycle,
-                "kind": "reviewer_unavailable",
-                "reason": scratch["adjudication"].note or "reviewer unreachable",
-                "real_ts": stamp.real_ts, "sim_ts": stamp.sim_ts})
+        writer.record(scratch["adjudication"], cycle=cycle)
         _log("reviewer_unavailable", cycle_id, finding_id)
         return "queued"
 

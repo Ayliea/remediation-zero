@@ -119,12 +119,22 @@ def main() -> int:
         # only fires after triage and review have already run and been paid
         # for. Re-running a cycle should cost nothing, so the completed-call
         # record is checked here too.
+        restored = writer.restore(finding_id, args.cycle)
         already = store.get(
             derive_key(finding_id=finding_id, action="decision", cycle=args.cycle)
         )
-        if already is not None:
+        if restored is not None:
+            # A durable decision is not proof that downstream assignment ran.
+            # Resume that idempotent effect without repeating paid inference.
+            if restored.outcome.value == "ratified":
+                assignment = resolve_owner(snapshot.to_dict(), assets, owners)
+                assignment_id = assigner.record(
+                    assignment, cycle=args.cycle,
+                    sla_days=restored.proposal.sla_days if restored.proposal else None)
+                _log("assignment_reconciled", cycle_id, finding_id,
+                     assignment_id=assignment_id, needs_human=assignment.needs_human)
             _log("skipped_already_adjudicated", cycle_id, finding_id,
-                 decision_id=already.result)
+                 decision_id=f"{finding_id}-c{args.cycle:03d}")
             outcomes["skipped"] = outcomes.get("skipped", 0) + 1
             continue
 
@@ -159,35 +169,30 @@ def main() -> int:
              in_kev=enrichment.in_kev, epss=enrichment.epss_score)
 
         try:
-            adjudication = adjudicate(
+            adjudication = writer.adjudicate_once(
                 finding,
                 triage=lambda _f: rm.propose(
                     rendered, reasoning_model, genai_client,
-                    finding_id=finding_id,
+                    finding_id=finding_id, retry=False,
                 ),
                 review=lambda _f, p: rm.review(
                     rendered + "\n\nPROPOSAL\n" + json.dumps(
                         {"severity": p.severity, "sla_days": p.sla_days,
                          "remediation": p.remediation, "evidence": list(p.evidence),
                          "rationale": p.rationale}, indent=2),
-                    reviewer_model, genai_client),
+                    reviewer_model, genai_client, retry=False),
+                cycle=args.cycle,
+                context=rm.inference_fingerprint(rendered, reasoning_model, reviewer_model),
             )
         except Exception as exc:
-            # One finding failing must not take the cycle down, and it must not
-            # vanish either. It goes to a person with what is known about why.
+            # Model failures have durable evidence. Persistence failure must
+            # stop execution for replay, never manufacture another escalation.
             _log("finding_failed", cycle_id, finding_id,
                  error=f"{type(exc).__name__}: {exc}"[:300])
-            client.collection("human_queue").document(
-                f"failed-{finding_id}-c{args.cycle:03d}").set({
-                    "finding_id": finding_id, "cycle": args.cycle,
-                    "kind": "cycle_failure",
-                    "reason": f"Adjudication did not complete: "
-                              f"{type(exc).__name__}: {exc}"[:400],
-                    "real_ts": clock.now().real_ts, "sim_ts": clock.now().sim_ts})
-            outcomes["failed"] = outcomes.get("failed", 0) + 1
-            continue
+            raise
 
         document_id = writer.record(adjudication, cycle=args.cycle)
+        adjudication = writer.restore(finding_id, args.cycle)
         outcomes[adjudication.outcome.value] = outcomes.get(
             adjudication.outcome.value, 0) + 1
 

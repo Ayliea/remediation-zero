@@ -21,6 +21,7 @@ path, which is exactly how it went missing once before.
 """
 
 import pytest
+from types import SimpleNamespace
 
 from scripts.graph_cycle import build_handlers
 from tools.model_armor import WITHHELD_NOTICE, ArmorVerdict
@@ -81,7 +82,7 @@ def handlers(verdict, comment=PAYLOAD):
                                "cve_id": "CVE-2024-1", "scanner_comment": comment}},
             assets={"ast-01": {"asset_id": "ast-01", "hostname": "h.corp.invalid"}}),
         "clock": None, "cache": FakeCache(), "genai": None,
-        "armor": armor, "armor_token": "t", "decisions": None,
+        "armor": armor, "armor_token": "t", "decisions": SimpleNamespace(restore=lambda *_: None),
         "assignments": None, "cycle_id": "cycle-001", "scratch": scratch,
     })
     return built, scratch, armor

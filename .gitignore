@@ -124,6 +124,8 @@ htmlcov/
 # Local runtime artifacts
 # ===========================================================================
 *.log
+*.sqlite3
+*.sqlite3-*
 .DS_Store
 Thumbs.db
 .idea/
@@ -149,3 +151,6 @@ console-top.png
 # precisely the moment someone reaches for `git add -A`. Committing it would
 # put a second, silently diverging copy of the source tree in the repository.
 agents/*_tmp[0-9]*/
+
+# Local user preferences (endpoint and model; never API keys).
+*.settings.json

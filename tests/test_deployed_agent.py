@@ -79,7 +79,8 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
     ))
 
     script = (
-        "import sys; "
+        "import sys, runpy; "
+        f"guard = runpy.run_path({str(REPO_ROOT / 'tests' / 'offline_guard.py')!r}); "
         f"sys.path[:] = [{str(app)!r}, {str(app / 'agents')!r}] + "
         f"{runtime_paths!r}; "
         "import orchestrator; "
@@ -87,6 +88,7 @@ def test_the_package_imports_under_its_deployed_module_name(tmp_path):
         "assert a is not None; "
         "names = sorted(getattr(t, 'name', '') for t in a.tools); "
         "assert names == ['lookup_finding', 'recall_fleet_history', 'reviewer', 'triage'], names; "
+        "assert not guard['violations'], guard['violations']; "
         "print('ok')"
     )
     result = subprocess.run([sys.executable, "-c", script],

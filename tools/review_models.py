@@ -27,6 +27,7 @@ parsed leniently, rather than JSON that it would sometimes wrap in prose.
 """
 
 import json
+import hashlib
 import os
 import random
 import re
@@ -42,6 +43,30 @@ from tools.enrichment import Enrichment
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS = REPO_ROOT / "prompts"
+MAX_INPUT_BYTES = 32768
+MAX_OUTPUT_TOKENS = 2048
+REQUEST_TIMEOUT_MS = 60000
+
+
+def _check_input(text):
+    if len(text.encode("utf-8")) > MAX_INPUT_BYTES:
+        raise ValueError("model input exceeds byte limit")
+
+
+def _http_options():
+    return types.HttpOptions(timeout=REQUEST_TIMEOUT_MS, retry_options=types.HttpRetryOptions(attempts=1))
+
+
+def inference_fingerprint(rendered, reasoning_model, reviewer_model):
+    return hashlib.sha256(json.dumps([
+        rendered, reasoning_model, reviewer_model, _load("triage.md"),
+        _load("reviewer.md"), MAX_INPUT_BYTES, MAX_OUTPUT_TOKENS,
+        REQUEST_TIMEOUT_MS,
+    ], ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _invoke(call, *, what, retry):
+    return _with_backoff(call, what=what) if retry else call()
 
 
 def _load(name: str) -> str:
@@ -169,20 +194,25 @@ def render_finding(
 
 
 def propose(
-    prompt_text: str, model: str, client: genai.Client, *, finding_id: str
+    prompt_text: str, model: str, client: genai.Client, *, finding_id: str, retry: bool = True
 ) -> Proposal:
     """Ask Gemini for a triage proposal."""
-    response = _with_backoff(
+    instruction = _load("triage.md")
+    _check_input(instruction + prompt_text)
+    response = _invoke(
         lambda: client.models.generate_content(
             model=model,
             contents=prompt_text,
             config=types.GenerateContentConfig(
-                system_instruction=_load("triage.md"),
+                system_instruction=instruction,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+                http_options=_http_options(),
                 temperature=0.2,
                 response_mime_type="application/json",
             ),
         ),
         what="triage model",
+        retry=retry,
     )
     payload = json.loads(response.text)
     return parse_proposal_payload(payload, finding_id=finding_id)
@@ -275,22 +305,26 @@ def parse_review_text(text: str) -> Verdict:
     )
 
 
-def review(prompt_text: str, model: str, client: genai.Client) -> Verdict:
+def review(prompt_text: str, model: str, client: genai.Client, *, retry: bool = True) -> Verdict:
     """Ask Gemma to adjudicate.
 
     Raises:
         CapacityError: when the model is unreachable because of load. Kept
             distinct so the loop can never record it as a rejection.
     """
-    response = _with_backoff(
+    contents = f"{_load('reviewer.md')}\n\n---\n\n{prompt_text}"
+    _check_input(contents)
+    response = _invoke(
         lambda: client.models.generate_content(
             model=model,
             # Gemma MaaS has no system-role parameter, so the instruction is
             # prepended to the turn rather than passed as a system instruction.
-            contents=f"{_load('reviewer.md')}\n\n---\n\n{prompt_text}",
-            config=types.GenerateContentConfig(temperature=0.1),
+            contents=contents,
+            config=types.GenerateContentConfig(temperature=0.1,
+                max_output_tokens=MAX_OUTPUT_TOKENS, http_options=_http_options()),
         ),
         what="reviewer model",
+        retry=retry,
     )
 
     return parse_review_text(response.text or "")
