@@ -361,3 +361,62 @@ def test_proposer_key_hint_names_the_fallback(app):
     body = app[1]()[1]
     assert 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' in body
     assert 'Set RZ_REVIEWER_API_KEY before' in body
+
+
+# --- Ruling 2: the cycle interval ---------------------------------------------
+
+
+def test_application_page_renders_the_interval_field(app):
+    _, request = app
+    body = request(route='/?view=settings&section=application')[1]
+    assert 'name="cycle_interval_minutes"' in body
+    assert 'min="0"' in body and 'max="1440"' in body
+    assert 'Run a cycle automatically every N minutes (0 = off)' in body
+
+
+def test_valid_interval_is_saved(app):
+    path, request = app
+    token = _token(request)
+    fields = dict(token=token, section='application', mode='saved', port='8082',
+                  cycle_interval_minutes='30')
+    assert request('POST', '/settings', fields)[0] == 303
+    assert config.load(path)['cycle_interval_minutes'] == 30
+    assert 'value="30"' in request(route='/?view=settings&section=application')[1]
+    for edge in ('0', '1440'):
+        fields['cycle_interval_minutes'] = edge
+        assert request('POST', '/settings', fields)[0] == 303
+        assert config.load(path)['cycle_interval_minutes'] == int(edge)
+
+
+def test_application_save_without_interval_keeps_it(app):
+    path, request = app
+    token = _token(request)
+    with_interval = dict(token=token, section='application', mode='saved', port='8082',
+                         cycle_interval_minutes='15')
+    assert request('POST', '/settings', with_interval)[0] == 303
+    without = dict(token=token, section='application', mode='demo', port='8082')
+    assert request('POST', '/settings', without)[0] == 303
+    assert config.load(path)['cycle_interval_minutes'] == 15
+    assert config.load(path)['mode'] == 'demo'
+
+
+@pytest.mark.parametrize('value', ['-1', '1441', '99999', '', ' 5', '5.0', '+5', '1e3',
+                                   'five', '٥', '0x10'])
+def test_invalid_interval_is_rejected_and_nothing_written(app, value):
+    path, request = app
+    token = _token(request)
+    fields = dict(token=token, section='application', mode='saved', port='8082',
+                  cycle_interval_minutes=value)
+    assert request('POST', '/settings', fields)[0] == 400
+    assert not path.exists()
+
+
+def test_invalid_interval_leaves_a_saved_file_unchanged(app):
+    path, request = app
+    token = _token(request)
+    good = dict(token=token, section='application', mode='saved', port='8082',
+                cycle_interval_minutes='10')
+    assert request('POST', '/settings', good)[0] == 303
+    before = path.read_bytes()
+    assert request('POST', '/settings', dict(good, cycle_interval_minutes='2000'))[0] == 400
+    assert path.read_bytes() == before

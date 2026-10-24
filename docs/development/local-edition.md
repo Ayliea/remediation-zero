@@ -200,9 +200,12 @@ source is absent:
 
 ## Interval runner
 
-With `cycle_interval_minutes` above 0 (up to 1440) in the workspace's
-`.settings.json`, the launcher runs one cycle every interval and calls your
-models. It also runs in demo mode. A run is skipped, not queued, while the
+Set "Run a cycle automatically every N minutes (0 = off)" on the Settings
+page, under Application. It is saved as `cycle_interval_minutes` (a whole
+number from 0 to 1440) in `<workspace>.settings.json`, the file beside the
+workspace folder. With a value above 0, the launcher runs one cycle every
+interval and calls your models. The launcher reads it at startup, so restart
+it after a change. It also runs in demo mode. A run is skipped, not queued, while the
 previous one is still going. A failed run is logged by class name, and the
 runner continues. The default is 0, off.
 

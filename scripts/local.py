@@ -52,6 +52,8 @@ DEFAULT_CORPUS = ROOT / 'data'
 CORPUS_FILES = ('findings.json', 'assets.json', 'owners.json')
 NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)'
 MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
+# mode and port are required; the checkbox and the interval may be absent.
+APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes'}
 NOT_A_WORKSPACE = ('{} is not a Remediation Zero workspace directory (a single-file database from an earlier '
                    'version, or a non-empty folder). Choose a new or empty directory with --database DIR; '
                    'nothing was changed.')
@@ -261,15 +263,21 @@ def handler(store, demo, config_path=None, approve_command=None):
                             'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
                             'family': fields[role + '_family'] or suggest_family(model)}
                     values['same_family_policy'] = fields['same_family_policy']
-                elif section == 'application' and set(fields) in ({'mode', 'port'}, {'mode', 'port', 'open_browser'}):
+                elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
                     if fields.get('open_browser', 'yes') != 'yes':
                         raise ValueError()
                     values.update(mode=fields['mode'], port=int(fields['port']), open_browser='open_browser' in fields)
+                    if 'cycle_interval_minutes' in fields:
+                        # ASCII digits only; local_settings.validate checks 0-1440 on save.
+                        minutes = fields['cycle_interval_minutes']
+                        if not (minutes.isascii() and minutes.isdigit()):
+                            raise ValueError()
+                        values['cycle_interval_minutes'] = int(minutes)
                 else:
                     raise ValueError()
                 local_settings.save(config_path, values)
             except (ValueError, UnicodeError):
-                self.send_error(400, 'Invalid preferences. Nothing was saved. Check the endpoint, model, and port.')
+                self.send_error(400, 'Invalid preferences. Nothing was saved. Check the endpoint, model, port, and interval.')
                 return
             except OSError:
                 self.send_error(503, 'Preferences could not be saved. Check local file permissions.')
