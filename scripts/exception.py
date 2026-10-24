@@ -33,21 +33,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from engine import sweep as engine_sweep
+from engine.ports import NoDelivery, NoTelemetry, Ports
+from engine.sweep import _log  # noqa: F401  (re-exported; same logger and shape)
 from scripts import quiet_sdk_logging
 from tools.clock import SimClock
+from tools.docstore import FirestoreDocStore
 from tools.enrichment import EnrichmentCache
-from tools.exception_store import ExceptionWriter
-from tools.exceptions import Exception_, ExceptionAction, next_action
+from tools.guardrail import NoGuard
 from tools.store import FirestoreIdempotencyStore
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-logger = logging.getLogger("remediation_zero.exceptions")
 
 
-def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
-    logger.info(json.dumps(
-        {"event": event, "cycle_id": cycle_id, "finding_id": finding_id, **fields},
-        sort_keys=True, default=str))
+def _ports(client, store, clock: SimClock) -> Ports:
+    """The cloud parts. The exception stage reasons with no model, delivers
+    nothing and remembers nothing."""
+    return Ports(docs=FirestoreDocStore(client), journal=store, clock=clock,
+                 roles=None, guard=NoGuard(), delivery=NoDelivery(), memory=None,
+                 telemetry=NoTelemetry())
 
 
 def run_sweep(
@@ -75,33 +79,7 @@ def run_sweep(
 
     client = firestore.Client()
     store = FirestoreIdempotencyStore(client=client, clock=clock)
-    writer = ExceptionWriter(store=store, client=client, clock=clock)
-
-    cycle_id = f"cycle-{cycle:03d}"
-    stamp = clock.now()
-
-    _log("sweep_started", cycle_id, "-", sim_ts=stamp.sim_ts,
-         sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
-    actions: dict[str, int] = {}
-    for snapshot in client.collection("exceptions").stream():
-        data = snapshot.to_dict()
-        exception = Exception_(
-            finding_id=data["finding_id"],
-            accepted_by=data.get("accepted_by", "unknown"),
-            reason=data.get("reason", ""),
-            accepted_sim_ts=data["accepted_sim_ts"],
-            ttl_days=int(data["ttl_days"]),
-            reopened=bool(data.get("reopened", False)),
-        )
-        action = next_action(exception, stamp.sim_ts)
-        actions[action.value] = actions.get(action.value, 0) + 1
-        if action is ExceptionAction.REOPEN:
-            result = writer.reopen(exception, cycle=cycle, now_sim_ts=stamp.sim_ts)
-            _log("acceptance_expired", cycle_id, exception.finding_id,
-                 ttl_days=exception.ttl_days,
-                 accepted_by=exception.accepted_by, result=result)
-    _log("sweep_finished", cycle_id, "-", actions=actions)
-    return actions
+    return engine_sweep.run_sweep(_ports(client, store, clock), cycle)
 
 
 def main() -> int:
@@ -127,30 +105,21 @@ def main() -> int:
 
     client = firestore.Client()
     store = FirestoreIdempotencyStore(client=client, clock=clock)
-    writer = ExceptionWriter(store=store, client=client, clock=clock)
     cache = EnrichmentCache()
 
     cycle_id = f"cycle-{args.cycle:03d}"
-    stamp = clock.now()
 
     if args.accept:
-        finding = client.collection("findings").document(args.accept).get().to_dict()
-        if not finding:
+        try:
+            engine_sweep.accept(
+                _ports(client, store, clock), args.accept, args.ttl, args.by,
+                args.reason, args.cycle,
+                approved_by_human=args.approved_by_human, enrichment=cache,
+            )
+        except engine_sweep.NoSuchFinding:
             print(f"no such finding: {args.accept}", file=sys.stderr)
             return 1
-        in_kev = cache.enrich(finding["cve_id"]).in_kev
-        try:
-            result = writer.accept(
-                finding_id=args.accept, cycle=args.cycle, accepted_by=args.by,
-                reason=args.reason, ttl_days=args.ttl, in_kev=in_kev,
-                approved_by_human=args.approved_by_human,
-            )
-            _log("risk_accepted", cycle_id, args.accept, ttl_days=args.ttl,
-                 in_kev=in_kev, approved_by_human=args.approved_by_human,
-                 result=result)
         except ValueError as exc:
-            _log("acceptance_refused", cycle_id, args.accept, in_kev=in_kev,
-                 reason=str(exc), routed_to="human_queue")
             print(json.dumps({"refused": args.accept, "reason": str(exc)}))
             return 2
 

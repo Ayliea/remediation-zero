@@ -1,0 +1,106 @@
+# Copyright 2026 Daviyon Daniels
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+"""The exception stage: record risk acceptances, and sweep for lapsed ones.
+
+The sweep is what makes a TTL mean anything. Without it an acceptance expires
+in a field nobody reads. `scripts/exception.py` and the scheduled worker call
+this in the cloud; the local edition calls it with its own `Ports`.
+
+An acceptance of a KEV entry needs a person's explicit approval, and a
+refused one goes to the human queue rather than vanishing.
+
+Standard library only: nothing here imports a cloud SDK.
+"""
+import json
+import logging
+from typing import Any, Optional
+
+from engine.ports import Ports
+from tools.enrichment import EnrichmentCache
+from tools.exception_store import ExceptionWriter
+from tools.exceptions import Exception_, ExceptionAction, next_action
+
+logger = logging.getLogger("remediation_zero.exceptions")
+
+
+class NoSuchFinding(LookupError):
+    """An acceptance named a finding that is not in `findings`."""
+
+
+def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
+    logger.info(json.dumps(
+        {"event": event, "cycle_id": cycle_id, "finding_id": finding_id, **fields},
+        sort_keys=True, default=str))
+
+
+def _writer(ports: Ports) -> ExceptionWriter:
+    return ExceptionWriter(store=ports.journal, client=ports.docs, clock=ports.clock)
+
+
+def run_sweep(ports: Ports, cycle: int) -> dict[str, int]:
+    """Reopen every risk acceptance whose TTL has lapsed, and report what it did.
+
+    The clock in `ports` is the authoritative one: a caller that advanced it
+    passes it here rather than this stage building a second clock.
+    """
+    clock = ports.clock
+    writer = _writer(ports)
+
+    cycle_id = f"cycle-{cycle:03d}"
+    stamp = clock.now()
+
+    _log("sweep_started", cycle_id, "-", sim_ts=stamp.sim_ts,
+         sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
+    actions: dict[str, int] = {}
+    for snapshot in ports.docs.collection("exceptions").stream():
+        data = snapshot.to_dict()
+        exception = Exception_(
+            finding_id=data["finding_id"],
+            accepted_by=data.get("accepted_by", "unknown"),
+            reason=data.get("reason", ""),
+            accepted_sim_ts=data["accepted_sim_ts"],
+            ttl_days=int(data["ttl_days"]),
+            reopened=bool(data.get("reopened", False)),
+        )
+        action = next_action(exception, stamp.sim_ts)
+        actions[action.value] = actions.get(action.value, 0) + 1
+        if action is ExceptionAction.REOPEN:
+            result = writer.reopen(exception, cycle=cycle, now_sim_ts=stamp.sim_ts)
+            _log("acceptance_expired", cycle_id, exception.finding_id,
+                 ttl_days=exception.ttl_days,
+                 accepted_by=exception.accepted_by, result=result)
+    _log("sweep_finished", cycle_id, "-", actions=actions)
+    return actions
+
+
+def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
+           cycle: int, *, approved_by_human: bool = False,
+           enrichment: Optional[Any] = None) -> str:
+    """Record one risk acceptance and return the writer's result.
+
+    Raises `NoSuchFinding` before anything is written when the finding is
+    unknown. Raises `ValueError` when the acceptance is refused; the refusal
+    has already been routed to the human queue under its own key.
+    `enrichment` defaults to the on-disk cache; KEV membership comes from it.
+    """
+    cycle_id = f"cycle-{cycle:03d}"
+    finding = ports.docs.collection("findings").document(finding_id).get().to_dict()
+    if not finding:
+        raise NoSuchFinding(f"no such finding: {finding_id}")
+    cache = enrichment if enrichment is not None else EnrichmentCache()
+    in_kev = cache.enrich(finding["cve_id"]).in_kev
+    try:
+        result = _writer(ports).accept(
+            finding_id=finding_id, cycle=cycle, accepted_by=by,
+            reason=reason, ttl_days=ttl_days, in_kev=in_kev,
+            approved_by_human=approved_by_human,
+        )
+        _log("risk_accepted", cycle_id, finding_id, ttl_days=ttl_days,
+             in_kev=in_kev, approved_by_human=approved_by_human,
+             result=result)
+    except ValueError as exc:
+        _log("acceptance_refused", cycle_id, finding_id, in_kev=in_kev,
+             reason=str(exc), routed_to="human_queue")
+        raise
+    return result

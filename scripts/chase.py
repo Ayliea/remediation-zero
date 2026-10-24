@@ -38,22 +38,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from engine import chase as engine_chase
+from engine.chase import _log  # noqa: F401  (re-exported; same logger and shape)
+from engine.ports import NoDelivery, NoTelemetry, Ports
 from scripts import quiet_sdk_logging
-from tools.chase import ChaseAction, ChaseState, next_action, unchaseable_reason
 from tools.clock import SimClock
+from tools.docstore import FirestoreDocStore
+from tools.guardrail import NoGuard
 from tools.store import FirestoreIdempotencyStore
 from tools.delivery import GitHubDelivery
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
-from tools.tickets import TicketWriter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-logger = logging.getLogger("remediation_zero.chase")
-
-
-def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
-    logger.info(json.dumps(
-        {"event": event, "cycle_id": cycle_id, "finding_id": finding_id, **fields},
-        sort_keys=True, default=str))
 
 
 def run_chase(
@@ -100,130 +96,20 @@ def run_chase(
         _log("delivery_disabled", cycle_id, "-",
              reason="GITHUB_TICKET_REPO and GITHUB_TOKEN are not both set")
 
-    writer = TicketWriter(store=store, client=client, clock=clock,
-                          delivery=delivery)
-
-    stamp = clock.now()
-    _log("chase_started", cycle_id, "-", clock_mode=clock.mode.value,
-         advanced_days=advance_days,
-         real_ts=stamp.real_ts, sim_ts=stamp.sim_ts,
-         sim_ahead_days=round((stamp.sim_ts - stamp.real_ts) / 86400, 2))
-
-    owners = {o["owner_id"]: o for o in
-              (d.to_dict() for d in client.collection("owners").stream())}
-    # Resolution is read from the finding, not the ticket. A finding is what
-    # the scanner observed and `findings` is where a rescan records it; a
-    # ticket is what the fleet did about it, and chase owns that. Having the
-    # rescan write the ticket directly would have saved a read here and put a
-    # second writer inside this agent's collection, which is the boundary the
-    # whole design rests on.
-    findings = {f["finding_id"]: f for f in
-                (d.to_dict() for d in client.collection("findings").stream())}
-    # An accepted risk is not chased. Nudging an owner who has been told to
-    # stand down destroys the credibility of every other nudge.
-    accepted = {
-        e["finding_id"]
-        for e in (d.to_dict() for d in client.collection("exceptions").stream())
-        if e.get("status") == "active"
-        and e.get("expires_sim_ts", 0) > stamp.sim_ts
-    }
-    sla_rows = [d.to_dict() for d in client.collection("sla_clocks").stream()]
-    slas = {sla["finding_id"]: sla for sla in sla_rows}
-    tickets = {t["finding_id"]: t for t in
-               (d.to_dict() for d in client.collection("tickets").stream())}
-
-    # Retry durable tracker work only while the event's premise is still true.
-    # Newer authoritative state wins: an owner must never receive a stale
-    # reminder after risk acceptance or remediation, and a delayed close must
-    # not land after a later rescan has reopened the finding.
-    for finding_id, ticket in tickets.items():
-        pending = ticket.get("delivery")
-        if not isinstance(pending, dict) or pending.get("status") != "pending":
-            continue
-        event = pending.get("event")
-        resolved = findings.get(finding_id, {}).get("status") == "resolved"
-        acceptance_applies = (
-            finding_id in accepted
-            and slas.get(finding_id, {}).get("expires_check", True)
-        )
-        cancel_reason = None
-        if resolved and event != ChaseAction.CLOSE_TICKET.value:
-            cancel_reason = "finding_resolved"
-        elif not resolved and event == ChaseAction.CLOSE_TICKET.value:
-            cancel_reason = "finding_reopened"
-        elif acceptance_applies:
-            cancel_reason = "risk_acceptance_active"
-
-        if cancel_reason:
-            writer.cancel_pending(finding_id, ticket, cancel_reason)
-            _log("delivery_cancelled", cycle_id, finding_id,
-                 action=event, reason=cancel_reason)
-        elif not writer.retry_pending(finding_id, ticket):
-            # Firestore is authoritative and the tracker is a delivery. A
-            # tracker outage must never freeze escalation, closure, or human
-            # handoff. If state advances below, the newer, more relevant event
-            # supersedes this pending one in the ticket's coalescing outbox.
-            _log("delivery_retry_deferred", cycle_id, finding_id,
-                 action=event,
-                 reason="tracker remains unavailable; state machine continues")
-
-    taken: dict[str, int] = {}
-
-    for sla in sla_rows:
-        finding_id = sla["finding_id"]
-        finding_resolved = (
-            findings.get(finding_id, {}).get("status") == "resolved"
-        )
-        if (not finding_resolved and finding_id in accepted
-                and sla.get("expires_check", True)):
-            _log("skipped_accepted", cycle_id, finding_id,
-                 reason="risk acceptance is active")
-            taken["skipped_accepted"] = taken.get("skipped_accepted", 0) + 1
-            continue
-
-        blocked = unchaseable_reason(sla)
-        if blocked:
-            _log("skipped_not_chaseable", cycle_id, finding_id, reason=blocked)
-            taken["skipped_not_chaseable"] = taken.get("skipped_not_chaseable", 0) + 1
-            continue
-
-        ticket = tickets.get(finding_id, {})
-
-        state = ChaseState(
-            finding_id=finding_id,
-            started_sim_ts=sla["started_sim_ts"],
-            due_sim_ts=sla["due_sim_ts"],
-            # A closed ticket record still exists -- it keeps its history --
-            # so its presence is not the question. Reading bool(ticket) alone
-            # would report a resolved finding as still having an open ticket,
-            # and a regression would then nudge on an issue that is closed
-            # rather than reopening it.
-            ticket_open=bool(ticket) and ticket.get("status") != "resolved",
-            nudges_sent=int(ticket.get("nudges_sent", 0)),
-            last_contact_sim_ts=ticket.get("last_contact_sim_ts"),
-            escalated=bool(ticket.get("escalated", False)),
-            with_human=ticket.get("status") == "with_human",
-            # The finding alone decides this. Falling back to the ticket
-            # status would pin a finding resolved forever: the ticket keeps
-            # that status after it closes, so a regression could never
-            # reopen it.
-            resolved=findings.get(finding_id, {}).get("status") == "resolved",
-            resolved_by_scan=findings.get(finding_id, {}).get("resolved_by_scan"),
-        )
-
-        action = next_action(state, now_sim_ts=stamp.sim_ts)
-        owner = owners.get(sla.get("owner_id"), {})
-        result = writer.act(action, state, cycle=cycle, owner=owner,
-                            now_sim_ts=stamp.sim_ts)
-
-        taken[action.value] = taken.get(action.value, 0) + 1
-        _log("chase_action", cycle_id, finding_id, action=action.value,
-             nudges_sent=state.nudges_sent, escalated=state.escalated,
-             days_overdue=round(state.days_overdue(stamp.sim_ts), 1),
-             owner_id=sla.get("owner_id"), result=result)
-
-    _log("chase_finished", cycle_id, "-", actions=taken)
-    return taken
+    # The cloud parts. Chase is the only stage handed a tracker: GitHub when
+    # it is configured and reachable, otherwise NoDelivery, which the stage
+    # treats as no delivery at all, exactly as before.
+    ports = Ports(
+        docs=FirestoreDocStore(client),
+        journal=store,
+        clock=clock,
+        roles=None,
+        guard=NoGuard(),
+        delivery=delivery if delivery is not None else NoDelivery(),
+        memory=None,  # chase neither remembers nor recalls
+        telemetry=NoTelemetry(),
+    )
+    return engine_chase.run_chase(ports, cycle, advance_days=advance_days)
 
 
 def main() -> int:

@@ -21,7 +21,6 @@ Writes `findings`, `assets` and `owners` only. No agent writes these
 collections; they are reference data and the seed script owns them.
 """
 
-import json
 import sys
 from pathlib import Path
 
@@ -30,14 +29,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from engine.ports import NoDelivery, NoTelemetry, Ports
+from engine.seed import BATCH_LIMIT, seed  # noqa: F401  (BATCH_LIMIT re-exported)
 from tools.clock import SimClock
-from tools.ingest import REFERENCE_COLLECTIONS, to_document
+from tools.docstore import FirestoreDocStore
+from tools.guardrail import NoGuard
+from tools.ingest import REFERENCE_COLLECTIONS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = REPO_ROOT / "data"
-
-#: Firestore caps a batched write at 500 operations.
-BATCH_LIMIT = 450
 
 
 def main() -> int:
@@ -46,34 +46,15 @@ def main() -> int:
     client = firestore.Client()
 
     print(f"clock mode: {clock.mode.value}")
-    total = 0
 
-    for kind in REFERENCE_COLLECTIONS:
-        path = DATA_DIR / f"{kind}.json"
-        records = json.loads(path.read_text(encoding="utf-8"))
-        collection = client.collection(kind)
-
-        written = 0
-        batch = client.batch()
-        pending = 0
-
-        for record in records:
-            document = to_document(record, clock=clock, kind=kind)
-            document_id = document.pop("_document_id")
-            batch.set(collection.document(document_id), document)
-            pending += 1
-            written += 1
-
-            if pending >= BATCH_LIMIT:
-                batch.commit()
-                batch = client.batch()
-                pending = 0
-
-        if pending:
-            batch.commit()
-
-        print(f"  {kind}: {written} documents")
-        total += written
+    # The cloud parts. Seeding writes reference data under natural keys and
+    # holds no idempotency journal, model, tracker or memory.
+    ports = Ports(docs=FirestoreDocStore(client), journal=None, clock=clock,
+                  roles=None, guard=NoGuard(), delivery=NoDelivery(), memory=None,
+                  telemetry=NoTelemetry())
+    counts = seed(ports, DATA_DIR, kinds=REFERENCE_COLLECTIONS,
+                  progress=lambda kind, written: print(f"  {kind}: {written} documents"))
+    total = sum(counts.values())
 
     print(f"\n{total} documents written. Re-running overwrites in place.")
     return 0

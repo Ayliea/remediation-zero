@@ -62,7 +62,14 @@ class TicketDelivery(Protocol):
 
 
 class NoDelivery:
-    """Local edition: no tracker. The dashboard is the delivery."""
+    """Local edition: no tracker. The dashboard is the delivery.
+
+    `external = False` tells chase to hand its ticket writer no delivery at all,
+    so no ticket records a "delivered" event that never left the machine. A
+    delivery without the attribute is treated as external, the safe direction.
+    """
+
+    external = False
 
     def deliver(self, event: str, finding_id: str, owner: Any, cycle: int,
                 now_sim_ts: float, state: Any,

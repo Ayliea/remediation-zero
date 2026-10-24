@@ -28,9 +28,11 @@ WORKDIR /app
 COPY requirements-worker.txt .
 RUN pip install --no-cache-dir -r requirements-worker.txt
 
-# The agents' logic, the tools they use, and the push endpoint. No prompts and
-# no model clients: nothing on this path reasons.
+# The agents' logic (the engine stages and the scripts that wire them), the
+# tools they use, and the push endpoint. No prompts and no model clients:
+# nothing on this path reasons.
 COPY worker/ ./worker/
+COPY engine/ ./engine/
 COPY scripts/__init__.py scripts/chase.py scripts/exception.py ./scripts/
 COPY tools/ ./tools/
 

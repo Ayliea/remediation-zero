@@ -21,7 +21,6 @@ metrics in code, and asks a model to narrate figures it did not compute.
 """
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -32,17 +31,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 from google.cloud import firestore
 
+from engine.ports import NoDelivery, NoTelemetry, Ports
+from engine.report import run_report
 from scripts import quiet_sdk_logging
 from tools import review_models as rm
 from tools.clock import SimClock
-from tools.metrics import compute_metrics
+from tools.docstore import FirestoreDocStore
+from tools.guardrail import NoGuard
 from tools.model_roles import ModelRoles
-from tools.reports import REPORTS_DATABASE, ReportWriter, write_summary
+from tools.reports import REPORTS_DATABASE, ReportWriter
 from tools.store import FirestoreIdempotencyStore
-from tools.telemetry import cycle_id
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-logger = logging.getLogger("remediation_zero.reporting")
 
 
 def main() -> int:
@@ -60,49 +60,18 @@ def main() -> int:
     client = firestore.Client()
     reports_client = firestore.Client(database=REPORTS_DATABASE)
 
-    def rows(name):
-        return [d.to_dict() for d in client.collection(name).stream()]
-
-    # Reporting reads. It does not write to any of these, and once the
-    # per-agent identities are in place it will not be able to.
-    metrics = compute_metrics(
-        decisions=rows("decisions"),
-        tickets=rows("tickets"),
-        sla_clocks=rows("sla_clocks"),
-        human_queue=rows("human_queue"),
-        exceptions=rows("exceptions"),
-        # Reference collections. Reporting reads them and, under its own
-        # identity, cannot write them -- which the probe control proves.
-        findings=rows("findings"),
-        scans=rows("scans"),
-        assets=rows("assets"),
-    )
-
     roles = ModelRoles.from_env(os.environ)
-    # No summarizer role: no adapter is built and the report carries metrics alone.
-    if roles.summarizer is None:
-        summarizer = None
-    else:
-        # The Vertex client is built only when the role is a Vertex one.
-        summarizer = roles.adapter(
-            "summarizer",
-            vertex_client=rm._client() if roles.summarizer.format == "vertex" else None,
-        )
-    summary = write_summary(metrics, summarizer)
-
     store = FirestoreIdempotencyStore(client=reports_client, clock=clock)
-    document_id = ReportWriter(
-        store=store, client=reports_client, clock=clock
-    ).record(
-        metrics=metrics, summary=summary, cycle=args.cycle
+    # The cloud parts: reads from the operational database, the report and
+    # its idempotency record to the reports database.
+    ports = Ports(docs=FirestoreDocStore(client), journal=store, clock=clock,
+                  roles=roles, guard=NoGuard(), delivery=NoDelivery(), memory=None,
+                  telemetry=NoTelemetry())
+    summary = run_report(
+        ports, args.cycle,
+        writer=ReportWriter(store=store, client=reports_client, clock=clock),
+        vertex_client=rm._client,
     )
-
-    logger.info(json.dumps({
-        "event": "report_written", "cycle_id": cycle_id(args.cycle),
-        "finding_id": "-", "report_id": document_id,
-        "decisions": metrics["decisions_total"],
-        "disagreement_rate": round(metrics["disagreement_rate"], 3),
-    }, sort_keys=True))
 
     print("\n" + "=" * 68)
     print(summary)
