@@ -177,8 +177,8 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
              blocked=verdict.blocked, screened=verdict.screened,
              confidence=verdict.confidence, reasons=list(verdict.reasons))
 
-    _log("triage_started", cycle_id, finding_id, cve_id=finding.get("cve_id"), cve_ids=finding_cves(finding),
-         in_kev=enriched.in_kev, epss=enriched.epss_score)
+    _log("triage_started", cycle_id, finding_id, cve_id=finding.get("cve_id"),
+         cve_ids=finding_cves(finding), in_kev=enriched.in_kev, epss=enriched.epss_score)
 
     try:
         adjudication = triage_and_review(ports, finding, asset, enriched, cycle,
@@ -245,13 +245,18 @@ def screen_finding(ports: Ports, finding: dict, cycle: int,
     """
     raw_comment = finding.get("scanner_comment") or ""
     raw_description = enrichment.description or ""
+    raw_name = finding.get("nvt_name") or ""
     boundary_text = (
         f"SCANNER COMMENT\n{raw_comment}\n\n"
         f"NVD DESCRIPTION\n{raw_description}"
     )
+    if raw_name:  # only Greenbone findings carry it; others screen as before
+        boundary_text += f"\n\nNVT NAME\n{raw_name}"
     verdict = ports.guard.screen(boundary_text)
     finding = dict(finding)
     finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
+    if raw_name:
+        finding["nvt_name"] = apply_verdict(raw_name, verdict)
     enrichment = replace(
         enrichment, description=apply_verdict(raw_description, verdict)
     )
@@ -292,11 +297,12 @@ def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enri
         writer = DecisionWriter(store=ports.journal, client=ports.docs, clock=ports.clock)
     finding_id = finding["finding_id"]
     rendered = inference.render_finding(finding, asset, enrichment)
+    legacy = inference.is_legacy_finding(finding)  # one decision: prompt and fingerprint
     return writer.adjudicate_once(
         finding,
         triage=lambda _f: inference.propose(
             rendered, proposer,
-            finding_id=finding_id, retry=False,
+            finding_id=finding_id, retry=False, legacy=legacy,
         ),
         review=None if reviewer is None else lambda _f, p: inference.review(
             rendered + "\n\nPROPOSAL\n" + json.dumps(
@@ -305,7 +311,8 @@ def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enri
                  "rationale": p.rationale}, indent=2),
             reviewer, retry=False),
         cycle=cycle,
-        context=inference.inference_fingerprint(rendered, ports.roles),
+        context=inference.inference_fingerprint(
+            rendered, ports.roles, legacy=legacy),
         roles=ports.roles,
         screening=screening,
     )

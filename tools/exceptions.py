@@ -125,7 +125,7 @@ def validate_acceptance(
             str(no_cve_severity).strip().lower() not in NO_CVE_PERSON_FREE):
         raise ValueError(
             "No CVE, so exploitation status cannot be checked: a person must "
-            "approve accepting a high or critical finding"
+            "approve this acceptance unless its reviewed severity is info, low or medium"
         )
     if in_kev and not approved_by_human:
         raise ValueError(

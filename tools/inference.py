@@ -52,8 +52,11 @@ def _check_input(text):
         raise ValueError("model input exceeds byte limit")
 
 
-def inference_fingerprint(rendered, roles):
+def inference_fingerprint(rendered, roles, *, legacy=True):
     """Hash of everything that decides what a cycle's model calls mean.
+
+    `legacy` is `is_legacy_finding(finding)`, computed once by the caller and
+    shared with the proposer's instruction choice.
 
     Covers every configured role (provenance, endpoint), the same-family
     policy, both prompts and the transport limits. A change mid-cycle must stop
@@ -65,7 +68,7 @@ def inference_fingerprint(rendered, roles):
         _load("triage.md"), _load("reviewer.md"), MAX_INPUT_BYTES,
         MAX_OUTPUT_TOKENS, REQUEST_TIMEOUT_MS,
     ]
-    if not rendered_is_legacy(rendered):
+    if not legacy:
         # Only a finding that gets the no-CVE guidance fingerprints it; a
         # legacy finding's list is unchanged, so its fingerprint is too.
         parts.append(_load("triage_no_cve.md"))
@@ -164,25 +167,23 @@ def is_legacy_finding(finding: Mapping[str, Any]) -> bool:
             and "nvt_name" not in finding and "qod" not in finding)
 
 
-def rendered_is_legacy(rendered: str) -> bool:
-    """`is_legacy_finding`, read back from the rendered text.
-
-    The proposer and the fingerprint only see the rendered finding. The legacy
-    render is the only one whose second line is `cve_id: ...`; the new one
-    always has `cve_ids: ...` there, so the two predicates cannot disagree
-    (asserted in tests/test_inference.py).
-    """
-    lines = rendered.split("\n", 2)
-    return not (len(lines) > 1 and lines[1].startswith("cve_ids: "))
-
-
-def triage_instruction(rendered: str) -> str:
+def triage_instruction(legacy: bool) -> str:
     """The proposer's instructions: triage.md, plus the no-CVE guidance for a
     finding that takes the new render. A legacy finding gets triage.md alone,
     byte for byte, so the cloud's model input does not change."""
-    if rendered_is_legacy(rendered):
+    if legacy:
         return _load("triage.md")
     return _load("triage.md") + "\n" + _load("triage_no_cve.md")
+
+
+NVT_NAME_LIMIT = 200
+
+
+def _clean_name(value: Any) -> str:
+    """Untrusted one-line text: whitespace runs (newlines too) collapse to one
+    space, and the result is capped."""
+    text = " ".join(str(value or "").split())[:NVT_NAME_LIMIT]
+    return text or "not known"
 
 
 def _percent(qod: Any) -> str:
@@ -209,7 +210,6 @@ def render_finding(
         cves = finding_cves(finding)
         head = [f"finding_id: {finding['finding_id']}",
                 f"cve_ids: {', '.join(cves) if cves else 'none (no CVE)'}",
-                f"nvt_name: {finding.get('nvt_name') or 'not known'}",
                 f"qod: {_percent(finding.get('qod'))}"]
         asset_value = lambda key: ("not known" if asset.get(key) is None  # noqa: E731
                                    else asset.get(key))
@@ -245,10 +245,15 @@ def render_finding(
             "in_cisa_kev", "kev_due_date", "kev_known_ransomware_use", "epss_score",
             "epss_percentile", "cvss_base", "cvss_severity", "nvd_description",
             "sources_available")]
+    untrusted = finding.get("scanner_comment") or "(empty)"
+    if not is_legacy_finding(finding):
+        # The test name came out of scanner XML: untrusted, so it sits inside
+        # the fence on one capped line, never in the trusted header.
+        untrusted = f"nvt_name: {_clean_name(finding.get('nvt_name'))}\n{untrusted}"
     lines += [
         "",
         FENCE_BEGIN,
-        _defang_fence(finding.get("scanner_comment") or "(empty)"),
+        _defang_fence(untrusted),
         FENCE_END,
     ]
     return "\n".join(lines)
@@ -291,10 +296,11 @@ def extract_json_object(text: str) -> dict:
 
 
 def propose(
-    prompt_text: str, adapter: ChatAdapter, *, finding_id: str, retry: bool = True
+    prompt_text: str, adapter: ChatAdapter, *, finding_id: str, retry: bool = True,
+    legacy: bool = True,
 ) -> Proposal:
-    """Ask the triage model for a proposal."""
-    instruction = triage_instruction(prompt_text)
+    """Ask the triage model for a proposal. `legacy` is `is_legacy_finding`."""
+    instruction = triage_instruction(legacy)
     _check_input(instruction + prompt_text)
     text = _invoke(
         lambda: adapter.complete(instruction, prompt_text, json_output=True),

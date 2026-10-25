@@ -202,6 +202,8 @@ def finding_cves(finding: Mapping[str, Any]) -> list[str]:
     listed = finding.get("cve_ids")
     if listed is None:
         listed = [finding["cve_id"]] if finding.get("cve_id") else []
+    elif not isinstance(listed, (list, tuple)):
+        listed = []  # a string or mapping is not a list of CVEs: treat as none
     seen: list[str] = []
     for cve in listed:
         if cve and cve not in seen:

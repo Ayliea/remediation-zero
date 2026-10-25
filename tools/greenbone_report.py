@@ -20,6 +20,7 @@ Standard library only. No clock is read here.
 """
 
 import math
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
@@ -123,6 +124,11 @@ def _summary(tags: str) -> str:
     return ""
 
 
+_CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
+_OID_RE = re.compile(r"[0-9]+(\.[0-9]+)+")
+_BAD_PORT_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
 def _result(node: ET.Element):
     """Return (Result, None) or (None, (result_id_or_?, reason, ip_or_None))."""
     rid = node.get("id") or ""
@@ -135,6 +141,10 @@ def _result(node: ET.Element):
     oid = (nvt.get("oid") or "").strip() if nvt is not None else ""
     if not oid:
         return None, (label, "result has no NVT oid", ip)
+    # fullmatch: these values are copied into model-visible context, so a
+    # trailing newline (which `$` would let through) must be refused.
+    if not _OID_RE.fullmatch(oid):
+        return None, (label, "NVT oid is malformed", ip)
     try:
         severity = float(_child_text(node, "severity"))
         if not math.isfinite(severity):
@@ -146,6 +156,8 @@ def _result(node: ET.Element):
     except ValueError:
         return None, (label, "qod is not an integer", ip)
     port_text = _child_text(node, "port")
+    if _BAD_PORT_RE.search(port_text):
+        return None, (label, "port contains whitespace or control characters", ip)
     port, _, proto = port_text.partition("/")
     asset = host.find("asset") if host is not None else None
     cves = tuple(
@@ -153,6 +165,8 @@ def _result(node: ET.Element):
         for ref in nvt.findall("refs/ref")
         if ref.get("type") == "cve" and (ref.get("id") or "").strip()
     )
+    if not all(_CVE_RE.fullmatch(cve) for cve in cves):
+        return None, (label, "CVE reference is malformed", ip)
     return Result(
         result_id=rid,
         ip=ip,

@@ -80,29 +80,26 @@ _PERSON_APPROVABLE = frozenset({"unreviewed", "held_for_approval"})
 
 
 def _decided_severity(ports: Ports, finding_id: str) -> str:
-    """The severity of the finding's latest *reviewed* decision.
+    """The severity of the finding's NEWEST decision, if that one was reviewed.
 
-    Only a ratified decision, or an unreviewed / held one a person approved,
-    counts; a proposal that was rejected, unavailable, unapproved or sent to
-    the human queue never does. No such decision, or a value outside the known
-    severities, is "critical", so the gate fails closed.
+    Newest by (cycle, sim_ts), of any outcome: a later unreviewed, rejected or
+    unavailable proposal supersedes an older ratified one, and an older
+    decision is never consulted. Reviewed means ratified, or unreviewed / held
+    with a person's approval. Not reviewed, no proposed severity, or a value
+    outside the known severities is "critical", so the gate fails closed.
     """
-    approvals = ports.docs.collection("approvals")
-    reviewed = []
-    for snap in ports.docs.collection("decisions").where(
-            filter=FieldFilter("finding_id", "==", finding_id)).stream():
-        row = snap.to_dict() or {}
-        outcome = row.get("outcome")
-        if outcome == "ratified" or (outcome in _PERSON_APPROVABLE
-                                     and approvals.document(snap.id).get().exists):
-            reviewed.append(row)
-    reviewed = [r for r in reviewed if r.get("proposed_severity") is not None]
-    if not reviewed:
+    rows = [(snap.id, snap.to_dict() or {}) for snap in ports.docs.collection(
+        "decisions").where(filter=FieldFilter("finding_id", "==", finding_id)).stream()]
+    if not rows:
         return "critical"
-    latest = max(reviewed, key=lambda r: (r.get("cycle") or 0, r.get("sim_ts") or 0))
-    value = latest["proposed_severity"]
+    doc_id, newest = max(rows, key=lambda r: (r[1].get("cycle") or 0, r[1].get("sim_ts") or 0))
+    outcome = newest.get("outcome")
+    reviewed = outcome == "ratified" or (
+        outcome in _PERSON_APPROVABLE
+        and ports.docs.collection("approvals").document(doc_id).get().exists)
+    value = newest.get("proposed_severity")
     value = value.strip().lower() if isinstance(value, str) else ""
-    return value if value in _SEVERITIES else "critical"
+    return value if reviewed and value in _SEVERITIES else "critical"
 
 
 def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,

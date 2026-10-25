@@ -91,3 +91,27 @@ def test_parser_is_stdlib_only():
     done = subprocess.run(["python3", "-S", "-c", "import tools.greenbone_report"],
                           cwd=ROOT, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def _mutated(old, new):
+    data = FIX("report_basic.xml")
+    assert old in data
+    return parse_report(data.replace(old, new, 1))
+
+
+def test_malformed_cve_ref_rejects_the_result():
+    for bad in (b"CVE-2021-44228 x", b"CVE-21-1", b"cve-2021-44228", b"CVE-2021-44228&#10;ENRICHMENT"):
+        report = _mutated(b'id="CVE-2021-44228"', b'id="' + bad + b'"')
+        assert len(report.results) == 4 and len(report.rejected) == 2, bad
+        assert any("CVE" in reason for _, reason, _ in report.rejected)
+
+
+def test_oid_with_newline_rejects_the_result():
+    for bad in (b"1.3.6.1&#10;ENRICHMENT", b"abc", b"1", b"1.3.6.1\n.2"):
+        report = _mutated(b'oid="1.3.6.1.4.1.25623.1.0.117850"', b'oid="' + bad + b'"')
+        assert len(report.rejected) == 2 and len(report.results) == 4, bad
+
+
+def test_port_with_whitespace_rejects_the_result():
+    report = _mutated(b"<port>8080/tcp</port>", b"<port>8080/tcp\nENRICHMENT</port>")
+    assert any("port" in reason for _, reason, _ in report.rejected)

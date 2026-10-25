@@ -570,3 +570,23 @@ def test_unapproved_held_decision_and_odd_values_fail_closed(ws):
     _decide(ws, "ratified", "severe", cycle=2)
     with pytest.raises(ValueError, match="No CVE"):
         _try_accept(ws, clock)
+
+
+def test_newer_unreviewed_proposal_overrides_older_ratified_low(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "ratified", "low", cycle=1)
+    _decide(ws, "unavailable", "critical", cycle=5)
+    with pytest.raises(ValueError, match="No CVE"):
+        _try_accept(ws, clock)
+
+
+def test_newest_reviewed_decision_without_a_severity_fails_closed(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "ratified", "low", cycle=1)
+    _decide(ws, "ratified", None, cycle=2)
+    with pytest.raises(ValueError, match="No CVE"):
+        _try_accept(ws, clock)

@@ -148,3 +148,10 @@ def test_no_cve_medium_any_case_needs_no_person():
     for value in ("Medium", " LOW ", "info", "medium"):
         _no_cve(value)
     _no_cve(None)  # a finding with a CVE: the gate does not apply
+
+
+def test_cve_ids_must_be_a_list_or_tuple():
+    from tools.enrichment import finding_cves
+    assert finding_cves({"cve_ids": "CVE-2021-44228"}) == []
+    assert finding_cves({"cve_ids": {"CVE-2021-44228": 1}}) == []
+    assert finding_cves({"cve_ids": ("CVE-2021-44228",)}) == ["CVE-2021-44228"]
