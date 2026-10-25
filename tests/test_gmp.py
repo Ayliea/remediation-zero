@@ -147,6 +147,58 @@ def default_handler(extra=None):
     return handler
 
 
+class SeriesHandler:
+    """A `FakeGvmd` handler for a scripted series of reports, published one at a time.
+
+    `tasks` is the get_tasks answer as (task_id, name) pairs. `publish` adds one report to
+    a task's listing (oldest first, as gvmd lists them) with the full get_reports response
+    gvmd would serve for it; a listed report given no body is answered 404 when downloaded.
+    Every request is read against the current state, so a test publishes the next report
+    between pulls. `downloaded` records each report id requested by `report_id`.
+    """
+
+    def __init__(self, tasks):
+        self.tasks = list(tasks)
+        self.listing = {}   # task_id -> [report_entry xml, ...]
+        self.bodies = {}    # report_id -> response bytes
+        self.downloaded = []
+
+    def publish(self, task_id, report_id, status, stamp, body=None):
+        self.listing.setdefault(task_id, []).append(report_entry(report_id, task_id, status, stamp))
+        if body is not None:
+            self.bodies[report_id] = body
+
+    def __call__(self, tag, raw):
+        if tag == "authenticate":
+            return [OK_AUTH]
+        if tag == "get_tasks":
+            return [tasks_response(*self.tasks)]
+        if tag == "get_reports":
+            request = ET.fromstring(raw)
+            report_id = request.get("report_id")
+            if report_id is not None:
+                self.downloaded.append(report_id)
+                if report_id in self.bodies:
+                    return [self.bodies[report_id]]
+            else:
+                task_id = (request.get("filter") or "").split()[0].partition("=")[2]
+                return [reports_response(*self.listing.get(task_id, []))]
+        return [f'<{tag}_response status="404" status_text="Not found"/>'.encode()]
+
+
+def test_series_handler_serves_each_report_once_published(unix_target):
+    series = SeriesHandler([(TASK_A, "Weekly LAN")])
+    target, _ = unix_target(series)
+    with GmpClient(target, USER, PASSWORD) as client:
+        assert client.finished_reports(TASK_A) == []
+    body = reports_response(f'<report id="{REPORT_1}"><task id="{TASK_A}"/></report>')
+    series.publish(TASK_A, REPORT_1, "Done", "2026-10-20T01:00:00Z", body)
+    with GmpClient(target, USER, PASSWORD) as client:
+        assert [r["report_id"] for r in client.finished_reports(TASK_A)] == [REPORT_1]
+        assert client.report_xml(REPORT_1) == body
+    assert series.downloaded == [REPORT_1]
+
+
 def test_lists_tasks_over_unix_socket(unix_target):
     target, server = unix_target(default_handler())
     with GmpClient(target, USER, PASSWORD) as client:

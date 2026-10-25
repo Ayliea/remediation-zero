@@ -48,6 +48,13 @@ match, the decision is labelled "reviewed by the same model family" and, by
 default, waits for a person's approval. With no reviewer configured, the
 decision is unreviewed and waits for a person.
 
+The local edition can also take finished reports from Greenbone (gvmd), over
+a Unix socket or verified TLS, from scan tasks you explicitly choose, or as an
+uploaded XML export. It only reads from Greenbone, and credentials stay in the
+environment. Setup, what is imported and skipped, how closure works, and the
+manual check against a real gvmd are in the
+[Greenbone connection guide](docs/development/greenbone.md).
+
 This is a synthetic preview, not an infrastructure scanner. The original cloud
 evidence console below remains a separate application; these local Settings do
 not configure that service.
