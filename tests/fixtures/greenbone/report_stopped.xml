@@ -1,0 +1,110 @@
+<get_reports_response status="200" status_text="OK">
+  <report id="22222222-2222-4222-8222-222222222222" format_id="a994b278-1f62-11e1-96ac-406186ea4fc5" extension="xml" content_type="text/xml">
+    <report id="22222222-2222-4222-8222-222222222222">
+      <scan_run_status>Stopped</scan_run_status>
+      <task id="11111111-1111-4111-8111-111111111111"><name>Weekly Example Scan</name></task>
+      <results start="1" max="1000">
+      <result id="00000000-0000-4000-8000-000000000001">
+        <name>Apache Log4j RCE (Log4Shell)</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>8080/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.117850">
+          <type>nvt</type>
+          <name>Apache Log4j RCE (Log4Shell)</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs><ref type="cve" id="CVE-2021-44228"/></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>10.0</severity>
+        <qod><value>97</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      <result id="00000000-0000-4000-8000-000000000002">
+        <name>SSH Weak Encryption Algorithms Supported</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>22/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.105611">
+          <type>nvt</type>
+          <name>SSH Weak Encryption Algorithms Supported</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>5.3</severity>
+        <qod><value>95</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      <result id="00000000-0000-4000-8000-000000000003">
+        <name>HTTP/2 Rapid Reset and libwebp</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>443/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.104000">
+          <type>nvt</type>
+          <name>HTTP/2 Rapid Reset and libwebp</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs><ref type="cve" id="CVE-2023-44487"/><ref type="cve" id="CVE-2023-4863"/></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>7.5</severity>
+        <qod><value>80</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      <result id="00000000-0000-4000-8000-000000000004">
+        <name>OS End of Life Detection</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>general/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.103674">
+          <type>nvt</type>
+          <name>OS End of Life Detection</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>0.0</severity>
+        <qod><value>80</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      <result id="00000000-0000-4000-8000-000000000005">
+        <name>Low Confidence Banner Match</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>80/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.100100">
+          <type>nvt</type>
+          <name>Low Confidence Banner Match</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>4.3</severity>
+        <qod><value>30</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      <result id="00000000-0000-4000-8000-000000000006">
+        <name>Unparseable Severity Example</name>
+        <host>192.0.2.10<asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><hostname>web.example.invalid</hostname></host>
+        <port>80/tcp</port>
+        <nvt oid="1.3.6.1.4.1.25623.1.0.100200">
+          <type>nvt</type>
+          <name>Unparseable Severity Example</name>
+          <tags>cvss_base_vector=AV:N/AC:L/Au:N/C:P/I:P/A:P|summary=Synthetic summary.|solution_type=VendorFix</tags>
+          <solution type="VendorFix">Apply the vendor update.</solution>
+          <refs></refs>
+        </nvt>
+        <threat>High</threat>
+        <severity>abc</severity>
+        <qod><value>80</value><type>remote_banner</type></qod>
+        <description>Synthetic description.</description>
+      </result>
+      </results>
+      <host><ip>192.0.2.10</ip><asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/><start>2026-10-20T01:00:00Z</start><end>2026-10-20T01:30:00Z</end>
+        <detail><name>hostname</name><value>web.example.invalid</value></detail><detail><name>best_os_cpe</name><value>cpe:/o:debian:debian_linux:12</value></detail><detail><name>ports</name><value>22/tcp,80/tcp,443/tcp,8080/tcp</value></detail></host>
+      <host><ip>192.0.2.11</ip><asset asset_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"/><start>2026-10-20T01:00:00Z</start><end>2026-10-20T01:20:00Z</end></host>
+      <host><ip>192.0.2.12</ip><asset asset_id="cccccccc-cccc-4ccc-8ccc-cccccccccccc"/><start>2026-10-20T01:00:00Z</start><end></end></host>
+    </report>
+  </report>
+</get_reports_response>
