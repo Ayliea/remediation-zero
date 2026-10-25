@@ -55,7 +55,7 @@ in milliseconds and the callers stay boring.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, Mapping
+from typing import Any, Collection, Iterable, Mapping, Optional
 
 #: Statuses a finding can hold in the reference collection. A finding that is
 #: already resolved is not a candidate for resolution again, which is what
@@ -104,6 +104,9 @@ class Reconciliation:
     scan_id: str
     outcomes: tuple[FindingOutcome, ...]
     covered_asset_ids: frozenset[str]
+    #: Scan findings dropped because they already exist under another task.
+    #: Only the task that first saw a finding may keep, resolve or reopen it.
+    foreign: tuple[str, ...] = ()
 
     def of(self, outcome: Outcome) -> tuple[FindingOutcome, ...]:
         """The verdicts of one kind, in input order."""
@@ -120,6 +123,9 @@ class Reconciliation:
         tally = {outcome.value: 0 for outcome in Outcome}
         for item in self.outcomes:
             tally[item.outcome.value] += 1
+        # Only when non-zero, so the count shape of untasked scans is unchanged.
+        if self.foreign:
+            tally["foreign"] = len(self.foreign)
         return tally
 
 
@@ -148,6 +154,8 @@ def reconcile(
     scan: Iterable[Mapping[str, Any]],
     covered_asset_ids: Iterable[str],
     scan_id: str,
+    task_id: Optional[str] = None,
+    withheld_finding_ids: Collection[str] = (),
 ) -> Reconciliation:
     """Decide what one rescan says about every finding it bears on.
 
@@ -159,6 +167,13 @@ def reconcile(
             only means remediation for an asset in this set.
         scan_id: identifies the scan, and is recorded on everything it
             resolves so a closure can be traced back to its evidence.
+        task_id: when given, only findings belonging to this task are
+            considered, and a scan finding that exists under another task is
+            dropped and listed in `Reconciliation.foreign`.
+        withheld_finding_ids: findings the scanner reported but the importer
+            skipped (below the quality floor, log level). A reported-but-
+            skipped result is not proof of a fix, so a previous finding named
+            here and absent from the scan is UNVERIFIABLE and left as it is.
 
     Returns:
         One `FindingOutcome` per finding in `previous`, plus one per finding
@@ -178,6 +193,17 @@ def reconcile(
     previous_by_id = _require_unique(previous, what="previous findings")
     scan_by_id = _require_unique(scan, what="scan findings")
 
+    foreign: tuple[str, ...] = ()
+    if task_id is not None:
+        foreign = tuple(
+            fid for fid in scan_by_id
+            if fid in previous_by_id and previous_by_id[fid].get("task_id") != task_id
+        )
+        scan_by_id = {f: r for f, r in scan_by_id.items() if f not in foreign}
+        previous_by_id = {f: r for f, r in previous_by_id.items()
+                          if r.get("task_id") == task_id}
+    withheld = frozenset(withheld_finding_ids)
+
     # A scan cannot report a finding on an asset it says it did not examine.
     # Trusting the findings would resolve things the manifest says were never
     # checked; trusting the manifest would discard a real observation. Neither
@@ -195,6 +221,22 @@ def reconcile(
 
     for finding_id, record in previous_by_id.items():
         asset_id = record.get("asset_id")
+
+        if finding_id in withheld and finding_id not in scan_by_id:
+            # Reported by the scanner but skipped on import: no evidence either
+            # way. A resolved finding stays resolved (no outcome, as when it is
+            # simply absent); an open one stays open.
+            if record.get("status") != STATUS_RESOLVED:
+                outcomes.append(FindingOutcome(
+                    finding_id=finding_id,
+                    asset_id=asset_id,
+                    outcome=Outcome.UNVERIFIABLE,
+                    reason=(
+                        f"{scan_id} reported a result for it that was withheld "
+                        f"on import. A withheld result is not proof of a fix."
+                    ),
+                ))
+            continue
 
         if record.get("status") == STATUS_RESOLVED:
             # Reported again after being closed. Silently skipping this is how
@@ -256,4 +298,5 @@ def reconcile(
         scan_id=scan_id,
         outcomes=tuple(outcomes),
         covered_asset_ids=covered,
+        foreign=foreign,
     )

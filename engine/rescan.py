@@ -52,6 +52,11 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
     if not dry_run and ports.journal is None:
         # Refuse before any read or write: every apply write is keyed.
         raise ValueError("rescan apply needs a journal")
+    if scan.get("source") == "greenbone" and "withheld_finding_ids" not in scan:
+        # Without the list a low-quality re-sighting reads as absence and would
+        # falsely close the finding. Refuse before any read or write.
+        raise ValueError("greenbone scan is missing withheld_finding_ids; "
+                         "refusing to reconcile")
     cycle_id = f"cycle-{cycle:03d}"
 
     previous = [doc.to_dict() for doc in ports.docs.collection("findings").stream()]
@@ -64,6 +69,8 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
         scan=scan["findings"],
         covered_asset_ids=scan["covered_asset_ids"],
         scan_id=scan["scan_id"],
+        task_id=scan.get("task_id"),
+        withheld_finding_ids=scan.get("withheld_finding_ids", ()),
     )
 
     counts = reconciliation.counts
@@ -86,7 +93,9 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
     # with fewer closures than it warrants, which re-running repairs. The
     # reverse leaves closures whose evidence was never stored, and nothing
     # remaining records what the scan actually looked at.
-    writer.record_scan(reconciliation, cycle=cycle)
+    writer.record_scan(reconciliation, cycle=cycle, provenance={
+        key: scan[key] for key in ("source", "task_id", "report_status")
+        if scan.get(key) is not None})
     resolved = writer.resolve(reconciliation, cycle=cycle)
     reopened = writer.reopen(reconciliation, cycle=cycle)
     added = writer.ingest_new(reconciliation, scan["findings"], cycle=cycle)

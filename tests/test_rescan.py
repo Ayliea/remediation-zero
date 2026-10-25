@@ -285,3 +285,69 @@ def test_a_resolved_finding_that_stays_absent_stays_resolved():
         scan_id="scan-03",
     )
     assert result.outcomes == ()
+
+
+# --- task scoping -----------------------------------------------------------------
+
+def tasked(fid: str, asset: str, task: str, status: str = STATUS_OPEN) -> dict:
+    return {**finding(fid, asset, status), "task_id": task}
+
+
+def test_other_tasks_report_never_closes_a_finding():
+    rec = reconcile(previous=[tasked("F1", "A", "T1")], scan=[],
+                    covered_asset_ids=["A"], scan_id="S2", task_id="T2")
+    assert rec.of(Outcome.RESOLVED) == ()
+
+
+def test_same_finding_seen_by_another_task_is_not_duplicated():
+    rec = reconcile(previous=[tasked("F1", "A", "T1")], scan=[scanned("F1", "A")],
+                    covered_asset_ids=["A"], scan_id="S2", task_id="T2")
+    assert rec.of(Outcome.NEW) == () and rec.foreign == ("F1",)
+    assert rec.outcomes == ()
+    assert rec.counts["foreign"] == 1
+
+
+def test_own_task_still_resolves():
+    rec = reconcile(previous=[tasked("F1", "A", "T1")], scan=[],
+                    covered_asset_ids=["A"], scan_id="S2", task_id="T1")
+    assert [o.finding_id for o in rec.of(Outcome.RESOLVED)] == ["F1"]
+    assert rec.foreign == () and "foreign" not in rec.counts
+
+
+def test_other_tasks_resolved_finding_is_not_regressed():
+    rec = reconcile(previous=[tasked("F1", "A", "T1", STATUS_RESOLVED)],
+                    scan=[scanned("F1", "A")],
+                    covered_asset_ids=["A"], scan_id="S2", task_id="T2")
+    assert rec.of(Outcome.REGRESSED) == () and rec.foreign == ("F1",)
+
+
+def test_untasked_scan_keeps_todays_behaviour():
+    rec = reconcile(previous=[finding("F1", "A")], scan=[],
+                    covered_asset_ids=["A"], scan_id="S2")
+    assert len(rec.of(Outcome.RESOLVED)) == 1
+    assert rec.foreign == () and "foreign" not in rec.counts
+
+
+# --- withheld results -------------------------------------------------------------
+
+def test_withheld_finding_is_not_resolved():
+    rec = reconcile(previous=[finding("F1", "A")], scan=[], covered_asset_ids=["A"],
+                    scan_id="S2", withheld_finding_ids=["F1"])
+    assert rec.of(Outcome.RESOLVED) == ()
+    assert [o.finding_id for o in rec.of(Outcome.UNVERIFIABLE)] == ["F1"]
+    assert rec.of(Outcome.NEW) == ()
+
+
+def test_withheld_resolved_finding_is_not_regressed():
+    rec = reconcile(previous=[finding("F1", "A", STATUS_RESOLVED)], scan=[],
+                    covered_asset_ids=["A"], scan_id="S2", withheld_finding_ids=["F1"])
+    assert rec.of(Outcome.REGRESSED) == () and rec.of(Outcome.RESOLVED) == ()
+    assert rec.of(Outcome.NEW) == ()
+
+
+def test_withheld_id_of_another_task_is_ignored():
+    rec = reconcile(previous=[tasked("F1", "A", "T1"), tasked("F2", "A", "T2")], scan=[],
+                    covered_asset_ids=["A"], scan_id="S2", task_id="T2",
+                    withheld_finding_ids=["F1"])
+    assert [o.finding_id for o in rec.of(Outcome.RESOLVED)] == ["F2"]
+    assert rec.of(Outcome.UNVERIFIABLE) == ()

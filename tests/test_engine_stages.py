@@ -382,3 +382,62 @@ def test_rescan_apply_without_journal_refuses_before_writing(ws):
     after = dump(ws)
     assert {k: len(v) for k, v in after.items()} == {k: len(v) for k, v in before.items()}
     assert after == before
+
+
+def test_scan_manifest_records_source_and_task(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    scan = {**SCAN, "scan_id": "gb-1", "task_id": "T1", "source": "greenbone",
+            "report_status": "Done", "withheld_finding_ids": []}
+
+    run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
+               dry_run=False)
+
+    stored = ws.docs_for("report").collection("scans").document("gb-1").get().to_dict()
+    assert stored["source"] == "greenbone"
+    assert stored["task_id"] == "T1"
+    assert stored["report_status"] == "Done"
+
+
+def test_untasked_scan_manifest_has_no_task_fields(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, SCAN,
+               dry_run=False)
+    stored = ws.docs_for("report").collection("scans").document("rescan-synthetic").get().to_dict()
+    assert not {"source", "task_id", "report_status"} & set(stored)
+
+
+def test_withheld_finding_status_is_unchanged_by_a_scan(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    findings = ws.docs_for("report").collection("findings")
+    before = findings.document("RZ-0001").get().to_dict()
+    assert before["status"] == "open"
+    # RZ-0001 is absent and covered (test_rescan_closes_verified_finding shows
+    # it resolves); withheld, it must not.
+    scan = {**SCAN, "withheld_finding_ids": ["RZ-0001"]}
+
+    result = run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
+                        dry_run=False)
+
+    assert findings.document("RZ-0001").get().to_dict() == before
+    assert result["newly_resolved"] == 1   # only the other covered, absent finding
+
+
+def test_greenbone_scan_without_withheld_list_is_refused(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    before = dump(ws)
+    scan = {**SCAN, "scan_id": "gb-2", "task_id": "T1", "source": "greenbone",
+            "report_status": "Done"}
+
+    with pytest.raises(ValueError, match="missing withheld_finding_ids"):
+        run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
+                   dry_run=False)
+
+    assert dump(ws) == before

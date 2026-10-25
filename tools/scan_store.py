@@ -82,7 +82,12 @@ class ScanWriter:
 
     # -- the manifest --------------------------------------------------------
 
-    def record_scan(self, reconciliation: Reconciliation, cycle: int) -> str:
+    def record_scan(
+        self,
+        reconciliation: Reconciliation,
+        cycle: int,
+        provenance: Optional[dict] = None,
+    ) -> str:
         """Store the scan and what it covered.
 
         Written before any resolution it justifies. If the run dies halfway,
@@ -103,6 +108,7 @@ class ScanWriter:
                 "cycle": cycle,
                 "real_ts": stamp.real_ts,
                 "sim_ts": stamp.sim_ts,
+                **(provenance or {}),
             })
             _log("scan_recorded", cycle, "-", scan_id=scan_id,
                  covered=len(reconciliation.covered_asset_ids),
