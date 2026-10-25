@@ -351,3 +351,9 @@ def test_withheld_id_of_another_task_is_ignored():
                     withheld_finding_ids=["F1"])
     assert [o.finding_id for o in rec.of(Outcome.RESOLVED)] == ["F2"]
     assert rec.of(Outcome.UNVERIFIABLE) == ()
+
+
+def test_string_withheld_list_is_rejected():
+    with pytest.raises(TypeError):
+        reconcile(previous=[finding("F1", "A")], scan=[], covered_asset_ids=["A"],
+                  scan_id="S2", withheld_finding_ids="F1")

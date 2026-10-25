@@ -441,3 +441,32 @@ def test_greenbone_scan_without_withheld_list_is_refused(ws):
                    dry_run=False)
 
     assert dump(ws) == before
+
+
+def test_greenbone_scan_without_task_id_is_refused(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    before = dump(ws)
+    for task in (None, ""):
+        scan = {**SCAN, "scan_id": "gb-3", "source": "greenbone", "report_status": "Done",
+                "withheld_finding_ids": []}
+        if task is not None:
+            scan["task_id"] = task
+        with pytest.raises(ValueError, match="missing task_id"):
+            run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
+                       dry_run=False)
+    assert dump(ws) == before
+
+
+def test_greenbone_scan_with_string_withheld_list_is_refused(ws):
+    from engine.rescan import run_rescan
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    before = dump(ws)
+    scan = {**SCAN, "scan_id": "gb-4", "task_id": "T1", "source": "greenbone",
+            "report_status": "Done", "withheld_finding_ids": "RZ-0001"}
+    with pytest.raises(ValueError, match="list of strings"):
+        run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
+                   dry_run=False)
+    assert dump(ws) == before

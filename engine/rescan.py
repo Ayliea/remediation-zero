@@ -52,11 +52,21 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
     if not dry_run and ports.journal is None:
         # Refuse before any read or write: every apply write is keyed.
         raise ValueError("rescan apply needs a journal")
-    if scan.get("source") == "greenbone" and "withheld_finding_ids" not in scan:
-        # Without the list a low-quality re-sighting reads as absence and would
-        # falsely close the finding. Refuse before any read or write.
-        raise ValueError("greenbone scan is missing withheld_finding_ids; "
-                         "refusing to reconcile")
+    if scan.get("source") == "greenbone":
+        # Fail closed before any read or write. Without a task id no task
+        # filter runs and the scan could close findings of every task; without
+        # the withheld list a low-quality re-sighting reads as absence.
+        if not scan.get("task_id"):
+            raise ValueError("greenbone scan is missing task_id; "
+                             "refusing to reconcile")
+        if "withheld_finding_ids" not in scan:
+            raise ValueError("greenbone scan is missing withheld_finding_ids; "
+                             "refusing to reconcile")
+        withheld = scan["withheld_finding_ids"]
+        if not (isinstance(withheld, (list, tuple))
+                and all(isinstance(item, str) for item in withheld)):
+            raise ValueError("greenbone scan withheld_finding_ids must be a "
+                             "list of strings; refusing to reconcile")
     cycle_id = f"cycle-{cycle:03d}"
 
     previous = [doc.to_dict() for doc in ports.docs.collection("findings").stream()]

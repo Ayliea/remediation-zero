@@ -202,6 +202,9 @@ def reconcile(
         scan_by_id = {f: r for f, r in scan_by_id.items() if f not in foreign}
         previous_by_id = {f: r for f, r in previous_by_id.items()
                           if r.get("task_id") == task_id}
+    if isinstance(withheld_finding_ids, (str, bytes)):
+        # A bare string would become a set of characters and withhold nothing.
+        raise TypeError("withheld_finding_ids must be a collection of ids, not a string")
     withheld = frozenset(withheld_finding_ids)
 
     # A scan cannot report a finding on an asset it says it did not examine.
