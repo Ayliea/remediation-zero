@@ -151,28 +151,122 @@ def test_urls_are_https():
     assert NVD_URL.startswith("https://")
 
 
-def test_real_get_refuses_non_https_has_a_timeout_and_a_size_cap(monkeypatch):
+def _fake_transport(monkeypatch, responder):
+    """Stand in for the network below urllib's own redirect handling."""
     import urllib.request
+    from urllib.response import addinfourl
+    from email.message import Message
 
+    import tools.enrichment_fetch as mod
+    seen = []
+
+    class Fake(urllib.request.HTTPSHandler, urllib.request.HTTPHandler):
+        def __init__(self):
+            pass
+
+        def _open(self, req):
+            seen.append((req.full_url, dict(req.header_items()), req.timeout))
+            code, headers, body = responder(req)
+            msg = Message()
+            for k, v in headers.items():
+                msg[k] = v
+            resp = addinfourl(io.BytesIO(body), msg, req.full_url, code)
+            resp.msg = "x"
+            return resp
+        https_open = http_open = _open
+
+    monkeypatch.setattr(mod, "_TRANSPORT_HANDLERS", (Fake(),))
+    return seen
+
+
+def test_real_get_refuses_non_https(monkeypatch):
     with pytest.raises(ValueError):
         urllib_get("http://example.invalid/x")
-    seen = {}
 
-    class Resp:
-        def __enter__(self):
-            return self
 
-        def __exit__(self, *a):
-            return False
-
-        def read(self, size=-1):
-            return b"x" * (MAX_DOWNLOAD_BYTES + 10 if size < 0 else size)
-
-    def fake_open(request, timeout=None):
-        seen["timeout"], seen["headers"] = timeout, dict(request.header_items())
-        return Resp()
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_open)
+def test_real_get_has_a_timeout_and_a_size_cap(monkeypatch):
+    seen = _fake_transport(monkeypatch, lambda r: (200, {}, b"x" * (MAX_DOWNLOAD_BYTES + 10)))
     with pytest.raises(ValueError):
         urllib_get("https://example.invalid/x", headers={"apiKey": "k"})
-    assert seen["timeout"] == 30 and seen["headers"]["Apikey"] == "k"
+    assert seen[0][2] == 30 and seen[0][1]["Apikey"] == "k"
+
+
+def test_a_redirect_is_refused_and_the_key_never_follows_it(monkeypatch, caplog, tmp_path):
+    caplog.set_level(logging.DEBUG)
+    seen = _fake_transport(monkeypatch, lambda r: (302, {"Location": "http://evil.invalid/x"}, b""))
+    with pytest.raises(Exception) as err:
+        urllib_get("https://example.invalid/x", headers={"apiKey": KEY})
+    assert len(seen) == 1 and seen[0][0].startswith("https://")
+    assert KEY not in str(err.value)
+    # Through refresh: a failed fetch, the previous file kept, nothing logged with the key.
+    refresh(["CVE-2021-44228"], tmp_path, get=fake_get([]), sleep=no_sleep)
+    before = (tmp_path / "cisa_kev.json").read_bytes()
+    result = refresh(["CVE-2020-0001"], tmp_path, get=urllib_get, sleep=no_sleep, nvd_api_key=KEY)
+    assert result["kev"] == "failed" and result["nvd_failed"] == ["CVE-2020-0001"]
+    assert (tmp_path / "cisa_kev.json").read_bytes() == before
+    assert all(url.startswith("https://") for url, _, _ in seen)
+    assert KEY not in caplog.text
+
+
+def test_cve_check_rejects_trailing_newline_and_non_ascii_digits(tmp_path):
+    calls = []
+    bad = ["CVE-2021-44228\n", "CVE-\u0662021-44228"]
+    result = refresh(bad, tmp_path, get=fake_get(calls), sleep=no_sleep)
+    assert sorted(result["nvd_failed"]) == sorted(bad)
+    assert not [u for u, _ in calls if "cveId" in u]
+
+
+def test_an_nvd_record_for_a_different_cve_is_not_cached(tmp_path):
+    def get(url, headers=None):
+        if "cveId" in url:
+            return nvd_payload("CVE-1999-0001")
+        return fake_get([])(url)
+    result = refresh(["CVE-2021-44228"], tmp_path, get=get, sleep=no_sleep)
+    assert result["nvd_failed"] == ["CVE-2021-44228"] and result["nvd_fetched"] == 0
+    assert not (tmp_path / "nvd.json").exists()
+
+
+def test_source_selection_skips_the_others_and_makes_no_request(tmp_path):
+    calls = []
+    result = refresh(["CVE-2021-44228"], tmp_path, get=fake_get(calls), sleep=no_sleep, sources=["kev"])
+    assert (result["kev"], result["epss"]) == ("ok", "skipped") and result["nvd_fetched"] == 0
+    assert [u for u, _ in calls] == [KEV_URL]
+    calls.clear()
+    result = refresh(["CVE-2021-44228"], tmp_path, get=fake_get(calls), sleep=no_sleep, sources=["nvd"])
+    assert result["kev"] == "skipped" and result["nvd_fetched"] == 1
+    assert [u for u, _ in calls] == [NVD_URL.format(cve="CVE-2021-44228")]
+
+
+def _load_script():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location(
+        "fetch_enrichment_script", Path(__file__).resolve().parents[1] / "scripts" / "fetch-enrichment.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_fetch_script_prints_its_lines_and_always_exits_zero(tmp_path, monkeypatch, capsys):
+    script = _load_script()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps([{"cve_id": f"CVE-2021-{n:05d}"} for n in range(1, 12)]))
+    monkeypatch.setattr(script, "FINDINGS", findings)
+    monkeypatch.setattr(script, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(script, "urllib_get", fake_get([]))
+    import functools
+    monkeypatch.setattr(script, "refresh", functools.partial(refresh, sleep=no_sleep))
+    monkeypatch.setattr("sys.argv", ["fetch-enrichment.py"])
+    assert script.main() == 0
+    out = capsys.readouterr().out
+    assert "Populating enrichment cache for 11 distinct CVEs." in out
+    assert "  KEV : 1 entries -> cisa_kev.json" in out
+    assert "  EPSS: 1 scores -> epss.json" in out
+    assert "  NVD : 0 already cached, 11 to fetch" in out
+    assert "    10/11 cached" in out and "    11/11 cached" in out
+    monkeypatch.setattr("sys.argv", ["fetch-enrichment.py", "kev"])
+    assert script.main() == 0
+    out = capsys.readouterr().out
+    assert "KEV :" in out and "EPSS:" not in out and "NVD :" not in out
+    monkeypatch.setattr(script, "urllib_get", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    assert script.main() == 0

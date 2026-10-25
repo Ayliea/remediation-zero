@@ -38,7 +38,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Collection, Iterable, Optional
 
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EPSS_URL = "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"
@@ -54,7 +54,7 @@ NVD_DELAY_WITH_KEY_SECONDS = 0.7
 MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
 REQUEST_TIMEOUT_SECONDS = 30
 
-_CVE_ID = re.compile(r"^CVE-\d{4}-\d{4,}$")
+_CVE_ID = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}")
 _FLUSH_EVERY = 10
 
 logger = logging.getLogger("remediation_zero.enrichment_fetch")
@@ -67,12 +67,26 @@ def workspace_cache_dir(root: Path) -> Path:
     return Path(root) / "enrichment"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect (R15): the three hosts are fixed, and a redirect
+    would carry the NVD key header to wherever the response points."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("redirects are refused")
+
+
+#: Extra handlers for the opener; empty in production, set by tests to stand
+#: in for the network while the real redirect handling still runs.
+_TRANSPORT_HANDLERS: tuple = ()
+
+
 def urllib_get(url: str, headers: Optional[dict] = None) -> bytes:
-    """The real fetcher: https only, explicit timeout, size capped."""
+    """The real fetcher: https only, no redirects, explicit timeout, size capped."""
     if not url.startswith("https://"):
         raise ValueError("enrichment sources are fetched over https only")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    opener = urllib.request.build_opener(_NoRedirect, *_TRANSPORT_HANDLERS)
+    with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
         data = response.read(MAX_DOWNLOAD_BYTES + 1)
     if len(data) > MAX_DOWNLOAD_BYTES:
         raise ValueError("download larger than the size cap")
@@ -85,6 +99,8 @@ def _write_atomic(path: Path, payload: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp, path)
     except BaseException:
         try:
@@ -137,7 +153,11 @@ def _parse_epss(raw: bytes, wanted: set) -> dict:
     return scores
 
 
-def _nvd_record(raw: bytes) -> dict:
+class _Skipped(Exception):
+    pass
+
+
+def _nvd_record(raw: bytes, cve: str) -> dict:
     if len(raw) > MAX_DOWNLOAD_BYTES:
         raise ValueError("too large")
     payload = json.loads(raw)
@@ -149,32 +169,46 @@ def _nvd_record(raw: bytes) -> dict:
     record = vulns[0].get("cve") if isinstance(vulns[0], dict) else None
     if not isinstance(record, dict):
         raise ValueError("not an NVD record")
+    if record.get("id") != cve:
+        raise ValueError("NVD record is for a different CVE")
     return record
 
 
 def refresh(cves: Iterable[str], cache_dir: Path, *, get: Get,
             sleep: Callable[[float], None] = time.sleep,
-            nvd_api_key: Optional[str] = None) -> dict:
+            nvd_api_key: Optional[str] = None,
+            sources: Collection[str] = ("kev", "epss", "nvd"),
+            progress: Optional[Callable[[str, int, int], None]] = None) -> dict:
     """Fetch KEV, EPSS and NVD for `cves` into `cache_dir`.
 
     `get(url)` returns the body bytes; for NVD with a key it is called as
     `get(url, headers={"apiKey": key})`. A source that fails keeps its previous
     file. NVD is resumable: a CVE already cached is skipped, a failed one is
-    not cached, so the next run retries it.
+    not cached, so the next run retries it. `sources` selects which of
+    "kev", "epss", "nvd" to refresh; the others report "skipped" and make no
+    request. `progress(kind, a, b)` is told ("start", cached, to_fetch) and
+    ("cached", done, total) so a caller can print.
     """
     cache_dir = Path(cache_dir)
     wanted = list(dict.fromkeys(cves))
-    result: dict = {"kev": "failed", "epss": "failed", "nvd_fetched": 0,
-                    "nvd_failed": [], "nvd_skipped": 0}
+    result: dict = {"kev": "skipped", "epss": "skipped", "nvd_fetched": 0,
+                    "nvd_failed": [], "nvd_skipped": 0, "kev_entries": 0, "epss_scores": 0}
 
     try:
-        _write_atomic(cache_dir / "cisa_kev.json", _parse_kev(get(KEV_URL)))
-        result["kev"] = "ok"
+        if "kev" in sources:
+            result["kev"] = "failed"
+            catalogue = _parse_kev(get(KEV_URL))
+            _write_atomic(cache_dir / "cisa_kev.json", catalogue)
+            result["kev"] = "ok"
+            result["kev_entries"] = len(catalogue["vulnerabilities"])
     except Exception as exc:  # noqa: BLE001 - class only; the previous file stays
         logger.info(json.dumps({"event": "enrichment_source_failed", "source": "kev",
                                 "error_class": type(exc).__name__}, sort_keys=True))
 
     try:
+        if "epss" not in sources:
+            raise _Skipped
+        result["epss"] = "failed"
         keep = set(wanted)
         kev = _read_json(cache_dir / "cisa_kev.json")
         if isinstance(kev, dict) and isinstance(kev.get("vulnerabilities"), list):
@@ -183,8 +217,12 @@ def refresh(cves: Iterable[str], cache_dir: Path, *, get: Get,
         previous = _read_json(cache_dir / "epss.json")
         if isinstance(previous, dict):
             keep |= set(previous)
-        _write_atomic(cache_dir / "epss.json", _parse_epss(get(EPSS_URL), keep))
+        scores = _parse_epss(get(EPSS_URL), keep)
+        _write_atomic(cache_dir / "epss.json", scores)
         result["epss"] = "ok"
+        result["epss_scores"] = len(scores)
+    except _Skipped:
+        pass
     except Exception as exc:  # noqa: BLE001
         logger.info(json.dumps({"event": "enrichment_source_failed", "source": "epss",
                                 "error_class": type(exc).__name__}, sort_keys=True))
@@ -194,11 +232,11 @@ def refresh(cves: Iterable[str], cache_dir: Path, *, get: Get,
     cached = cached if isinstance(cached, dict) else {}
     # An entry left by the old fetch script as an error is retried, not trusted.
     todo = []
-    for cve in wanted:
+    for cve in (wanted if "nvd" in sources else ()):
         entry = cached.get(cve)
         if isinstance(entry, dict) and not entry.get("_error"):
             result["nvd_skipped"] += 1
-        elif not _CVE_ID.match(cve):
+        elif not _CVE_ID.fullmatch(cve):
             result["nvd_failed"].append(cve)
         else:
             todo.append(cve)
@@ -206,11 +244,14 @@ def refresh(cves: Iterable[str], cache_dir: Path, *, get: Get,
     delay = NVD_DELAY_WITH_KEY_SECONDS if nvd_api_key else NVD_DELAY_SECONDS
     headers = {"apiKey": nvd_api_key} if nvd_api_key else None
     unsaved = 0
+    if "nvd" in sources:
+        if progress:
+            progress("start", len(cached), len(todo))
     try:
         for index, cve in enumerate(todo):
             try:
                 url = NVD_URL.format(cve=cve)
-                cached[cve] = _nvd_record(get(url, headers=headers) if headers else get(url))
+                cached[cve] = _nvd_record(get(url, headers=headers) if headers else get(url), cve)
                 result["nvd_fetched"] += 1
                 unsaved += 1
             except Exception as exc:  # noqa: BLE001 - one bad CVE never stops the rest
@@ -218,9 +259,12 @@ def refresh(cves: Iterable[str], cache_dir: Path, *, get: Get,
                 logger.info(json.dumps({"event": "enrichment_source_failed", "source": "nvd",
                                         "cve_id": cve, "error_class": type(exc).__name__},
                                        sort_keys=True))
-            if unsaved >= _FLUSH_EVERY:
+            last = index == len(todo) - 1
+            if unsaved and (unsaved >= _FLUSH_EVERY or last or (index + 1) % _FLUSH_EVERY == 0):
                 _write_atomic(nvd_path, cached)
                 unsaved = 0
+            if progress and (last or (index + 1) % _FLUSH_EVERY == 0):
+                progress("cached", len(cached), len(wanted))
             if index < len(todo) - 1:
                 sleep(delay)
     finally:

@@ -14,7 +14,7 @@
 
 """Populate the enrichment cache. Run rarely, never at demo time.
 
-Constraint 11: CISA KEV, NVD and EPSS are queried once and cached to disk. The
+Hard constraint 7: CISA KEV, NVD and EPSS are queried once and cached to disk. The
 runtime enrichment path in `tools/enrichment.py` reads the cache and never
 performs network I/O, so a live demonstration cannot be broken by a third-party
 API being slow, rate-limiting, or down.
@@ -23,8 +23,8 @@ The fetching lives in `tools/enrichment_fetch.py`, shared with the local
 edition's `update-enrichment`; this script points it at the repository's
 `data/cache` and the synthetic corpus. It is resumable: NVD is fetched one CVE
 at a time under a rate limit (set NVD_API_KEY for the faster keyed limit), and
-re-running skips whatever is already cached. All three sources are refreshed
-on every run.
+re-running skips whatever is already cached. Pass kev, epss and/or nvd to
+refresh only those.
 """
 
 import json
@@ -46,13 +46,31 @@ def main() -> int:
     findings = json.loads(FINDINGS.read_text(encoding="utf-8"))
     cves = sorted({cve for f in findings for cve in finding_cves(f)})
     print(f"Populating enrichment cache for {len(cves)} distinct CVEs.")
-    result = refresh(cves, CACHE_DIR, get=urllib_get, nvd_api_key=os.environ.get("NVD_API_KEY") or None)
-    print(f"  KEV : {result['kev']}\n  EPSS: {result['epss']}\n"
-          f"  NVD : {result['nvd_fetched']} fetched, {result['nvd_skipped']} already cached, "
-          f"{len(result['nvd_failed'])} failed")
+
+    which = sys.argv[1:] or ["kev", "epss", "nvd"]
+
+    def progress(kind, first, second):
+        if kind == "start":
+            print(f"  NVD : {first} already cached, {second} to fetch")
+        else:
+            print(f"    {first}/{second} cached", flush=True)
+
+    result = refresh(cves, CACHE_DIR, get=urllib_get, nvd_api_key=os.environ.get("NVD_API_KEY") or None,
+                     sources=which, progress=progress)
+    if result["kev"] == "ok":
+        print(f"  KEV : {result['kev_entries']} entries -> cisa_kev.json")
+    elif result["kev"] == "failed":
+        print("  KEV : failed; the previous file was kept")
+    if result["epss"] == "ok":
+        print(f"  EPSS: {result['epss_scores']} scores -> epss.json")
+    elif result["epss"] == "failed":
+        print("  EPSS: failed; the previous file was kept")
+    if result["nvd_failed"]:
+        print(f"  NVD : {len(result['nvd_failed'])} failed; the next run retries them")
+
     print("\nCache populated. The runtime path reads these files and never")
     print("performs network I/O, so the demo does not depend on these APIs.")
-    return 0 if result["kev"] == "ok" and result["epss"] == "ok" and not result["nvd_failed"] else 1
+    return 0
 
 
 if __name__ == "__main__":

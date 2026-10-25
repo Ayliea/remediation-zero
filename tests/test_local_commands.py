@@ -1096,7 +1096,8 @@ def test_update_enrichment_collects_every_workspace_cve_and_writes_status(ws):
     assert asked == ["CVE-2019-0708", "CVE-2020-0001", "CVE-2021-44228"]
     assert result["nvd_fetched"] == 3 and result["kev"] == "ok"
     status = docs(ws, "scanner_state")["enrichment"]
-    assert status["fetched"] == 5 and status["failed"] == []
+    assert (status["kev"], status["epss"], status["nvd_fetched"], status["failed"]) == ("ok", "ok", 3, [])
+    assert "fetched" not in status
     assert {"last_run_real_ts", "last_run_sim_ts"} <= set(status)
     assert CACHE_KEY not in json.dumps(status)
     for path in ws.root.rglob("*"):
@@ -1111,15 +1112,14 @@ def test_update_enrichment_with_a_subset_fetches_only_those(ws):
     assert [u.split("=")[1] for u, _ in calls if "cveId" in u] == ["CVE-2020-0001"]
 
 
-def test_update_enrichment_status_uses_the_simclock_not_wall_time(ws, monkeypatch):
+def test_update_enrichment_status_uses_the_clock_not_wall_time(ws):
     from scripts import local
     from tools.clock import Stamp
 
     class Fixed:
         def now(self):
             return Stamp(real_ts=111.5, sim_ts=222.5)
-    monkeypatch.setattr(local.SimClock, "from_env", classmethod(lambda cls, env=None: Fixed()))
-    local.update_enrichment(ws, {}, cves=[], get=_fake_sources([]))
+    local.update_enrichment(ws, {}, cves=[], get=_fake_sources([]), clock=Fixed())
     status = docs(ws, "scanner_state")["enrichment"]
     assert (status["last_run_real_ts"], status["last_run_sim_ts"]) == (111.5, 222.5)
 

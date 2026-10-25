@@ -194,7 +194,7 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
             'chase_cycle': day, 'chase': chased, 'sweep': swept}
 
 
-def update_enrichment(ws, environ, *, cves=None, get=None):
+def update_enrichment(ws, environ, *, cves=None, get=None, clock=None):
     """Refresh the workspace's enrichment cache; the one thing that reaches the internet.
 
     `cves` None means every CVE on the workspace's findings. `get` None is the
@@ -204,7 +204,7 @@ def update_enrichment(ws, environ, *, cves=None, get=None):
     enrichment_refresh stage with the SimClock's stamps.
     """
     get = get or urllib_get
-    clock = SimClock.from_env(environ)
+    clock = clock or SimClock.from_env(environ)
     docs = ws.docs_for('enrichment_refresh')
     try:
         if cves is None:
@@ -218,7 +218,7 @@ def update_enrichment(ws, environ, *, cves=None, get=None):
         stamp = clock.now()
         docs.collection('scanner_state').document('enrichment').set({
             'last_run_real_ts': stamp.real_ts, 'last_run_sim_ts': stamp.sim_ts,
-            'fetched': (2 - sum(result[n] != 'ok' for n in ('kev', 'epss'))) + result['nvd_fetched'],
+            'kev': result['kev'], 'epss': result['epss'], 'nvd_fetched': result['nvd_fetched'],
             'failed': failed})
         _log('enrichment_refreshed', kev=result['kev'], epss=result['epss'],
              nvd_fetched=result['nvd_fetched'], nvd_failed=len(result['nvd_failed']))
