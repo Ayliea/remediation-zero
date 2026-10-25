@@ -4,8 +4,10 @@
 """The rescan stage: apply a follow-up scan to what the fleet is already chasing.
 
 This is the only path that can mark a finding resolved. It is called by
-`scripts/rescan.py` in the cloud and by the local edition's command line,
-never by an agent: chase reads a resolution, it does not make one.
+`scripts/rescan.py` in the cloud, by the local edition's `rescan` command (demo
+workspaces) and by the Greenbone import (`engine.scanner_import`), never by an
+agent: chase reads a resolution, it does not make one. In a workspace holding
+Greenbone findings a scan without a task id is refused before any write.
 
 Everything it concludes it concludes from two inputs: what the scan reported,
 and which assets the scan actually examined. A dry run reconciles, logs the
@@ -47,11 +49,29 @@ def load_scan(path: Path) -> dict:
     return scan
 
 
+class GreenboneWorkspace(ValueError):
+    """An untasked scan was offered to a workspace that imports from Greenbone."""
+
+
+def holds_greenbone_findings(docs) -> bool:
+    """True when any stored finding came from Greenbone (`source == "greenbone"`)."""
+    return any((snap.to_dict() or {}).get("source") == "greenbone"
+               for snap in docs.collection("findings").stream())
+
+
 def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
     """Reconcile `scan` against `findings` and, unless `dry_run`, record it."""
     if not dry_run and ports.journal is None:
         # Refuse before any read or write: every apply write is keyed.
         raise ValueError("rescan apply needs a journal")
+    if not scan.get("task_id") and holds_greenbone_findings(ports.docs):
+        # Before any write. A scan without a task id runs no task filter, so in
+        # a Greenbone workspace it could close every task's findings, and a
+        # synthetic scan would mix demo data into real data. Only the import
+        # path (greenbone pull / upload / the timer) reconciles here.
+        raise GreenboneWorkspace("this workspace imports from Greenbone; a scan without a "
+                                 "task id is refused so it cannot resolve or add findings. "
+                                 "Nothing was written.")
     if scan.get("source") == "greenbone":
         # Fail closed before any read or write. Without a task id no task
         # filter runs and the scan could close findings of every task; without

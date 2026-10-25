@@ -927,3 +927,25 @@ def test_reader_refuses_trailing_garbage_and_bad_framing():
     refused(b"x" + browser_body())
     refused(browser_body().replace(b"------RzBoundary42--", b"------RzBoundary42"))
     refused(b"")
+
+
+# --- R29 C1: the rescan command in a Greenbone workspace ----------------------------
+
+
+@pytest.mark.parametrize("extra", [[], ["--dry-run"]])
+def test_rescan_command_refuses_in_a_greenbone_workspace_and_writes_nothing(gws, monkeypatch, capsys,
+                                                                           tmp_path, extra):
+    configure(gws, task_ids=())
+    clean = tmp_path / "clean.xml"
+    clean.write_bytes(CLEAN_REPORT)
+    assert run(monkeypatch, gws, "greenbone", "upload", str(clean), "--add-task") == 0
+    assert docs(gws, "findings")
+    capsys.readouterr()
+    manual = tmp_path / "manual.json"
+    manual.write_text(json.dumps({"scan_id": "manual-1", "covered_asset_ids": [], "findings": []}))
+    for scan_file in (manual, ROOT / "data" / "rescan-01.json"):
+        before = everything_under(gws)
+        assert run(monkeypatch, gws, "rescan", "--cycle", "2", "--scan", str(scan_file), *extra) == 1
+        assert ("This install imports from Greenbone; use greenbone pull or greenbone upload."
+                in capsys.readouterr().err)
+        assert everything_under(gws) == before

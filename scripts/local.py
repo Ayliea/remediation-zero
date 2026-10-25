@@ -29,7 +29,7 @@ from engine.approve import ApprovalRefused, InvalidFindingId, approve, assign_ap
 from engine.chase import run_chase
 from engine.ports import NoDelivery, NoTelemetry, Ports
 from engine.report import run_report
-from engine.rescan import load_scan, run_rescan
+from engine.rescan import holds_greenbone_findings, load_scan, run_rescan
 from engine.scanner_import import GreenboneSource, ImportRefused, import_upload, pull
 from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
@@ -72,6 +72,7 @@ logger = logging.getLogger('remediation_zero.local')
 
 _ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])')
 NO_TASKS = 'No tasks are chosen. Nothing was pulled. Choose tasks in Settings, or run: greenbone tasks'
+GREENBONE_RESCAN = 'This install imports from Greenbone; use greenbone pull or greenbone upload.'
 NOT_SET_UP = ('The Greenbone connection is not set up. Save a socket path (Unix) or host (TLS) in Settings. '
               'No connection was attempted.')
 
@@ -835,7 +836,7 @@ def _parser():
                          help="Folder holding findings.json, assets.json and owners.json (default: the repository's data/)")
     cycle = commands.add_parser('cycle', help='Run triage, chase, sweep and report once; calls your models')
     cycle.add_argument('--cycle', type=_cycle, required=True)
-    rescan = commands.add_parser('rescan', help='Apply a follow-up scan; the only way a finding is resolved')
+    rescan = commands.add_parser('rescan', help='Apply a follow-up scan to a demo workspace; Greenbone workspaces resolve through greenbone pull or upload')
     rescan.add_argument('--cycle', type=_cycle, required=True)
     rescan.add_argument('--scan', type=Path, required=True, metavar='PATH')
     rescan.add_argument('--dry-run', action='store_true', help='Show what would close; write nothing')
@@ -928,9 +929,12 @@ def main():
             finally:
                 docs.close()
         elif args.command == 'rescan':
-            scan = load_scan(args.scan)
             docs = ws.docs_for('rescan')
             try:
+                # Before the scan is read: a Greenbone workspace is reconciled only by its imports.
+                if holds_greenbone_findings(docs):
+                    parser.exit(1, GREENBONE_RESCAN + '\n')
+                scan = load_scan(args.scan)
                 _print(run_rescan(_ports(docs, None if args.dry_run else ws.journal(), clock),
                                   args.cycle, scan, args.dry_run))
             finally:

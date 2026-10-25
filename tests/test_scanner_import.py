@@ -1023,3 +1023,55 @@ def test_snapshot_reads_state_for_all_500_chosen_tasks_plus_enrichment(ws, ports
     page = dashboard_view.render(view, "infrastructure", chosen_tasks=ids)
     assert page.count("Result: Nothing new") == 70 and "Not pulled yet" not in page
     assert "Advisories fetched: 1" in page
+
+
+# --- R29 C1: an untasked scan never reaches a Greenbone workspace -------------------
+
+
+def _rescan(ws, cycle, scan_doc, dry_run=False):
+    from engine.rescan import run_rescan
+    p = ports_for(ws, "rescan")
+    try:
+        return run_rescan(p, cycle, scan_doc, dry_run)
+    finally:
+        p.docs.close()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_untasked_scan_is_refused_in_a_greenbone_workspace_and_writes_nothing(ws, ports, dry_run):
+    from engine.rescan import GreenboneWorkspace
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    before = everything(ws)
+    with pytest.raises(GreenboneWorkspace, match="Nothing was written"):
+        _rescan(ws, 2, {"scan_id": "manual-1", "covered_asset_ids": [WEB], "findings": []}, dry_run)
+    assert everything(ws) == before
+    assert docs(ws, "findings")[LOG4J]["status"] == "open"
+
+
+def test_shipped_demo_rescan_is_refused_in_a_greenbone_workspace(ws, ports):
+    from engine.rescan import GreenboneWorkspace, load_scan
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    before = everything(ws)
+    with pytest.raises(GreenboneWorkspace):
+        _rescan(ws, 2, load_scan(ROOT / "data" / "rescan-01.json"))
+    assert everything(ws) == before
+    source.add(2, with_log4j=False)  # the next pull still imports: nothing demo got in
+    assert pull(ports, 2, source, chosen_task_ids=[TASK])["pulled"][0]["result"] == "imported"
+    assert docs(ws, "findings")[LOG4J]["status"] == "resolved"
+
+
+def test_a_demo_workspace_still_rescans_as_before(ws):
+    from engine.rescan import load_scan
+    seeder = ws.docs_for("seed")
+    try:
+        seed(Ports(docs=seeder, journal=None, clock=SimClock(ClockMode.REAL, source=lambda: NOW),
+                   roles=None, guard=NoGuard(), delivery=NoDelivery(), memory=None,
+                   telemetry=NoTelemetry()), ROOT / "data")
+    finally:
+        seeder.close()
+    out = _rescan(ws, 1, load_scan(ROOT / "data" / "rescan-01.json"))
+    assert out["written"] is True and out["newly_resolved"] > 0
