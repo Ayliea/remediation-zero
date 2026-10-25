@@ -149,7 +149,7 @@ python3 -S -m scripts.local --help                                         # ini
 python3 -S -m scripts.local update-enrichment                              # fetch CISA KEV, EPSS and NVD into the workspace cache; reaches the internet
 python3 -S -m scripts.local greenbone tasks                                # list the account's Greenbone tasks: task_id  name
 python3 -S -m scripts.local greenbone test                                 # connect / sign in / list tasks, one line each
-python3 -S -m scripts.local greenbone pull [--cycle N]                     # import the newest finished report of each chosen task
+python3 -S -m scripts.local greenbone pull [--cycle N]                     # import the next finished report of each chosen task (the newest one the first time)
 python3 -S -m scripts.local greenbone upload FILE [--add-task] [--cycle N] # import one exported report; --add-task chooses its task
 python3 -S -m scripts.build_local_installer /abs/path/install-remediation-zero.py
 python3 -S -m scripts.verify_local_install

@@ -85,15 +85,22 @@ before it creates or writes anything.
   triages only pending findings: open findings with no decision yet, and
   findings whose risk acceptance lapsed (each lapse is re-triaged once). Chase,
   the exception sweep and the report follow, in that order.
-- **rescan** is the only command that marks a finding resolved. Read the dry
-  run first: it writes nothing.
+- **rescan** applies a follow-up scan file to a demo (seeded) workspace and is
+  the only thing that marks a demo finding resolved. Read the dry run first: it
+  writes nothing. In a workspace that imports from Greenbone it refuses ("This
+  install imports from Greenbone; use greenbone pull or greenbone upload.") and
+  writes nothing; there, only `greenbone pull`, `greenbone upload` (or the
+  dashboard's upload) and the timer's pull resolve findings. Nothing else
+  resolves a finding.
 - **exception accept** records a risk acceptance that expires after `--ttl`
   days; the sweep in the next `cycle` past expiry reopens it. A KEV CVE needs
   `--approved-by-person`.
 - **approve** records a person's approval of an `unreviewed` or
   `held_for_approval` decision. See "Review" below.
 - **serve** shows the dashboard and Settings on `http://127.0.0.1:8081`. With
-  `--demo` it shows illustrative fixtures instead of saved records. It binds
+  `--demo` it shows illustrative fixtures instead of saved records. Its first
+  line is `Local synthetic preview: <url>` with `--demo` and
+  `Local dashboard: <url>` for saved records. It binds
   only to loopback and has no user authentication, so do not reverse-proxy it
   onto a network.
 
@@ -109,10 +116,15 @@ before it creates or writes anything.
   - `tasks` prints `task_id  name` for each task the account can see.
   - `test` prints the same three lines as the Settings page: connected,
     signed in, tasks listed.
-  - `pull` imports at most one finished report for each chosen task and
+  - `pull` imports the next finished report (the newest one the first time),
+    at most one, for each chosen task and
     prints one line per task: the result, then findings added, resolved,
-    skipped, refused and deferred. It exits 0 when every task imported, had
-    nothing new, or had already imported in this cycle, and 1 otherwise. `--cycle` defaults to the next cycle number.
+    skipped, refused and deferred, and in words any results not imported
+    because another result on that host could not be read and any entries in
+    Greenbone's report list that could not be read. A task whose last import's
+    cycle has not completed prints "waiting for the previous cycle to finish".
+    It exits 0 when every task imported, had nothing new, had already imported
+    in this cycle, or is waiting for that cycle, and 1 otherwise. `--cycle` defaults to the next cycle number.
     With no task chosen it connects to nothing.
   - `upload FILE` imports an exported report by the same checks. The report's
     own task decides: if that task is not chosen the command stops with

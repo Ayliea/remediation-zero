@@ -77,6 +77,17 @@ With *Run a cycle automatically every N minutes* above 0, the launcher pulls
 the chosen tasks before each cycle. A failed pull is logged by its error
 class and the cycle still runs.
 
+Imports wait while a triage cycle cannot complete. A task imports at most one
+report per completed cycle, so triage never falls behind imports. If the cycle
+a task last imported in has not finished (for example it stopped on a model
+error), the next cycle number does not advance and every later pull of that
+task imports nothing. It is not an error and is never shown as an import:
+`greenbone pull` prints `<task> waiting for the previous cycle to finish`
+(exit 0), and the task's card on **My infrastructure** says "Waiting for the
+previous cycle to finish before importing more." with the time of the pull.
+Fix what stopped the cycle (the dashboard lists runs that did not finish) and
+run `cycle` again; the next pull imports.
+
 *Fetch enrichment automatically after an import* is off by default. Then
 CISA KEV, EPSS and NVD data come only from
 `python3 -S -m scripts.local --database DIR update-enrichment`, the one command that
@@ -106,7 +117,8 @@ credentials and make no connection.
 - **After that.** A report is imported only if its scan time is newer than
   the last one imported for that task. At most one report per task per
   cycle; a second upload in the same cycle is refused as already imported
-  this cycle. At most 5 report downloads per task per pull; the rest wait
+  this cycle, and a pull waits (see Pulling) while that cycle has not
+  completed. At most 5 report downloads per task per pull; the rest wait
   for the next pull.
 - **Refused reports.** A report is refused, and closes nothing, when it is
   unsafe (it contains a DOCTYPE or ENTITY), too large, malformed, without a
@@ -125,7 +137,14 @@ credentials and make no connection.
   NVD fields read "not applicable (no CVE)". Accepting the risk on a high
   or critical no-CVE finding needs a person's approval.
 - **Hosts.** A host counts as covered only if the report says its scan
-  finished. Assets are keyed on Greenbone's host asset ID (IP as a
+  finished. If one result on a finished host cannot be read, the host is not
+  covered and its other results are not imported either; they are counted
+  ("N results on M hosts were not imported because another result on that
+  host could not be read") on the card and in the pull line.
+- **Greenbone's report list.** An entry in the list that cannot be read (no
+  report id, no status, or a timestamp that is not ISO 8601 with a zone) is
+  refused and never considered; the count is shown on the card and in the
+  pull line. Assets are keyed on Greenbone's host asset ID (IP as a
   recorded fallback) and arrive with no owner.
 
 ## How closure works
@@ -175,7 +194,8 @@ this repository.
    Compare the findings, hosts and ports with the same report in
    Greenbone's web interface.
 6. Run `python3 -S -m scripts.local --database DIR greenbone pull --cycle 1`
-   again. Expect `already_imported_this_cycle`. With `--cycle 2`, expect
+   again. Expect `already_imported_this_cycle` (or `waiting for the previous cycle
+   to finish` if the step 4 cycle did not complete). With `--cycle 2`, expect
    `nothing_new`.
 7. Run a new scan of that task in Greenbone, after fixing or switching off
    one detected service on a scanned host. When the report is Done, run
@@ -207,8 +227,9 @@ Assumptions to confirm (inspect real responses locally, for example with
   `<report id><report id><task id/><scan_run_status/><timestamp/>...`.
   The listing time is the inner `<timestamp>`, else `<creation_time>`,
   else `<scan_end>`.
-- Listing timestamps are ISO 8601 with `Z` or an offset (one without a zone
-  is read as UTC).
+- Listing timestamps are ISO 8601 with `Z` or an offset. One without a zone
+  is not guessed to be UTC: that entry is refused ("bad timestamp") and
+  counted.
 - `get_reports report_id=<id>` returns one response holding exactly one
   report with that id (not a GSA-style export).
 - In a report: the task (`task@id`, `task/name`) and `scan_run_status` are on
