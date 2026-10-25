@@ -109,6 +109,16 @@ def everything(ws):
     return out
 
 
+def complete_cycle(ws, n):
+    """Record cycle n as finished, as the triage stage does when every finding completed."""
+    store = ws.docs_for("triage_cycle")
+    try:
+        store.collection("cycles").document(f"cycle-{n:03d}").set(
+            {"cycle_id": f"cycle-{n:03d}", "cycle": n, "outcomes": {}})
+    finally:
+        store.close()
+
+
 def docs(ws, collection):
     """Documents by id; findings by their `finding_id` field.
 
@@ -204,6 +214,7 @@ def test_one_report_per_task_per_cycle(ws, ports):
     pull(ports, 1, source, chosen_task_ids=[TASK])
     source.add(2)
     source.add(3)
+    complete_cycle(ws, 1)  # R29 I1: before cycle 1 completes, the pull waits instead
     again = pull(ports, 1, source, chosen_task_ids=[TASK])
     assert again["pulled"][0]["result"] == "already_imported_this_cycle"
     assert set(docs(ws, "scans")) == {rid(1)}
@@ -363,6 +374,7 @@ def test_repeated_pull_writes_nothing(ws, ports):
     source = FakeSource()
     source.add(1)
     pull(ports, 1, source, chosen_task_ids=[TASK])
+    complete_cycle(ws, 1)  # R29 I1: before cycle 1 completes, the pull records that it waits
     before = everything(ws)
     pull(ports, 1, source, chosen_task_ids=[TASK])
     assert everything(ws) == before
@@ -403,7 +415,8 @@ def test_report_that_uncovers_everything_closes_nothing_and_says_so(ws, ports):
     assert all(f["status"] == "open" for f in docs(ws, "findings").values())
     state = docs(ws, "scanner_state")[TASK]
     assert state["last_uncovered_all"] is True
-    assert state["last_skipped"] == {"log": 0, "below_qod": 0, "rejected": 1, "not_finished": 0}
+    assert state["last_skipped"] == {"log": 0, "below_qod": 0, "rejected": 1, "not_finished": 0,
+                                     "host_uncovered": 0}
 
 
 def test_failure_after_first_write_leaves_nothing(ws, ports, monkeypatch):

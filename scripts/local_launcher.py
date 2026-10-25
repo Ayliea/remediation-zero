@@ -87,6 +87,15 @@ def start_interval_runner(database, minutes, **kwargs):
     return runner
 
 
+#: The two first lines `scripts.local serve` prints (demo fixtures, or saved records).
+READY_PREFIXES = ('Local synthetic preview: http://127.0.0.1:', 'Local dashboard: http://127.0.0.1:')
+
+
+def is_ready_line(line):
+    """True when `line` is the server's banner, in either mode."""
+    return line.startswith(READY_PREFIXES)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Start the local Remediation Zero dashboard; Ctrl+C stops it')
     mode = parser.add_mutually_exclusive_group()
@@ -112,7 +121,7 @@ def main():
     process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, text=True)
     try:
         ready = process.stdout.readline().strip()
-        if not ready.startswith('Local synthetic preview: http://127.0.0.1:'):
+        if not is_ready_line(ready):
             raise SystemExit('Dashboard did not start. Check the error above; port 8081 may already be in use. Try --port 8082.')
         print(ready, flush=True)
         minutes = preferences['cycle_interval_minutes']

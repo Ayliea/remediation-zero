@@ -30,7 +30,7 @@ from engine.chase import run_chase
 from engine.ports import NoDelivery, NoTelemetry, Ports
 from engine.report import run_report
 from engine.rescan import holds_greenbone_findings, load_scan, run_rescan
-from engine.scanner_import import GreenboneSource, ImportRefused, import_upload, pull
+from engine.scanner_import import WAITING_FOR_CYCLE, GreenboneSource, ImportRefused, import_upload, pull
 from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
@@ -49,7 +49,7 @@ from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
 from tools.model_check import check_models
 from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
-from ui.dashboard_view import REFUSAL_WORDS, VIEWS, demo_snapshot, render
+from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
 from ui.settings_view import SECTIONS, render_settings
 from worker.envelope import cycle_for_day
 
@@ -379,20 +379,40 @@ def greenbone_pull(ws, preferences, environ, cycle, *, client_factory=None, cloc
         ports.docs.close()
 
 
+def _listing_words(outcome):
+    """Plain-word counts of what gvmd's listing held that could not be read; empty when none."""
+    words = ''
+    if outcome.get('listing_refused'):
+        words += f'; {int(outcome["listing_refused"])} listed reports could not be read'
+    if outcome.get('skipped_tasks'):
+        words += f'; {int(outcome["skipped_tasks"])} listed tasks could not be read'
+    return words
+
+
 def pull_line(outcome):
     task, result = terminal_safe(outcome['task_id']), outcome['result']
     if result == 'failed':
-        return f'{task} failed {terminal_safe(outcome.get("error_class", "Error"))}'
+        return f'{task} failed {terminal_safe(outcome.get("error_class", "Error"))}' + _listing_words(outcome)
+    if result == WAITING_FOR_CYCLE:
+        return f'{task} waiting for the previous cycle to finish'
     counts = outcome.get('counts') or {}
     skipped = outcome.get('skipped')
+    hidden = skipped.get('host_uncovered', 0) if isinstance(skipped, dict) else 0
     skipped = sum(skipped.values()) if isinstance(skipped, dict) else outcome.get('skipped_reports', 0)
-    return (f'{task} {result} findings={counts.get("new", 0)} resolved={counts.get("resolved", 0)} '
+    line = (f'{task} {result} findings={counts.get("new", 0)} resolved={counts.get("resolved", 0)} '
             f'skipped={skipped} refused={outcome.get("refused", 0)} deferred={outcome.get("deferred", 0)}')
+    if hidden:
+        hosts = outcome.get('host_uncovered_hosts') or 0
+        on = f' on {int(hosts)} hosts' if hosts else ''
+        line += (f'; {int(hidden)} results{on} were not imported because another result on that host '
+                 'could not be read')
+    return line + _listing_words(outcome)
 
 
 def greenbone_pull_command(ws, preferences, environ, cycle):
-    """`greenbone pull`: one line per task. 0 when every task imported, had nothing new, or had
-    already imported in this cycle (a frequent cron pull is not an error)."""
+    """`greenbone pull`: one line per task. 0 when every task imported, had nothing new, had
+    already imported in this cycle, or is waiting for that cycle to finish (a frequent cron pull
+    is not an error)."""
     if not preferences['scanner']['task_ids']:
         print(NO_TASKS)
         return 0
@@ -411,7 +431,8 @@ def greenbone_pull_command(ws, preferences, environ, cycle):
         return 1
     for outcome in result['pulled']:
         print(pull_line(outcome))
-    return 0 if all(o['result'] in {'imported', 'nothing_new', 'already_imported_this_cycle'} for o in result['pulled']) else 1
+    ok = {'imported', 'nothing_new', 'already_imported_this_cycle', WAITING_FOR_CYCLE}
+    return 0 if all(o['result'] in ok for o in result['pulled']) else 1
 
 
 def _read_capped(path):
@@ -428,7 +449,7 @@ def upload_report(ws, preferences, environ, data, cycle, *, add_task=False, cloc
 
     The report's own task decides. An unchosen task needs `add_task`, and is saved to the settings
     only after the report parses and the import succeeds. Returns `code` (a closed set: imported,
-    refused_<reason>, not_chosen, too_many_tasks, saved_failed, parse_refused, bad_request), the
+    refused_<reason or kind>, not_chosen, too_many_tasks, saved_failed, parse_refused, bad_request), the
     report and result when there are ones, and `detail`, text only the command prints."""
     scanner = preferences['scanner']
     try:
@@ -449,7 +470,8 @@ def upload_report(ws, preferences, environ, data, cycle, *, add_task=False, cloc
                                qod_floor=scanner['qod_floor'], add_task=add_task)
     except ImportRefused as exc:
         reason = exc.reason if exc.reason in REFUSAL_WORDS else None
-        return {'code': 'refused_' + (reason or 'other'), 'report': report, 'refusal': exc}
+        kind = exc.kind if f'refused_{exc.kind}' in UPLOAD_MESSAGES else None
+        return {'code': 'refused_' + (reason or kind or 'other'), 'report': report, 'refusal': exc}
     finally:
         ports.docs.close()
     if result['task_added']:
@@ -818,6 +840,16 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
     return DashboardHandler
 
 
+#: The first line `serve` prints. The launcher and the install check match on it.
+DEMO_BANNER = 'Local synthetic preview: '
+SAVED_BANNER = 'Local dashboard: '
+
+
+def serve_banner(demo, port):
+    """"Local synthetic preview" only when serving demo fixtures; saved records are not synthetic."""
+    return f'{DEMO_BANNER if demo else SAVED_BANNER}http://127.0.0.1:{port}'
+
+
 def _cycle(value):
     number = int(value)
     if number < 0:
@@ -863,7 +895,7 @@ def _parser():
     gb_actions = greenbone.add_subparsers(dest='gb_action', required=True)
     gb_actions.add_parser('tasks', help='List the tasks the account can see: task_id  name')
     gb_actions.add_parser('test', help='Connect, sign in and list tasks, one line each')
-    gb_pull = gb_actions.add_parser('pull', help='Import the newest finished report of each chosen task')
+    gb_pull = gb_actions.add_parser('pull', help='Import the next finished report of each chosen task (the newest one the first time)')
     gb_pull.add_argument('--cycle', type=_cycle, help='Default: the next cycle number')
     gb_upload = gb_actions.add_parser('upload', help='Import one exported report file')
     gb_upload.add_argument('file', metavar='FILE')
@@ -990,7 +1022,7 @@ def main():
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
             upload = None if args.demo else page_upload(ws, config_path, os.environ)
             with HTTPServer(('127.0.0.1', args.port), handler(_View(docs), args.demo, config_path, command, upload)) as server:
-                print(f'Local synthetic preview: http://127.0.0.1:{server.server_port}', flush=True)
+                print(serve_banner(args.demo, server.server_port), flush=True)
                 server.serve_forever()
         else:
             print('Local workspace ready. No model calls made.')

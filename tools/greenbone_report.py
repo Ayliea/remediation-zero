@@ -147,8 +147,10 @@ def _scan_end(inner: ET.Element) -> Optional[str]:
 
 
 def _uuid_or_none(value: Optional[str]) -> Optional[str]:
+    """A UUID in lowercase, or None. One spelling per id, so an upper-cased asset
+    id in a later report names the same asset (and the same findings)."""
     value = (value or "").strip()
-    return value if _UUID_RE.fullmatch(value) else None
+    return value.lower() if _UUID_RE.fullmatch(value) else None
 
 
 def _is_ip(value: str) -> bool:
@@ -297,7 +299,11 @@ def _parse(data: bytes) -> GreenboneReport:
     task = inner.find("task")
     if task is None:
         task = outer.find("task")
+    # Lowercase, as the chosen task ids in settings are; a non-UUID id is kept as
+    # written so the importer refuses it by name.
     task_id = (task.get("id") or "").strip() if task is not None else ""
+    if _UUID_RE.fullmatch(task_id):
+        task_id = task_id.lower()
     if not task_id:
         raise ReportRefused("report names no task")
     hosts = tuple(h for h in (_host(n) for n in inner.findall("host")) if h is not None)

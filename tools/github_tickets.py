@@ -73,10 +73,25 @@ class GitHubUnavailable(RuntimeError):
     """
 
 
+def _no_single_cve(finding: Any):
+    """Words for a finding without a `cve_id` that lists its CVEs, else None.
+
+    A scanner finding can carry several CVEs (`cve_ids`) or none; "unknown"
+    would claim one exists. A finding with a `cve_id`, or without `cve_ids`
+    at all (every cloud finding), keeps its text exactly as before.
+    """
+    cves = finding.get("cve_ids")
+    if "cve_id" in finding or not isinstance(cves, (list, tuple)):
+        return None
+    if len(cves) > 1:
+        return "no single CVE"
+    return "no CVE" if not cves else None
+
+
 def issue_title(finding: Any) -> str:
     """A title carrying the finding id, so the issue is findable by search."""
     return (
-        f"[{finding['finding_id']}] {finding.get('cve_id', 'unknown CVE')} "
+        f"[{finding['finding_id']}] {_no_single_cve(finding) or finding.get('cve_id', 'unknown CVE')} "
         f"on {finding.get('asset_id', 'an asset')} "
         f"— {finding.get('scanner_severity', 'unrated')}"
     )
@@ -139,7 +154,8 @@ def issue_body(
         "",
         "### Finding",
         f"- Finding: `{finding['finding_id']}`",
-        f"- CVE: `{finding.get('cve_id', 'unknown')}`",
+        (f"- CVE: {_no_single_cve(finding)}" if _no_single_cve(finding)
+         else f"- CVE: `{finding.get('cve_id', 'unknown')}`"),
         f"- Asset: `{finding.get('asset_id', 'unknown')}`",
         f"- Scanner severity: {finding.get('scanner_severity', 'unrated')}",
         "",

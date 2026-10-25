@@ -21,6 +21,7 @@ from tests.test_gmp import (OK_AUTH, PASSWORD, TASK_A, TASK_B, USER, FakeGvmd, r
                             reports_response, tasks_response)
 from tests.test_local_commands import (_fake_sources, _local, cross_family, docs, events,  # noqa: F401
                                        ws)
+from tests.test_scanner_import import complete_cycle
 from tools import local_settings
 from tools.clock import ClockMode, SimClock
 from tools.local_layout import Workspace
@@ -214,7 +215,8 @@ def test_pull_prints_one_line_per_task_and_exits_by_result(gws, gvmd, monkeypatc
     assert lines[0].split()[:2] == [TASK_A, "imported"]
     assert re.search(r"findings=[1-9]\d* resolved=0 skipped=\d+ refused=0 deferred=0$", lines[0])
     assert lines[1].split()[:2] == [TASK_B, "nothing_new"]
-    # the same cycle again: nothing is wrong, so a frequent cron pull exits 0
+    # the same, completed, cycle again: nothing is wrong, so a frequent cron pull exits 0
+    complete_cycle(gws, 1)
     assert run(monkeypatch, gws, "greenbone", "pull", "--cycle", "1") == 0
     assert "already_imported_this_cycle" in capsys.readouterr().out
 

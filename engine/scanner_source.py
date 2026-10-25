@@ -12,7 +12,8 @@ therefore dropped (counted as not_finished), since reconcile refuses a finding o
 asset outside the covered set.
 
 Log-level results (severity 0) and results below the QoD floor are skipped and
-counted, never silently dropped. No timestamps are stamped here; the importer
+counted, never silently dropped. So are results on a finished host that a
+rejected result uncovered (host_uncovered). No timestamps are stamped here; the importer
 stamps them through SimClock.
 
 Standard library only. No clock is read here.
@@ -48,6 +49,8 @@ class NormalisedScan:
     skipped: dict[str, int]
     #: The report's scan end (ISO 8601 UTC) or None; the importer orders reports by it.
     scan_end: Optional[str] = None
+    #: Hosts whose results were skipped as `host_uncovered` (another result on them was rejected).
+    host_uncovered_hosts: int = 0
 
 
 class ScannerSource(Protocol):
@@ -148,7 +151,9 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
     covered = list(dict.fromkeys(covered))
     covered_set = set(covered)
 
-    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected), "not_finished": 0}
+    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected), "not_finished": 0,
+               "host_uncovered": 0}
+    hidden_hosts: set[str] = set()
     findings: dict[str, dict] = {}
     withheld: dict[str, None] = {}
     for result in report.results:
@@ -161,6 +166,11 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         elif asset_id not in covered_set:
             if asset_id is None or not finished:
                 skipped["not_finished"] += 1  # host unfinished or unknown: cannot be reconciled
+            else:
+                # Finished, but uncovered by a result the parser rejected: counted,
+                # never dropped silently.
+                skipped["host_uncovered"] += 1
+                hidden_hosts.add(asset_id)
         else:
             finding = _finding(result, asset_id, scan_id, report.task_id)
             kept = findings.get(finding["finding_id"])
@@ -185,6 +195,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         withheld_finding_ids=tuple(withheld),
         skipped=skipped,
         scan_end=report.scan_end,
+        host_uncovered_hosts=len(hidden_hosts),
     )
 
 

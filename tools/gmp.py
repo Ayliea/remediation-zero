@@ -30,11 +30,11 @@ import ssl
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Mapping, Optional
 from xml.sax.saxutils import escape, quoteattr
 
-from tools.greenbone_report import MAX_REPORT_BYTES, ReportRefused, refuse_unsafe_xml
+from tools.greenbone_report import _ISO_8601_RE, MAX_REPORT_BYTES, ReportRefused, refuse_unsafe_xml
 
 READ_ONLY_COMMANDS = ("authenticate", "get_tasks", "get_reports")
 
@@ -375,13 +375,19 @@ class GmpClient:
 
     @staticmethod
     def _instant(stamp: str) -> float:
+        """Epoch seconds for a strict ISO 8601 time with a zone; GmpError otherwise.
+
+        The one rule the report parser and the importer also apply: a time
+        without a zone is not guessed to be UTC. Such an entry is refused
+        ("bad timestamp") and counted, so it can never silently drop out of
+        the importer's ordering.
+        """
+        if not _ISO_8601_RE.fullmatch(stamp):
+            raise GmpError("a report carried a timestamp that is not ISO 8601 with a zone")
         try:
-            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-        except ValueError:
+            return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        except (ValueError, OverflowError):
             raise GmpError("a report carried a timestamp that is not ISO 8601") from None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.timestamp()
 
     def report_xml(self, report_id: str) -> bytes:
         _uuid(report_id, "report id")

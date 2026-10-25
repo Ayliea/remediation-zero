@@ -34,7 +34,8 @@ def verify():
             ready = queue.Queue()
             threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True).start()
             line = ready.get(timeout=10).strip()
-            assert line.startswith('Local synthetic preview: http://127.0.0.1:'), 'Server did not start'
+            # Saved records (no --demo): the banner does not claim a synthetic preview.
+            assert line.startswith('Local dashboard: http://127.0.0.1:'), 'Server did not start'
             base = line.split()[-1]
             assert urlsplit(base).hostname == '127.0.0.1'
             opener = build_opener(ProxyHandler({}))

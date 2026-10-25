@@ -34,7 +34,8 @@ def test_malformed_result_in_fixture_uncovers_its_host():
 
 def test_log_and_low_qod_results_are_skipped_and_counted():
     scan = normalise_greenbone(BASIC())
-    assert scan.skipped == {"log": 1, "below_qod": 1, "rejected": 0, "not_finished": 0}
+    assert scan.skipped == {"log": 1, "below_qod": 1, "rejected": 0, "not_finished": 0,
+                            "host_uncovered": 0}
     assert len(scan.findings) == 3
 
 
@@ -186,7 +187,7 @@ def test_duplicate_finding_ids_collapse_to_the_higher_severity():
 
 def test_skipped_has_all_four_keys():
     scan = normalise_greenbone(parse_report(FIX("report_basic.xml")))
-    assert set(scan.skipped) == {"log", "below_qod", "rejected", "not_finished"}
+    assert set(scan.skipped) == {"log", "below_qod", "rejected", "not_finished", "host_uncovered"}
 
 
 def _v6_host(ip="2001:db8::1"):

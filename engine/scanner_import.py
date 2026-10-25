@@ -15,6 +15,9 @@ failures that matter are false closure, partial writes and silent drops.
   back-filled. After that, the oldest Done report whose gvmd timestamp is newer
   than the last imported report's scan end. Every import, pulled or uploaded,
   must be strictly newer by its own scan end than the task's last import.
+  While the cycle a task last imported in has no cycle record (triage has not
+  completed it), a pull of that task imports nothing and records
+  `last_result="waiting_for_cycle"`, so the wait is visible.
 - A report the parser refuses, or one with no scan time or not newer, is
   recorded in `scanner_state[task].refused` (report id and a closed reason, the
   last 20) and the pull moves on to the next newer one. It changes nothing.
@@ -59,6 +62,11 @@ DONE = "Done"
 #: Most non-Done reports listed per task in the pull state; the rest are counted.
 MAX_SKIPPED_LISTED = 50
 #: Refused reports remembered per task (`scanner_state[task].refused`).
+#: A remembered report is never downloaded again; one that drops out of the 20
+#: is a candidate again. A pull downloads at most MAX_DOWNLOADS_PER_PULL (5), so
+#: one pull adds at most 5 refusals: a task needs more than 20 refused reports
+#: still newer than its last import before an old refusal can be forgotten and
+#: re-downloaded (and refused again, which changes nothing but costs a download).
 MAX_REFUSED_KEPT = 20
 #: Why a pulled report was refused. Closed, so it can be stored; never server text.
 REFUSED_REASONS = frozenset(REFUSAL_REASONS) | {"no_scan_time", "not_newer"}
@@ -68,6 +76,9 @@ REFUSED_REASONS = frozenset(REFUSAL_REASONS) | {"no_scan_time", "not_newer"}
 #: `last_refusal`) rather than remembered.
 IMPORT_REFUSED_REASONS = REFUSED_REASONS | {"already_imported_this_cycle",
                                             "scan_time_in_future"}
+#: Every `scanner_state[task].last_result` a pull or import writes. Closed.
+WAITING_FOR_CYCLE = "waiting_for_cycle"
+PULL_RESULTS = frozenset({"imported", "nothing_new", "refused", "failed", WAITING_FOR_CYCLE})
 #: Most report downloads per task per pull; the rest wait and are counted as `deferred`.
 MAX_DOWNLOADS_PER_PULL = 5
 #: How far a scan time may run ahead of the workspace clock (skew). Seconds.
@@ -88,18 +99,28 @@ _REFUSAL_REASONS = frozenset({"bad report id", "bad status", "bad timestamp"})
 _ASSET_REFRESHED = ("ip", "os_cpe", "open_ports")
 
 
+#: What a refusal without a `reason` was about, so the upload page can say it in
+#: fixed words. Closed. Display only: a pull still treats such a refusal as fatal.
+REFUSED_KINDS = frozenset({"demo_workspace", "not_done", "already_imported", "bad_uuid"})
+
+
 class ImportRefused(ValueError):
     """A report was refused before anything was written.
 
     `reason` is set (one of `REFUSED_REASONS`) when the refusal is about the
     report itself rather than the request, so a pull can record it and move on.
+    `kind` (one of `REFUSED_KINDS`) names a refusal that has no reason.
     """
 
-    def __init__(self, message: str, *, reason: Optional[str] = None) -> None:
+    def __init__(self, message: str, *, reason: Optional[str] = None,
+                 kind: Optional[str] = None) -> None:
         super().__init__(message)
         if reason is not None and reason not in IMPORT_REFUSED_REASONS:
             raise ValueError(f"unknown refusal reason {reason!r}")
+        if kind is not None and kind not in REFUSED_KINDS:
+            raise ValueError(f"unknown refusal kind {kind!r}")
         self.reason = reason
+        self.kind = kind
 
 
 def _cycle_id(cycle: int) -> str:
@@ -208,7 +229,7 @@ def _refuse_demo(docs) -> None:
     if _holds_seeded_findings(docs):
         raise ImportRefused("this workspace holds seeded demo findings; importing a Greenbone "
                             "report is refused so demo and real data never mix. "
-                            "Nothing was written.")
+                            "Nothing was written.", kind="demo_workspace")
 
 
 def _upsert_assets(docs, scan: NormalisedScan, stamp) -> None:
@@ -284,9 +305,9 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
     if scan.source != SOURCE:
         raise ImportRefused(f"report source {scan.source!r} is not {SOURCE!r}")
     if not _UUID_RE.fullmatch(scan.task_id or ""):
-        raise ImportRefused("report names a task id that is not a UUID")
+        raise ImportRefused("report names a task id that is not a UUID", kind="bad_uuid")
     if not _UUID_RE.fullmatch(scan.scan_id or ""):
-        raise ImportRefused("report id is not a UUID")
+        raise ImportRefused("report id is not a UUID", kind="bad_uuid")
     if scan.task_id not in set(chosen_task_ids):
         raise ImportRefused(f"report is from task {scan.task_id}, which is not chosen "
                             "for this install")
@@ -294,7 +315,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
         status = scan.report_status if _STATUS_RE.fullmatch(scan.report_status or "") \
             else "unrecognised"
         raise ImportRefused(f"report status is {status}, not Done; only finished scans "
-                            "are imported")
+                            "are imported", kind="not_done")
     scan_end = _instant(scan.scan_end)
     if scan_end is None:
         raise ImportRefused("report has no scan time; refusing to import",
@@ -324,7 +345,8 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             raise ImportRefused("report is not newer than the last imported report for "
                                 "this task", reason="not_newer")
         if docs.collection("scans").document(scan.scan_id).get().exists:
-            raise ImportRefused(f"report {scan.scan_id} was already imported")
+            raise ImportRefused(f"report {scan.scan_id} was already imported",
+                                kind="already_imported")
 
         stamp = ports.clock.now()
         # The findings this report is about to add, by the stored `finding_id`
@@ -351,6 +373,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "last_refusal": None,
             "last_counts": summary["counts"],
             "last_skipped": dict(scan.skipped),
+            "last_host_uncovered_hosts": scan.host_uncovered_hosts,
             "last_uncovered_all": uncovered_all,
             "skipped": notes.get("skipped", []),
             "skipped_not_listed": notes.get("skipped_not_listed", 0),
@@ -367,6 +390,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
     _log("report_imported", cycle, task_id=scan.task_id, scan_id=scan.scan_id,
          counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all)
     return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all,
+            "host_uncovered_hosts": scan.host_uncovered_hosts,
             "new_cves": new_cves, "scan_cves": scan_cves}
 
 
@@ -445,7 +469,18 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
     state = found.to_dict() if found.exists else {}
     if state.get("last_imported_cycle") == cycle:
         # Decided before contacting the scanner: nothing is listed or downloaded.
-        return {"task_id": task_id, "result": "already_imported_this_cycle"}
+        if docs.collection("cycles").document(_cycle_id(cycle)).get().exists:
+            return {"task_id": task_id, "result": "already_imported_this_cycle"}
+        # The cycle this import belongs to has not completed (a cycle record is
+        # written only when triage finishes), so the next cycle number stays the
+        # same and every later pull lands here. One report per task per
+        # completed cycle keeps triage from falling behind imports; the wait is
+        # recorded so it is visible, not mistaken for an import.
+        stamp = ports.clock.now()
+        _write_state(docs, task_id, {
+            "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
+            "last_result": WAITING_FOR_CYCLE, "last_error_class": None})
+        return {"task_id": task_id, "result": WAITING_FOR_CYCLE}
     refused_now: list[dict] = []
     try:
         reports = source.finished_reports(task_id)
@@ -516,7 +551,10 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                     "counts": result["counts"], "skipped": result["skipped"],
                     "uncovered_all": result["uncovered_all"], "refused": len(refused_now),
                     "deferred": waiting, "new_cves": result["new_cves"],
-                    "scan_cves": result["scan_cves"]}
+                    "scan_cves": result["scan_cves"],
+                    "host_uncovered_hosts": result["host_uncovered_hosts"],
+                    "listing_refused": notes["refused_reports"],
+                    "skipped_tasks": notes["skipped_tasks"]}
         tried = {r["report_id"] for r in refused_now}
         if future is not None:
             tried.add(future["report_id"])
@@ -541,7 +579,9 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
         _write_state(docs, task_id, fields)
         return {"task_id": task_id, "result": outcome, "refused": len(refused_now),
                 "deferred": deferred,
-                "skipped_reports": len(notes["skipped"]) + notes["skipped_not_listed"]}
+                "skipped_reports": len(notes["skipped"]) + notes["skipped_not_listed"],
+                "listing_refused": notes["refused_reports"],
+                "skipped_tasks": notes["skipped_tasks"]}
     except Exception as exc:  # noqa: BLE001 - recorded by class; the next task still runs
         error_class = type(exc).__name__
         notes = _source_notes(source, task_id)
@@ -609,7 +649,7 @@ def import_upload(ports: Ports, cycle: int, data: bytes, *, chosen_task_ids: Col
     added = False
     if scan.task_id not in chosen:
         if not _UUID_RE.fullmatch(scan.task_id or ""):
-            raise ImportRefused("report names a task id that is not a UUID")
+            raise ImportRefused("report names a task id that is not a UUID", kind="bad_uuid")
         if not add_task:
             name = _NAME_UNSAFE.sub("", report.task_name or "")[:80].strip() or "(unnamed)"
             raise ImportRefused(f"report is from task {name} ({scan.task_id}), which is not "

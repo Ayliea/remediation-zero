@@ -148,6 +148,9 @@ REFUSAL_WORDS = {
     "already_imported_this_cycle": "this task already imported a report in this cycle",
 }
 UNKNOWN_REFUSAL = "Refused (reason not recognised)"
+WAITING_WORDS = "Waiting for the previous cycle to finish before importing more."
+#: Every `last_result` the card puts into words; anything else is "Result unknown".
+PULL_RESULTS = ("imported", "nothing_new", "refused", "failed", "waiting_for_cycle")
 
 #: What the page says after an upload, by the closed code in the redirect URL.
 #: Nothing from the request or the report ever reaches the URL or these messages.
@@ -164,6 +167,16 @@ UPLOAD_MESSAGES = {
 }
 UPLOAD_MESSAGES.update({f"refused_{reason}": f"The report was refused: {words}. Nothing was imported."
                         for reason, words in REFUSAL_WORDS.items()})
+#: Refusals that carry no reason (engine.scanner_import.REFUSED_KINDS), worded as the command says them.
+UPLOAD_MESSAGES.update({
+    "refused_demo_workspace": "The report was refused: this workspace holds seeded demo findings, so "
+                              "demo and real data never mix. Nothing was imported.",
+    "refused_not_done": "The report was refused: its status is not Done; only finished scans are "
+                        "imported. Nothing was imported.",
+    "refused_already_imported": "The report was refused: it was already imported. Nothing was imported.",
+    "refused_bad_uuid": "The report was refused: it names a task id or report id that is not a UUID. "
+                        "Nothing was imported.",
+})
 
 
 def refusal_line(reason):
@@ -187,6 +200,8 @@ def _result_words(state):
         return refusal_line(reason)
     if result == "failed":
         return "Failed: " + str(state.get("last_error_class") or "unknown error")
+    if result == "waiting_for_cycle":
+        return WAITING_WORDS
     return "Result unknown"
 
 
@@ -208,7 +223,7 @@ def _task_card_body(state, task_id):
     if name != task_id:
         body += f'<p>Task: {text(task_id)}</p>'
     body += f'<p>Last pull: {stamp(state.get("last_pull_real_ts"), state.get("last_pull_sim_ts"))}</p>'
-    if state.get("last_result") in ("imported", "nothing_new", "refused", "failed"):
+    if state.get("last_result") in PULL_RESULTS:
         body += f'<p>Result: {text(_result_words(state))}</p>'
     else:
         body += '<p>Result unknown. The last pull outcome was not recorded in a form this page can read.</p>'
@@ -228,6 +243,12 @@ def _task_card_body(state, task_id):
         body += ('<p>Skipped: ' + ", ".join(f'{text(skipped.get(key, 0))} {label}' for key, label in (
             ("log", "log-level"), ("below_qod", "below the quality floor"), ("rejected", "rejected"),
             ("not_finished", "not finished"))) + '.</p>')
+        hidden = int(skipped.get("host_uncovered") or 0)
+        if hidden:
+            hosts = int(state.get("last_host_uncovered_hosts") or 0)
+            on = f' on {text(hosts)} hosts' if hosts else ''
+            body += (f'<p>{text(hidden)} results{on} were not imported because another result '
+                     'on that host could not be read.</p>')
     # Reports gvmd lists as not Done (Stopped, Interrupted, ...): never imported, shown with their status.
     not_done = [r for r in (state.get("skipped") or []) if isinstance(r, dict)]
     if not_done:
@@ -244,6 +265,14 @@ def _task_card_body(state, task_id):
         body += '</ul>'
     if state.get("deferred"):
         body += f'<p>{text(state.get("deferred"))} newer reports are waiting for a later pull.</p>'
+    # Entries in gvmd's own listing that could not be read: counts only, never their text.
+    listed_refused = int(state.get("last_refused_reports") or 0)
+    if listed_refused:
+        body += (f'<p>{text(listed_refused)} reports in the Greenbone list could not be read '
+                 'and were not considered.</p>')
+    listed_tasks = int(state.get("last_skipped_tasks") or 0)
+    if listed_tasks:
+        body += f'<p>{text(listed_tasks)} tasks in the Greenbone list could not be read.</p>'
     if state.get("baseline_not_imported"):
         body += f'<p>{text(state.get("baseline_not_imported"))} older reports were not imported when this task started.</p>'
     return body + '</article>'
