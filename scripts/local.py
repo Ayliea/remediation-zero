@@ -21,8 +21,6 @@ import secrets
 import shlex
 import sys
 import unicodedata
-from email import policy
-from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -554,7 +552,6 @@ def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
 
 MAX_CHOSEN_TASKS = 500
 UPLOAD_OVERHEAD = 64 * 1024  # multipart framing and the other two fields
-MAX_UPLOAD_DELIMITERS = 4  # token, report, add_task and the closing delimiter
 
 
 class TooManyTasks(ValueError):
@@ -580,6 +577,70 @@ def _scanner_values(fields, values):
         raise TooManyTasks()
     return dict(transport=fields['transport'], socket_path=fields['socket_path'], host=fields['host'],
                 ca_file=fields['ca_file'], task_ids=task_ids, auto_enrichment='auto_enrichment' in fields, **ints)
+
+
+_BCHARS = r"[0-9A-Za-z'()+_,\-./:=? ]"
+_UPLOAD_TYPE = re.compile(r'multipart/form-data; ?boundary=(?:"(%s{1,70})"|(%s{1,70}))' % (_BCHARS, _BCHARS), re.I | re.A)
+_UPLOAD_DISPOSITION = re.compile(rb'form-data; ?name="(token|report|add_task)"(; ?filename="[^"\r\n]*")?')
+UPLOAD_HEADER_LIMIT = 1024
+UPLOAD_TOKEN_LIMIT = 128
+
+
+def _read_upload_form(content_type, body):
+    """The fields of one multipart/form-data upload: `{'token': bytes, 'report': bytes, 'add_task': bool}`.
+
+    A strict, non-recursive reader for exactly the form the dashboard sends, deliberately not the stdlib
+    email parser (which accepts LF-only and CR-only line endings, folded headers, comments, nested
+    multiparts, and boundary spellings this reader never reads differently). Anything else is a ValueError.
+    The report is opaque bytes, never interpreted here; a nested multipart is just report bytes that
+    then fail XML parsing."""
+    match = _UPLOAD_TYPE.fullmatch(content_type)
+    if match is None:
+        raise ValueError('content type')
+    boundary = (match.group(1) if match.group(1) is not None else match.group(2)).encode('ascii')
+    if boundary.endswith(b' '):
+        raise ValueError('boundary')
+    delimiter = b'--' + boundary
+    if body.count(delimiter) > 4:  # counted before anything is sliced: 3 parts and the close at most
+        raise ValueError('too many parts')
+    opening, closing = delimiter + b'\r\n', b'\r\n' + delimiter + b'--'
+    if body.endswith(closing + b'\r\n'):
+        body = body[:-2]
+    if not (body.startswith(opening) and body.endswith(closing)) or len(body) < len(opening) + len(closing):
+        raise ValueError('framing')
+    parts = body[len(opening):-len(closing)].split(b'\r\n' + delimiter + b'\r\n')
+    if not 2 <= len(parts) <= 3:
+        raise ValueError('part count')
+    found = {}
+    for part in parts:
+        head, split, content = part.partition(b'\r\n\r\n')
+        if not split or len(head) > UPLOAD_HEADER_LIMIT or b'\0' in head or b'(' in head:
+            raise ValueError('header block')
+        headers = {}
+        for line in head.split(b'\r\n'):
+            if line[:1] in (b' ', b'\t') or b'\r' in line or b'\n' in line:
+                raise ValueError('folded header')
+            name, colon, value = line.partition(b':')
+            name = name.lower()
+            if not colon or name not in (b'content-disposition', b'content-type') or name in headers:
+                raise ValueError('header')
+            headers[name] = value.strip(b' \t')
+        shown = _UPLOAD_DISPOSITION.fullmatch(headers.get(b'content-disposition', b''))
+        if shown is None:
+            raise ValueError('disposition')
+        name, filename = shown.group(1).decode(), shown.group(2)
+        if name in found or (name == 'report') != (filename is not None):
+            raise ValueError('field')
+        if b'content-type' in headers and name != 'report':
+            raise ValueError('header')
+        found[name] = content
+    if not {'token', 'report'} <= set(found) or len(found['token']) > UPLOAD_TOKEN_LIMIT:
+        raise ValueError('fields')
+    if 'add_task' in found and found['add_task'] != b'yes':
+        raise ValueError('add_task')
+    if len(found['report']) > MAX_REPORT_BYTES:
+        raise ValueError('report size')
+    return {'token': found['token'], 'report': found['report'], 'add_task': 'add_task' in found}
 
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None):
@@ -647,47 +708,14 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                     self.send_error(413, 'The upload is too large. Nothing was read.')
                     return
                 content_type = self.headers.get('Content-Type') or ''
-                if (not 0 < length or not content_type.lower().startswith('multipart/form-data;')
-                        or any(c in content_type for c in '\r\n') or not content_type.isascii()):
+                if not 0 < length:
                     raise ValueError()
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise ValueError()
-                # Before any parsing (the token is inside the body, so this runs for forged requests too):
-                # a fixed number of parts, none of them a nested multipart.
-                # The checks are supersets of what the stdlib parser accepts (it also takes LF-only and
-                # CR-only line endings), so they match anywhere in the raw bytes: no line anchoring.
-                match = re.search(r'boundary=(?:"([^"]*)"|([^\s;"]*))', content_type, re.I)
-                if match is None:
-                    raise ValueError()
-                delimiter = (match.group(1) if match.group(1) is not None else match.group(2)).encode('ascii')
-                if not 0 < len(delimiter) <= 70:  # RFC 2046
-                    raise ValueError()
-                if body.count(b'--' + delimiter) > MAX_UPLOAD_DELIMITERS:
-                    raise ValueError()
-                if re.search(rb'(?i)content-type\s*:\s*multipart', body):
-                    raise ValueError()
-                message = BytesParser(policy=policy.HTTP).parsebytes(
-                    b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)
-                if not message.is_multipart() or message.defects:
-                    raise ValueError()
-                parts = {}
-                for part in message.iter_parts():
-                    name = part.get_param('name', header='content-disposition')
-                    if (name not in {'token', 'report', 'add_task'} or name in parts or part.is_multipart()
-                            or part.defects):
-                        raise ValueError()
-                    parts[name] = part
-                if not {'token', 'report'} <= set(parts) or parts['report'].get_filename() is None:
-                    raise ValueError()
-                supplied = parts['token'].get_payload(decode=True) or b''
-                data = parts['report'].get_payload(decode=True)
-                add_task = False
-                if 'add_task' in parts:
-                    if parts['add_task'].get_payload(decode=True) != b'yes':
-                        raise ValueError()
-                    add_task = True
-            except Exception as error:  # incl. RecursionError and MemoryError: a 400, never a traceback
+                form = _read_upload_form(content_type, body)
+                supplied, data, add_task = form['token'], form['report'], form['add_task']
+            except Exception as error:  # a 400, never a traceback
                 if not isinstance(error, (ValueError, UnicodeError, OSError, LookupError)):
                     _log('upload_parse_failed', error=type(error).__name__)
                 self.send_error(400, 'Invalid upload. Nothing was imported.')

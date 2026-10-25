@@ -727,7 +727,7 @@ def test_upload_is_not_offered_without_the_page_wiring(gws):
 def test_many_parts_refused_before_parsing(page, monkeypatch):
     from scripts import local
     request, token, gws = page
-    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: pytest.fail("the body was parsed"))
+    assert not hasattr(local, "BytesParser")  # the stdlib email parser is not in the upload path
     fields = [("token", token)] + [("x", "y")] * 5000
     assert request(body=multipart(fields, [("report", "r.xml", CLEAN_REPORT)]))[0] == 400
     assert docs(gws, "scans") == {}
@@ -740,19 +740,20 @@ def test_nested_multipart_refused(page):
             + (f'--{BOUNDARY}\r\nContent-Disposition: form-data; name="report"; filename="r.xml"\r\n'
                'Content-Type: multipart/mixed; boundary=inner\r\n\r\n').encode() + inner
             + f"\r\n--{BOUNDARY}--\r\n".encode())
-    assert request(body=body)[0] == 400
+    status, _, sent, _ = request(body=body)  # the report part is opaque bytes: not XML, so refused as such
+    assert status == 303 and sent["Location"].endswith("upload=parse_refused")
     assert docs(gws, "scans") == {}
 
 
-def test_parser_recursion_error_is_a_400(page, monkeypatch):
+def test_reader_recursion_or_memory_error_is_a_400(page, monkeypatch):
     from scripts import local
 
     def boom(*a, **k):
         raise RecursionError()
-    monkeypatch.setattr(local, "BytesParser", boom)
+    monkeypatch.setattr(local, "_read_upload_form", boom)
     request, token, gws = page
     assert post_report(request, token, add_task=True)[0] == 400
-    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: (_ for _ in ()).throw(MemoryError()))
+    monkeypatch.setattr(local, "_read_upload_form", lambda *a, **k: (_ for _ in ()).throw(MemoryError()))
     assert post_report(request, token, add_task=True)[0] == 400
     assert docs(gws, "scans") == {}
 
@@ -769,7 +770,7 @@ def test_page_upload_of_an_older_report_in_a_later_cycle_is_refused_as_not_newer
 
 def _no_parse(monkeypatch):
     from scripts import local
-    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: pytest.fail("the body was parsed"))
+    assert not hasattr(local, "BytesParser")
 
 
 def _crafted(token, eol, count):
@@ -819,3 +820,107 @@ def test_folded_nested_multipart_header_refused(page, monkeypatch):
             b"--I\r\n\r\nx\r\n--I\r\n\r\ny\r\n--I--\r\n--B--\r\n")
     assert request(body=body, headers={"Content-Type": "multipart/form-data; boundary=B"})[0] == 400
     assert docs(gws, "scans") == {}
+
+
+# --- the strict multipart reader ---------------------------------------------------------------
+
+CT = "multipart/form-data; boundary=----RzBoundary42"
+
+
+def browser_body(report=b"<report/>", boundary="----RzBoundary42", add_task=True):
+    """The shape a browser sends: token, report (with filename and Content-Type), add_task, close."""
+    parts = [f'Content-Disposition: form-data; name="token"\r\n\r\ntok-1'.encode(),
+             b'Content-Disposition: form-data; name="report"; filename="scan.xml"\r\n'
+             b'Content-Type: text/xml\r\n\r\n' + report]
+    if add_task:
+        parts.append(b'Content-Disposition: form-data; name="add_task"\r\n\r\nyes')
+    d = f"--{boundary}".encode()
+    return d + b"\r\n" + (b"\r\n" + d + b"\r\n").join(parts) + b"\r\n" + d + b"--\r\n"
+
+
+def read(body, ct=CT):
+    from scripts.local import _read_upload_form
+    return _read_upload_form(ct, body)
+
+
+def refused(body, ct=CT):
+    with pytest.raises(ValueError):
+        read(body, ct)
+
+
+def test_reader_accepts_a_browser_shaped_body():
+    assert read(browser_body()) == {"token": b"tok-1", "report": b"<report/>", "add_task": True}
+    assert read(browser_body(add_task=False))["add_task"] is False
+    assert read(browser_body().removesuffix(b"\r\n"))["report"] == b"<report/>"  # no final CRLF
+    assert read(browser_body(boundary="b b"), 'multipart/form-data; boundary="b b"')["token"] == b"tok-1"
+    assert read(browser_body(), "Multipart/Form-Data;boundary=----RzBoundary42")["token"] == b"tok-1"
+
+
+def test_reader_report_bytes_are_opaque():
+    inner = b"--I\r\nContent-Type: multipart/mixed\r\n\r\nx\r\n--I--"
+    assert read(browser_body(report=inner))["report"] == inner  # the XML parser, not this, refuses it
+
+
+@pytest.mark.parametrize("ct", [
+    "multipart/form-data; boundary*=UTF-8''abc", "multipart/form-data; boundary=abc; charset=x",
+    "multipart/form-data; charset=x; boundary=abc", 'multipart/form-data; boundary="a\\"b"',
+    "multipart/form-data; boundary=a\\b", "multipart/mixed; boundary=abc", "multipart/form-data",
+    "multipart/form-data; boundary=", "multipart/form-data; boundary=" + "b" * 71,
+    "multipart/form-data; boundary=ab ", 'multipart/form-data; boundary="ab "', "multipart/form-data; boundary=a;b",
+    "multipart/form-data; boundary=a\r\nb", "multipart/form-data; boundary=é",
+    "(x) multipart/form-data; boundary=abc"])
+def test_reader_refuses_other_content_types(ct):
+    refused(browser_body(boundary="abc"), ct)
+
+
+def test_reader_refuses_a_comment_in_a_part_content_type():
+    body = browser_body().replace(b"Content-Type: text/xml", b"Content-Type: (x) text/xml")
+    refused(body)
+
+
+def test_reader_refuses_a_folded_header():
+    refused(browser_body().replace(b"Content-Type: text/xml", b"Content-Type:\r\n text/xml"))
+    refused(browser_body().replace(b'name="token"', b'name="token";\r\n x=y'))
+
+
+def test_reader_refuses_lf_only_and_cr_only_bodies():
+    refused(browser_body().replace(b"\r\n", b"\n"))
+    refused(browser_body().replace(b"\r\n", b"\r"))
+
+
+def test_reader_refuses_20000_parts_and_4_parts():
+    d = b"------RzBoundary42"
+    many = d + b"\r\n" + (b"\r\n" + d + b"\r\n").join(
+        [b'Content-Disposition: form-data; name="x"\r\n\r\ny'] * 20000) + b"\r\n" + d + b"--\r\n"
+    refused(many)
+    four = browser_body().replace(b"\r\n------RzBoundary42--",
+                                  b'\r\n------RzBoundary42\r\nContent-Disposition: form-data; name="x"\r\n\r\ny'
+                                  b"\r\n------RzBoundary42--")
+    refused(four)
+
+
+def test_reader_refuses_a_missing_filename_or_a_filename_on_another_field():
+    refused(browser_body().replace(b'; filename="scan.xml"', b""))
+    refused(browser_body().replace(b'name="token"', b'name="token"; filename="x"'))
+
+
+def test_reader_refuses_extra_headers_duplicates_and_missing_fields():
+    refused(browser_body().replace(b"Content-Type: text/xml", b"X-Extra: 1"))
+    refused(browser_body().replace(b"Content-Type: text/xml", b"Content-Type: a\r\nContent-Type: b"))
+    refused(browser_body().replace(b'name="add_task"', b'name="token"'))
+    refused(browser_body().replace(b'name="report"', b'name="other"'))
+    refused(browser_body().replace(b'name="token"', b'name="add_task"'))
+    refused(browser_body().replace(b"\r\n\r\nyes", b"\r\n\r\nno"))
+    refused(browser_body().replace(b"tok-1", b"t" * 129))
+    refused(browser_body().replace(b'name="token"', b'name="token"\x00'))
+    refused(browser_body().replace(b"Content-Type: text/xml", b"Content-Type: " + b"a" * 1100))
+    # a Content-Type header on a field other than report
+    refused(browser_body().replace(b'name="add_task"\r\n', b'name="add_task"\r\nContent-Type: t\r\n'))
+
+
+def test_reader_refuses_trailing_garbage_and_bad_framing():
+    refused(browser_body() + b"x")
+    refused(browser_body() + b"\r\n")
+    refused(b"x" + browser_body())
+    refused(browser_body().replace(b"------RzBoundary42--", b"------RzBoundary42"))
+    refused(b"")
