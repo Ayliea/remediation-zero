@@ -1,0 +1,293 @@
+# Copyright 2026 Daviyon Daniels
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+"""A read-only Greenbone Management Protocol (GMP) client. Nothing else.
+
+gvmd speaks GMP: one XML request element per command, one `<X_response status=...>`
+element back, over a Unix socket or TLS. This client can send exactly three commands,
+`authenticate`, `get_tasks` and `get_reports`; `_send` parses the outgoing element and
+refuses any other root tag, so no scan can be created, started, modified or deleted
+through it.
+
+Everything gvmd sends back is untrusted. It is read with a hard byte cap, fed to the
+parser as it arrives, and every chunk (plus a short overlap with the one before it, so a
+DOCTYPE split across chunks is still seen) passes `refuse_unsafe_xml` before the parser
+sees it. A server that trickles bytes is stopped by an overall deadline per request.
+Credentials come only from the environment, are never part of an exception message or a
+repr, and are scrubbed from any server text echoed into an error.
+
+TLS always verifies the certificate and the host name (TLS 1.2 or newer). There is no
+option to turn that off.
+
+Standard library only. The clock is never read for a lifecycle record; `time.monotonic`
+here is a runtime deadline and is never persisted.
+"""
+
+import re
+import socket
+import ssl
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Mapping, Optional
+from xml.sax.saxutils import escape, quoteattr
+
+from tools.greenbone_report import MAX_REPORT_BYTES, ReportRefused, refuse_unsafe_xml
+
+READ_ONLY_COMMANDS = ("authenticate", "get_tasks", "get_reports")
+
+MAX_RESPONSE_BYTES = 1024 * 1024
+_CHUNK = 64 * 1024
+_OVERLAP = 16  # longer than "<!doctype", the longest construct refuse_unsafe_xml looks for
+_DEADLINE_FACTOR = 4
+_STATUS_TEXT_MAX = 200
+_NAME_MAX = 200
+_REPORT_FILTER = "apply_overrides=0 min_qod=0 levels=hmlgf rows=-1"
+
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_STATUS_RE = re.compile(r"[0-9]{3}")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ]")
+
+
+class GmpError(RuntimeError):
+    """A GMP exchange failed. The message never carries credentials or request text."""
+
+
+class GmpAuthError(GmpError):
+    """Credentials are missing or gvmd rejected them."""
+
+
+@dataclass(frozen=True)
+class GmpTarget:
+    transport: str  # "unix" | "tls"
+    socket_path: Optional[str]
+    host: Optional[str]
+    port: int = 9390
+    ca_file: Optional[str] = None
+    timeout: float = 30.0
+
+
+def credentials_from_env(environ: Mapping[str, str]) -> tuple[str, str]:
+    username = environ.get("RZ_GREENBONE_USERNAME") or ""
+    password = environ.get("RZ_GREENBONE_PASSWORD") or ""
+    if not username or not password:
+        raise GmpAuthError("RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD must be set")
+    return username, password
+
+
+def _clean(text: Optional[str]) -> str:
+    return _CONTROL_RE.sub("", text or "")[:_STATUS_TEXT_MAX]
+
+
+def _uuid(value: str, what: str) -> str:
+    if not isinstance(value, str) or not _UUID_RE.fullmatch(value):
+        raise GmpError(f"{what} is not a UUID")
+    return value
+
+
+class GmpClient:
+    def __init__(self, target: GmpTarget, username: str, password: str):
+        self._target = target
+        self._username = username
+        self._password = password
+        self._sock: Optional[socket.socket] = None
+
+    def __repr__(self) -> str:
+        return f"GmpClient(target={self._target!r})"
+
+    __str__ = __repr__
+
+    def __enter__(self) -> "GmpClient":
+        try:
+            self._connect()
+            self._authenticate()
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        sock, self._sock = self._sock, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    # -- transport ---------------------------------------------------------------------
+
+    def _connect(self) -> None:
+        target = self._target
+        try:
+            if target.transport == "unix":
+                if not target.socket_path:
+                    raise GmpError("a unix GMP target needs a socket path")
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    sock.settimeout(target.timeout)
+                    sock.connect(target.socket_path)
+                except BaseException:
+                    sock.close()
+                    raise
+            elif target.transport == "tls":
+                if not target.host:
+                    raise GmpError("a tls GMP target needs a host")
+                context = ssl.create_default_context(cafile=target.ca_file)
+                context.check_hostname = True
+                context.verify_mode = ssl.CERT_REQUIRED
+                context.minimum_version = ssl.TLSVersion.TLSv1_2
+                raw = socket.create_connection((target.host, target.port), timeout=target.timeout)
+                try:
+                    raw.settimeout(target.timeout)
+                    sock = context.wrap_socket(raw, server_hostname=target.host)
+                except BaseException:
+                    raw.close()
+                    raise
+            else:
+                raise GmpError("GMP transport must be 'unix' or 'tls'")
+        except GmpError:
+            raise
+        except (OSError, ssl.SSLError, ValueError) as exc:
+            raise GmpError(f"could not connect to gvmd ({type(exc).__name__})") from None
+        self._sock = sock
+
+    def _authenticate(self) -> None:
+        request = ("<authenticate><credentials>"
+                   f"<username>{escape(self._username)}</username>"
+                   f"<password>{escape(self._password)}</password>"
+                   "</credentials></authenticate>")
+        self._send(request)
+
+    def _read_response(self, deadline: float, max_bytes: int) -> tuple[ET.Element, bytes]:
+        sock = self._sock
+        if sock is None:
+            raise GmpError("not connected to gvmd")
+        timeout = self._target.timeout
+        parser = ET.XMLPullParser(("start", "end"))
+        received = bytearray()
+        root: Optional[ET.Element] = None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GmpError("gvmd did not finish its response in time")
+            sock.settimeout(min(timeout, remaining))
+            try:
+                chunk = sock.recv(_CHUNK)
+            except (OSError, ssl.SSLError) as exc:
+                raise GmpError(f"reading from gvmd failed ({type(exc).__name__})") from None
+            if not chunk:
+                raise GmpError("gvmd closed the connection before the response was complete")
+            if len(received) + len(chunk) > max_bytes:
+                raise GmpError(f"gvmd response is larger than {max_bytes} bytes")
+            try:
+                # The overlap makes this equivalent to checking everything received so far,
+                # without re-lowercasing a 64 MiB report once per chunk.
+                refuse_unsafe_xml(bytes(received[-_OVERLAP:]) + chunk, max_bytes=max_bytes)
+            except ReportRefused as exc:
+                raise GmpError(f"gvmd response refused: {exc}") from None
+            received += chunk
+            try:
+                parser.feed(chunk)
+                for event, element in parser.read_events():
+                    if event == "start" and root is None:
+                        root = element
+                    elif event == "end" and element is root:
+                        return root, bytes(received)
+            except ET.ParseError:
+                raise GmpError("gvmd response is not well-formed XML") from None
+
+    def _send(self, xml: str, *, max_bytes: int = MAX_RESPONSE_BYTES) -> tuple[ET.Element, bytes]:
+        """Send one allowed command; return the response root and its raw bytes."""
+        try:
+            command = ET.fromstring(xml).tag
+        except ET.ParseError:
+            raise GmpError("refusing to send a request that is not well-formed XML") from None
+        if command not in READ_ONLY_COMMANDS:
+            raise GmpError("refusing to send a GMP command that is not read-only")
+        sock = self._sock
+        if sock is None:
+            raise GmpError("not connected to gvmd")
+        deadline = time.monotonic() + self._target.timeout * _DEADLINE_FACTOR
+        try:
+            sock.settimeout(self._target.timeout)
+            sock.sendall(xml.encode("utf-8"))
+        except (OSError, ssl.SSLError) as exc:
+            raise GmpError(f"writing to gvmd failed ({type(exc).__name__})") from None
+        root, raw = self._read_response(deadline, max_bytes)
+        self._check_status(command, root)
+        return root, raw
+
+    def _check_status(self, command: str, root: ET.Element) -> None:
+        error = GmpAuthError if command == "authenticate" else GmpError
+        if root.tag != f"{command}_response":
+            raise error(f"unexpected GMP response to {command}")
+        status = root.get("status") or ""
+        if not _STATUS_RE.fullmatch(status):
+            raise error(f"{command} response carried no valid status")
+        if status.startswith("2"):
+            return
+        text = _clean(root.get("status_text"))
+        for secret in (self._password,):
+            if secret:
+                text = text.replace(secret, "[redacted]")
+        raise error(f"{command} failed with GMP status {status}: {text}")
+
+    # -- read-only operations ----------------------------------------------------------
+
+    def list_tasks(self) -> list[dict]:
+        root, _ = self._send("<get_tasks/>")
+        tasks = []
+        for task in root.findall("task"):
+            task_id = task.get("id") or ""
+            if not _UUID_RE.fullmatch(task_id):
+                continue  # an id we could not safely echo back is not offered for selection
+            tasks.append({"task_id": task_id, "name": _clean(task.findtext("name"))[:_NAME_MAX]})
+        return tasks
+
+    def finished_reports(self, task_id: str) -> list[dict]:
+        """Every report gvmd lists for `task_id`, oldest first, with its status as reported.
+
+        Whether a report is Done is the caller's decision. A report whose own task id is not
+        `task_id` is dropped, whatever gvmd listed it under.
+        """
+        _uuid(task_id, "task id")
+        request = (f"<get_reports filter={quoteattr(f'task_id={task_id} rows=-1')}"
+                   ' details="0" ignore_pagination="1"/>')
+        root, _ = self._send(request, max_bytes=MAX_REPORT_BYTES)
+        found = []
+        for outer in root.findall("report"):
+            inner = outer.find("report")
+            inner = inner if inner is not None else outer
+            report_id = outer.get("id") or inner.get("id") or ""
+            task = inner.find("task")
+            own_task = (task.get("id") if task is not None else None) or ""
+            if own_task != task_id or not _UUID_RE.fullmatch(report_id):
+                continue
+            stamp = (inner.findtext("timestamp") or outer.findtext("creation_time")
+                     or inner.findtext("scan_end") or "").strip()
+            found.append((self._instant(stamp), {
+                "report_id": report_id, "task_id": own_task,
+                "status": _clean(inner.findtext("scan_run_status")).strip(), "timestamp": stamp}))
+        found.sort(key=lambda pair: pair[0])
+        return [entry for _, entry in found]
+
+    @staticmethod
+    def _instant(stamp: str) -> float:
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            raise GmpError("a report carried a timestamp that is not ISO 8601") from None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+
+    def report_xml(self, report_id: str) -> bytes:
+        _uuid(report_id, "report id")
+        request = (f"<get_reports report_id={quoteattr(report_id)} details=\"1\" "
+                   f"ignore_pagination=\"1\" filter={quoteattr(_REPORT_FILTER)}/>")
+        _, raw = self._send(request, max_bytes=MAX_REPORT_BYTES)
+        return raw

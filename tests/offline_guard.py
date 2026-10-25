@@ -13,9 +13,33 @@ def forbidden(*args, **kwargs):
     raise AssertionError("Offline tests forbid network, credentials, and live inference")
 
 
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+def _local_only(event, args):
+    """True for a Unix-socket connect or a loopback connect/lookup, which never leave the machine.
+
+    Fakes that serve a protocol from a thread inside a test (the GMP client's fake gvmd) need
+    these. Anything else, and any call with unparseable arguments, stays forbidden.
+    """
+    try:
+        if event == "socket.connect":
+            address = args[1]
+            if isinstance(address, (str, bytes)):
+                return True
+            return isinstance(address, tuple) and address[0] in _LOOPBACK
+        if event == "socket.getaddrinfo":
+            return args[0] in _LOOPBACK
+    except (IndexError, TypeError):
+        return False
+    return False
+
+
 def _audit(event, args):
     if event in {"socket.connect", "socket.getaddrinfo", "socket.gethostbyname",
                  "socket.gethostbyaddr", "socket.sendto"}:
+        if _local_only(event, args):
+            return
         forbidden()
 
 
