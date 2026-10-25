@@ -19,10 +19,17 @@ Standard library only. No clock is read here.
 """
 
 import ipaddress
+import re
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
 from tools.greenbone_report import GreenboneReport, Result
+
+# Defence in depth behind the parser: ids built here end up in the trusted
+# header, stored records, idempotency keys, tickets and logs, so they come from
+# a closed alphabet or the whole report is refused.
+_ASSET_ID_RE = re.compile(r"[A-Za-z0-9.:_-]{1,128}")
+_FINDING_ID_RE = re.compile(r"[A-Za-z0-9.:_/-]{1,256}")
 
 DEFAULT_QOD_FLOOR = 70
 SOURCE = "greenbone"
@@ -157,6 +164,14 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
             kept = findings.get(finding["finding_id"])
             if kept is None or finding["scanner_severity"] > kept["scanner_severity"]:
                 findings[finding["finding_id"]] = finding
+    bad_assets = [a for a in assets if not _ASSET_ID_RE.fullmatch(a["asset_id"])]
+    bad_findings = [i for i in list(findings) + list(withheld) if not _FINDING_ID_RE.fullmatch(i)]
+    if bad_assets or bad_findings:
+        # An id outside the alphabet cannot be attributed safely: nothing from
+        # this report may resolve, keep or open a finding. Fail closed.
+        skipped["rejected"] += len(bad_assets) + len(bad_findings)
+        assets = [a for a in assets if _ASSET_ID_RE.fullmatch(a["asset_id"])]
+        findings, withheld, covered = {}, {}, []
     return NormalisedScan(
         scan_id=scan_id,
         source=SOURCE,

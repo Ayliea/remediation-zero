@@ -101,6 +101,8 @@ def _uuid_or_none(value: Optional[str]) -> Optional[str]:
 
 
 def _is_ip(value: str) -> bool:
+    if "%" in value:
+        return False  # a scoped IPv6 address carries free text after the %
     try:
         ipaddress.ip_address(value)
     except ValueError:
