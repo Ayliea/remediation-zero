@@ -21,6 +21,11 @@ COUNTED = ("findings", "assets", "owners", "decisions", "tickets",
            "human_queue", "sla_clocks", "idempotency")
 
 
+#: Up to 500 chosen tasks (scripts.local.MAX_CHOSEN_TASKS) plus the enrichment doc and one spare.
+#: Only this local-only collection is read past the default 60.
+SCANNER_STATE_LIMIT = 502
+
+
 def snapshot(docs: DocStore) -> dict:
     def rows(name, limit=60, newest_by=None):
         query = docs.collection(name)
@@ -43,7 +48,7 @@ def snapshot(docs: DocStore) -> dict:
     reports = rows("reports", limit=10, newest_by="real_ts")
     failed_runs = rows("failed_runs", newest_by="real_ts")
     try:
-        scanner_state = rows("scanner_state")  # per-task pull state and enrichment status
+        scanner_state = rows("scanner_state", limit=SCANNER_STATE_LIMIT)  # per-task pull state and enrichment status
     except KeyError:
         scanner_state = []  # a store without the scanner file
 

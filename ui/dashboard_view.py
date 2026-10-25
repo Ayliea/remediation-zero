@@ -187,18 +187,31 @@ def _result_words(state):
         return refusal_line(reason)
     if result == "failed":
         return "Failed: " + str(state.get("last_error_class") or "unknown error")
-    return "Not pulled yet"
+    return "Result unknown"
 
 
 def _task_card(state, task_id):
+    """One task's card. A row that cannot be read costs only its own card, never the page."""
+    try:
+        return _task_card_body(state, task_id)
+    except Exception:  # noqa: BLE001 - malformed stored row; nothing from it is shown
+        return (f'<article class="card"><h3>{text(task_id)}</h3>'
+                "<p>This task's status could not be read.</p></article>")
+
+
+def _task_card_body(state, task_id):
+    if state is None:  # chosen, but no state document: it has never been pulled
+        return (f'<article class="card"><h3>{text(task_id)}</h3>'
+                '<p>Result: Not pulled yet. Nothing has been imported for this task.</p></article>')
     name = state.get("task_name") or task_id
     body = f'<article class="card"><h3>{text(name)}</h3>'
     if name != task_id:
         body += f'<p>Task: {text(task_id)}</p>'
-    if state.get("last_pull_real_ts") is None and not state.get("last_result"):
-        return body + '<p>Result: Not pulled yet. Nothing has been imported for this task.</p></article>'
     body += f'<p>Last pull: {stamp(state.get("last_pull_real_ts"), state.get("last_pull_sim_ts"))}</p>'
-    body += f'<p>Result: {text(_result_words(state))}</p>'
+    if state.get("last_result") in ("imported", "nothing_new", "refused", "failed"):
+        body += f'<p>Result: {text(_result_words(state))}</p>'
+    else:
+        body += '<p>Result unknown. The last pull outcome was not recorded in a form this page can read.</p>'
     if state.get("last_result") == "failed":
         body += '<p>The last pull failed. This is not the same as no new findings.</p>'
     if state.get("last_imported_report_id"):
@@ -217,7 +230,7 @@ def _task_card(state, task_id):
             ("not_finished", "not finished"))) + '.</p>')
     refused = [r for r in (state.get("refused") or []) if isinstance(r, dict)]
     if refused:
-        body += f'<p>Refused reports: {text(len(refused))}. Newest first:</p><ul>'
+        body += f'<p>Recently refused reports: {text(len(refused))} (the last 20 are kept). Newest first:</p><ul>'
         for item in list(reversed(refused))[:5]:
             body += f'<li>{text(refusal_line(item.get("reason")))}</li>'
         body += '</ul>'
@@ -233,24 +246,28 @@ def scanner_section(data, chosen_tasks=None):
     if "scanner_state" not in data:
         return ""  # the cloud edition does not supply it
     rows = [r for r in (data.get("scanner_state") or []) if isinstance(r, dict)]
-    by_task = {r.get("task_id"): r for r in rows if r.get("task_id")}
+    by_task = {r["task_id"]: r for r in rows if isinstance(r.get("task_id"), str) and r["task_id"]}
     enrichment = next((r for r in rows if not r.get("task_id") and "last_run_real_ts" in r), None)
     body = '<h2>Scanner imports</h2>'
     ids = list(chosen_tasks) if chosen_tasks is not None else list(by_task)
     if not ids:
         body += '<p class="card">No scan tasks chosen — nothing is imported.</p>'
     for task_id in ids:
-        body += _task_card(by_task.get(task_id, {}), task_id)
+        body += _task_card(by_task.get(task_id), task_id)
     body += '<h3>Enrichment</h3>'
     if enrichment is None:
         body += '<p>Enrichment has not run.</p>'
     else:
-        body += (f'<p>Last run: {stamp(enrichment.get("last_run_real_ts"), enrichment.get("last_run_sim_ts"))}</p>'
-                 f'<p>Known-exploited list: {text(enrichment.get("kev"))} · Exploit-probability scores: '
-                 f'{text(enrichment.get("epss"))} · Advisories fetched: {text(enrichment.get("nvd_fetched"))}</p>')
-        failed = enrichment.get("failed") or []
-        body += (f'<p>Failures: {text(", ".join(str(f) for f in failed))}</p>' if failed
-                 else '<p>No failures in the last run.</p>')
+        try:
+            line = (f'<p>Last run: {stamp(enrichment.get("last_run_real_ts"), enrichment.get("last_run_sim_ts"))}</p>'
+                    f'<p>Known-exploited list: {text(enrichment.get("kev"))} · Exploit-probability scores: '
+                    f'{text(enrichment.get("epss"))} · Advisories fetched: {text(enrichment.get("nvd_fetched"))}</p>')
+            failed = enrichment.get("failed") or []
+            line += (f'<p>Failures: {text(", ".join(str(f) for f in failed))}</p>' if failed
+                     else '<p>No failures in the last run.</p>')
+        except Exception:  # noqa: BLE001 - malformed stored row
+            line = "<p>The enrichment status could not be read.</p>"
+        body += line
     return body
 
 
@@ -309,7 +326,7 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
         if not data.get("scans"):
             body += '<p class="card">No scan records returned. We cannot confirm what was checked.</p>'
         body += scanner_section(data, chosen_tasks)
-        if upload_token is not None:
+        if upload_token is not None and "scanner_state" in data:
             message = UPLOAD_MESSAGES.get(upload_code) if isinstance(upload_code, str) else None
             if message:
                 body += f'<section class="notice" role="status"><p>{text(message)}</p></section>'

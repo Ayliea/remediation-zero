@@ -554,6 +554,7 @@ def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
 
 MAX_CHOSEN_TASKS = 500
 UPLOAD_OVERHEAD = 64 * 1024  # multipart framing and the other two fields
+MAX_UPLOAD_DELIMITERS = 4  # token, report, add_task and the closing delimiter
 
 
 class TooManyTasks(ValueError):
@@ -652,6 +653,22 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                 body = self.rfile.read(length)
                 if len(body) != length:
                     raise ValueError()
+                # Before any parsing (the token is inside the body, so this runs for forged requests too):
+                # a fixed number of parts, none of them a nested multipart.
+                match = re.search(r'boundary=(?:"([^"]{1,200})"|([^\s;"]{1,200}))', content_type, re.I)
+                if match is None:
+                    raise ValueError()
+                delimiter = (match.group(1) or match.group(2)).encode('ascii')
+                chunks = body.split(b'\r\n--' + delimiter)
+                if body.startswith(b'--' + delimiter):
+                    chunks[0] = chunks[0][2 + len(delimiter):]
+                else:
+                    chunks = chunks[1:]  # preamble
+                if len(chunks) > MAX_UPLOAD_DELIMITERS:
+                    raise ValueError()
+                for chunk in chunks:
+                    if b'multipart/' in chunk.split(b'\r\n\r\n', 1)[0].lower():
+                        raise ValueError()
                 message = BytesParser(policy=policy.HTTP).parsebytes(
                     b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)
                 if not message.is_multipart() or message.defects:
@@ -659,7 +676,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                 parts = {}
                 for part in message.iter_parts():
                     name = part.get_param('name', header='content-disposition')
-                    if name not in {'token', 'report', 'add_task'} or name in parts or part.is_multipart():
+                    if (name not in {'token', 'report', 'add_task'} or name in parts or part.is_multipart()
+                            or part.defects):
                         raise ValueError()
                     parts[name] = part
                 if not {'token', 'report'} <= set(parts) or parts['report'].get_filename() is None:
@@ -671,7 +689,9 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                     if parts['add_task'].get_payload(decode=True) != b'yes':
                         raise ValueError()
                     add_task = True
-            except (ValueError, UnicodeError, OSError, LookupError):
+            except Exception as error:  # incl. RecursionError and MemoryError: a 400, never a traceback
+                if not isinstance(error, (ValueError, UnicodeError, OSError, LookupError)):
+                    _log('upload_parse_failed', error=type(error).__name__)
                 self.send_error(400, 'Invalid upload. Nothing was imported.')
                 return
             if not secrets.compare_digest(supplied, token.encode()):

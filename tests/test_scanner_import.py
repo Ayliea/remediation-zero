@@ -1003,3 +1003,23 @@ def test_pull_reports_the_cves_of_findings_it_added_and_none_on_a_repeat(ws, por
 def test_pull_with_no_import_has_no_new_cves(ws, ports):
     source = FakeSource()
     assert pull(ports, 1, source, chosen_task_ids=[TASK])["new_cves"] == []
+
+
+def test_snapshot_reads_state_for_all_500_chosen_tasks_plus_enrichment(ws, ports):
+    from engine.scanner_import import _write_state
+    from ui import dashboard_view
+    ids = [f"aaaaaaaa-aaaa-4aaa-8aaa-{n:012d}" for n in range(70)]
+    for task_id in ids:
+        _write_state(ports.docs, task_id, {"last_result": "nothing_new", "last_pull_real_ts": NOW,
+                                           "last_pull_sim_ts": NOW})
+    ports.docs.collection("scanner_state").document("enrichment").set(
+        {"last_run_real_ts": NOW, "last_run_sim_ts": NOW, "kev": "ok", "epss": "ok", "nvd_fetched": 1, "failed": []})
+    store = ws.docs_for("dashboard")
+    try:
+        view = snapshot(store)
+    finally:
+        store.close()
+    assert len(view["scanner_state"]) == 71
+    page = dashboard_view.render(view, "infrastructure", chosen_tasks=ids)
+    assert page.count("Result: Nothing new") == 70 and "Not pulled yet" not in page
+    assert "Advisories fetched: 1" in page

@@ -663,7 +663,7 @@ def test_upload_that_parses_badly_changes_nothing(page):
     assert everything_under(gws) == before
 
 
-def test_upload_older_report_is_refused_with_its_reason_code(page):
+def test_second_upload_in_the_same_cycle_is_refused_as_already_imported_this_cycle(page):
     request, token, gws = page
     assert post_report(request, token, add_task=True)[0] == 303
     older = CLEAN_REPORT.replace(REPORT.encode(), b"44444444-4444-4444-8444-444444444444")
@@ -722,3 +722,46 @@ def test_upload_is_not_offered_without_the_page_wiring(gws):
     obj.send_error = lambda code, *a: codes.append(code)
     obj.do_POST()
     assert codes == [403]
+
+
+def test_many_parts_refused_before_parsing(page, monkeypatch):
+    from scripts import local
+    request, token, gws = page
+    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: pytest.fail("the body was parsed"))
+    fields = [("token", token)] + [("x", "y")] * 5000
+    assert request(body=multipart(fields, [("report", "r.xml", CLEAN_REPORT)]))[0] == 400
+    assert docs(gws, "scans") == {}
+
+
+def test_nested_multipart_refused(page):
+    request, token, gws = page
+    inner = multipart([("a", "b")], boundary="inner")
+    body = (multipart([("token", token)]).replace(f"--{BOUNDARY}--\r\n".encode(), b"")
+            + (f'--{BOUNDARY}\r\nContent-Disposition: form-data; name="report"; filename="r.xml"\r\n'
+               'Content-Type: multipart/mixed; boundary=inner\r\n\r\n').encode() + inner
+            + f"\r\n--{BOUNDARY}--\r\n".encode())
+    assert request(body=body)[0] == 400
+    assert docs(gws, "scans") == {}
+
+
+def test_parser_recursion_error_is_a_400(page, monkeypatch):
+    from scripts import local
+
+    def boom(*a, **k):
+        raise RecursionError()
+    monkeypatch.setattr(local, "BytesParser", boom)
+    request, token, gws = page
+    assert post_report(request, token, add_task=True)[0] == 400
+    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: (_ for _ in ()).throw(MemoryError()))
+    assert post_report(request, token, add_task=True)[0] == 400
+    assert docs(gws, "scans") == {}
+
+
+def test_page_upload_of_an_older_report_in_a_later_cycle_is_refused_as_not_newer(page, monkeypatch):
+    from scripts import local
+    request, token, gws = page
+    assert post_report(request, token, add_task=True)[0] == 303 and docs(gws, "scans")
+    monkeypatch.setattr(local, "next_cycle", lambda ws: 7)
+    older = CLEAN_REPORT.replace(REPORT.encode(), b"44444444-4444-4444-8444-444444444444")
+    status, _, sent, _ = post_report(request, token, older)
+    assert status == 303 and sent["Location"] == "/?view=infrastructure&upload=refused_not_newer"

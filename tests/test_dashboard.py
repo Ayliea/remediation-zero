@@ -192,7 +192,7 @@ def test_refused_reports_are_listed_newest_first_at_most_five_in_plain_words():
                for n in range(1, 8)]
     page = scanner_page([pulled(last_result="refused", refused=refused)], [TASK])
     assert "Result: Refused: the report is not newer than the last one imported" in page
-    assert page.count("<li>Refused:") == 5 and "Refused reports: 7" in page
+    assert page.count("<li>Refused:") == 5 and "Recently refused reports: 7 (the last 20 are kept)" in page
     assert "larger than the size limit" not in page  # the oldest is not among the newest five
     assert "not_newer" not in page and "too_large" not in page
 
@@ -247,3 +247,42 @@ def test_upload_code_in_url_is_closed_set():
     for code in ("<script>x</script>", "refused_<img>", "refused_made_up", "", None, "IMPORTED"):
         page = scanner_page([], [], upload_token="t", upload_code=code)
         assert 'role="status"' not in page and "made_up" not in page and "<img>" not in page
+
+
+def test_cloud_render_matches_the_base_commit_golden_output():
+    """Snapshots without scanner_state render byte-for-byte as dashboard_view did at c5e2f98
+    (fixtures/dashboard_cloud_golden.json, generated from that commit's file), whatever the new arguments."""
+    from pathlib import Path
+    from tests.golden_snapshots import SNAPSHOTS
+    golden = json.loads((Path(__file__).parent / "fixtures" / "dashboard_cloud_golden.json").read_text())
+    assert len(golden) == len(SNAPSHOTS) * (len(dashboard_view.VIEWS) + 1)
+    for name, data in SNAPSHOTS.items():
+        for view in dashboard_view.VIEWS:
+            assert dashboard_view.render(data, view, logo_url="/logo.png") == golden[f"{name}/{view}"]
+            assert dashboard_view.render(data, view, logo_url="/logo.png", upload_token="t", upload_code="imported",
+                                         chosen_tasks=[TASK]) == golden[f"{name}/{view}"]
+        assert dashboard_view.render(data, "actions", logo_url="/logo.png",
+                                     approve_command="cmd") == golden[f"{name}/approve"]
+
+
+def test_state_row_without_a_result_says_result_unknown_not_not_pulled():
+    page = scanner_page([pulled()], [TASK])
+    assert "Result unknown" in page and "Not pulled yet" not in page
+    assert "Not pulled yet" in scanner_page([], [TASK])
+
+
+def test_a_malformed_row_costs_only_its_own_card():
+    rows = [pulled(last_result="imported", last_imported_report_id=REPORT_ID, last_counts="oops", last_skipped=[1]),
+            {"task_id": TASK_2, "last_result": "imported", "last_pull_real_ts": "not-a-number"},
+            {"task_id": "33333333-3333-4333-8333-333333333333", "last_result": "nothing_new",
+             "last_pull_real_ts": 1793145600.0, "last_pull_sim_ts": 1793145600.0},
+            {"last_run_real_ts": "bad", "failed": 5}]
+    page = scanner_page(rows, [TASK, TASK_2, "33333333-3333-4333-8333-333333333333"])
+    assert page.count("This task's status could not be read.") == 2
+    assert "Result: Nothing new" in page
+    assert "The enrichment status could not be read." in page
+
+
+def test_upload_form_needs_scanner_state_not_just_a_token():
+    data = {"counts": {}, "scans": []}
+    assert "Upload a report" not in dashboard_view.render(data, "infrastructure", upload_token="t")
