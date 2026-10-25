@@ -49,6 +49,7 @@ Standard library only.
 """
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -71,6 +72,7 @@ from tools.docstore import (
 )
 
 BUSY_TIMEOUT_MS = 10000
+logger = logging.getLogger("remediation_zero.sqlite_docstore")
 DOCS_SCHEMA = ("CREATE TABLE IF NOT EXISTS {alias}.docs(collection TEXT, id TEXT, "
                 "data TEXT NOT NULL, revision INTEGER NOT NULL, "
                 "PRIMARY KEY(collection, id))")
@@ -215,7 +217,7 @@ class SQLiteDocStore(DocStoreBase):
                     self._in_transaction = False
             finally:
                 if attached is not None:
-                    conn.execute(f"DETACH DATABASE {attached}")
+                    _detach(conn, attached)
 
     def _attach_journal(self, conn: sqlite3.Connection, path: Path) -> Optional[str]:
         """Attach the journal file under `jrnl` unless it is already attached.
@@ -244,7 +246,7 @@ class SQLiteDocStore(DocStoreBase):
                 raise RuntimeError("the journal table is not in exactly the journal file")
         except BaseException:
             if attached is not None:
-                conn.execute(f"DETACH DATABASE {attached}")
+                _detach(conn, attached)
             raise
         return attached
 
@@ -341,6 +343,21 @@ class SQLiteDocStore(DocStoreBase):
             "VALUES (?, ?, ?, ?)",
             (collection, doc_id, json.dumps(new, sort_keys=True),
              row[1] + 1 if row else 1))
+
+
+def _detach(conn: Any, alias: str) -> None:
+    """Detach `alias`; a failure is logged by class and never raised.
+
+    After a COMMIT the writes are already durable, so failing the caller would
+    report a committed import as failed. During a rollback, raising here would
+    replace the error that caused it. A file left attached is found and reused
+    by the next `transaction()`.
+    """
+    try:
+        conn.execute(f"DETACH DATABASE {alias}")
+    except sqlite3.Error as exc:
+        logger.warning(json.dumps({"event": "journal_detach_failed",
+                                   "error_class": type(exc).__name__}, sort_keys=True))
 
 
 def _op(store: SQLiteDocStore, kind: str, ref: "_Document",

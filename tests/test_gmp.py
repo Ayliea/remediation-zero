@@ -527,3 +527,32 @@ def test_total_timeout_unset_changes_nothing(unix_target):
         assert len(client.list_tasks()) == 2
     with GmpClient(target, USER, PASSWORD, total_timeout=5.0) as client:
         assert len(client.list_tasks()) == 2
+
+
+
+@pytest.mark.parametrize("chunks, reason", [
+    ([b'<get_tasks_response status="200"><task id="x"><name>' + b"a" * (1024 * 1024 + 10)
+      + b"</name></task></get_tasks_response>"], "too_large"),
+    ([b'<!DOCTYPE x [<!ENTITY a "b">]><get_tasks_response status="200"/>'], "unsafe_xml"),
+    ([b'<get_tasks_response status="200"><task></nope></get_tasks_response>'], "malformed"),
+])
+def test_refused_responses_carry_a_closed_reason(unix_target, chunks, reason):
+    from tools.gmp import GmpReportRefused
+    target, _ = unix_target(default_handler({"get_tasks": chunks}))
+    with GmpClient(target, USER, PASSWORD) as client:
+        with pytest.raises(GmpReportRefused) as refused:
+            client.list_tasks()
+        assert refused.value.reason == reason
+        assert isinstance(refused.value, GmpError)
+        with pytest.raises(GmpError, match="not connected"):  # still poisoned
+            client.list_tasks()
+
+
+def test_other_failures_are_not_report_refusals(unix_target):
+    from tools.gmp import GmpReportRefused
+    target, _ = unix_target(lambda tag, raw: [OK_AUTH] if tag == "authenticate" else None,
+                            timeout=0.5)
+    with GmpClient(target, USER, PASSWORD) as client:
+        with pytest.raises(GmpError) as failed:
+            client.list_tasks()
+        assert not isinstance(failed.value, GmpReportRefused)

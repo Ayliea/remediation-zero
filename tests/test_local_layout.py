@@ -378,3 +378,51 @@ def test_a_failed_batch_inside_a_transaction_undoes_only_itself(ws):
         assert {s.id for s in store.collection("findings").stream()} == {"RZ-1"}
     finally:
         store.close()
+
+
+
+class _DetachFails:
+    """The write connection, except that DETACH raises, as a busy file would make it."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, *args):
+        if sql.lstrip().upper().startswith("DETACH"):
+            raise sqlite3.OperationalError("database jrnl is locked")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_a_detach_failure_after_commit_is_logged_not_raised(ws, caplog):
+    import logging
+    journal = ws.journal()
+    store = ws.docs_for("scanner_import")
+    store._write_conn = _DetachFails(store._write_conn)
+    try:
+        with caplog.at_level(logging.WARNING, logger="remediation_zero.sqlite_docstore"):
+            with store.transaction(journal=Path(journal.path), clock=journal.clock):
+                store.collection("findings").document("RZ-1").set({"a": 1})
+        assert store.collection("findings").document("RZ-1").get().exists
+        lines = [r.getMessage() for r in caplog.records
+                 if r.name == "remediation_zero.sqlite_docstore"]
+        assert len(lines) == 1 and "OperationalError" in lines[0]
+        assert "locked" not in lines[0]  # class only
+    finally:
+        store.close()
+
+
+def test_a_detach_failure_during_rollback_never_masks_the_original_error(ws):
+    journal = ws.journal()
+    store = ws.docs_for("scanner_import")
+    store._write_conn = _DetachFails(store._write_conn)
+    try:
+        with pytest.raises(RuntimeError, match="the real failure"):
+            with store.transaction(journal=Path(journal.path), clock=journal.clock):
+                store.collection("findings").document("RZ-1").set({"a": 1})
+                raise RuntimeError("the real failure")
+        assert not store.collection("findings").document("RZ-1").get().exists
+    finally:
+        store.close()

@@ -21,7 +21,7 @@ from engine.scanner_source import normalise_greenbone
 from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from tools.clock import ClockMode, SimClock
-from tools.gmp import GmpError
+from tools.gmp import GmpError, GmpReportRefused
 from tools.greenbone_report import ReportRefused, ScannedHost, parse_report
 from tools.guardrail import NoGuard
 from tools.local_layout import Workspace
@@ -74,8 +74,14 @@ def ws(tmp_path):
     return workspace
 
 
+#: The tests' wall clock: 2026-10-28T00:00:00Z, so the synthetic October scan
+#: times are in the past and "a day ahead" is a fixed point (R20).
+NOW = 1793145600.0
+
+
 def ports_for(ws, stage="scanner_import"):
-    return Ports(docs=ws.docs_for(stage), journal=ws.journal(), clock=SimClock(ClockMode.REAL),
+    clock = SimClock(ClockMode.REAL, source=lambda: NOW)
+    return Ports(docs=ws.docs_for(stage), journal=ws.journal(), clock=clock,
                  roles=None, guard=NoGuard(), delivery=NoDelivery(), memory=None,
                  telemetry=NoTelemetry())
 
@@ -595,8 +601,10 @@ def test_refused_list_keeps_the_last_twenty(ws, ports):
     for n in range(2, 27):
         source.add(n)
         source.refuse[rid(n)] = ReportRefused("x", reason="malformed")
-    result = pull(ports, 2, source, chosen_task_ids=[TASK])
-    assert result["pulled"][0]["result"] == "refused"
+    for _ in range(5):  # five downloads per pull (R21-6)
+        result = pull(ports, 2, source, chosen_task_ids=[TASK])
+        assert result["pulled"][0]["result"] == "refused"
+    assert len(source.fetched) == 1 + 25
     state = docs(ws, "scanner_state")[TASK]
     assert state["last_result"] == "refused"
     assert [r["report_id"] for r in state["refused"]] == [rid(n) for n in range(7, 27)]
@@ -615,3 +623,199 @@ def test_upload_newer_than_last_pull_then_pull_continues_after_it(ws, ports):
     assert source.fetched == [rid(1), rid(3)]
     assert set(docs(ws, "scans")) == {rid(1), rid(2), rid(3)}
     assert docs(ws, "scanner_state")[TASK]["last_imported_scan_end"] == scan_end_of(3)
+
+
+
+# --- R20 / R21 -------------------------------------------------------------------------
+
+
+def test_fixed_test_clock_is_2026_10_28():
+    from datetime import datetime, timezone
+    assert datetime.fromtimestamp(NOW, timezone.utc).isoformat() == "2026-10-28T00:00:00+00:00"
+
+
+def xml_for(n, scan_end=None):
+    """report_basic.xml as report n, finishing at `scan_end` (default: day n 02:00Z)."""
+    data = FIX("report_basic.xml").replace(b"22222222-2222-4222-8222-222222222222",
+                                           rid(n).encode())
+    end = (scan_end or scan_end_of(n)).encode()
+    return data.replace(b"<scan_end>2026-10-20T01:30:00Z</scan_end>",
+                        b"<scan_end>" + end + b"</scan_end>")
+
+
+class ScriptedClient:
+    """A GmpClient stand-in that, like the real one, is poisoned by its first failure."""
+
+    def __init__(self, listing, refuse):
+        self.listing, self.refuse = listing, refuse
+        self.poisoned = False
+        self.refused_reports, self.skipped_tasks = [], 0
+        self.downloads = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.poisoned = True
+
+    def finished_reports(self, task_id):
+        if self.poisoned:
+            raise GmpError("not connected to gvmd")
+        return list(self.listing)
+
+    def report_xml(self, report_id):
+        if self.poisoned:
+            raise GmpError("not connected to gvmd")
+        self.downloads.append(report_id)
+        if report_id in self.refuse:
+            self.poisoned = True
+            raise GmpReportRefused("gvmd response is larger than 64 bytes", reason="too_large")
+        return xml_for(int(report_id[-12:]))
+
+
+def listed(n, status="Done"):
+    return {"report_id": rid(n), "task_id": TASK, "status": status,
+            "timestamp": f"2026-10-{n:02d}T01:00:00Z"}
+
+
+def test_real_source_refusal_is_recorded_and_the_next_report_imports(ws, ports):
+    listing, refuse, clients = [listed(1)], set(), []
+
+    def factory():
+        clients.append(ScriptedClient(listing, refuse))
+        return clients[-1]
+
+    pull(ports, 1, GreenboneSource(factory), chosen_task_ids=[TASK])
+    listing += [listed(2), listed(3)]
+    refuse.add(rid(2))
+    clients.clear()
+    result = pull(ports, 2, GreenboneSource(factory), chosen_task_ids=[TASK])
+    assert result["pulled"][0]["result"] == "imported"
+    assert result["pulled"][0]["report_id"] == rid(3)
+    # The refusal poisoned the first session; the next download used a fresh one.
+    assert [c.downloads for c in clients] == [[rid(2)], [rid(3)]]
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["refused"] == [{"report_id": rid(2), "reason": "too_large"}]
+    assert "larger than" not in json.dumps(state)
+    assert set(docs(ws, "scans")) == {rid(1), rid(3)}
+
+
+def test_future_dated_upload_is_refused_and_state_is_unchanged(ws, ports):
+    import_scan(ports, 1, scan(1), chosen_task_ids=[TASK])
+    before = everything(ws)
+    with pytest.raises(ImportRefused) as refused:
+        import_upload(ports, 2, xml_for(9, "2026-10-29T00:00:01Z"), chosen_task_ids=[TASK])
+    assert refused.value.reason == "scan_time_in_future"
+    assert everything(ws) == before
+    # Within a day of the clock is accepted (clock skew), and so stays plausible.
+    import_upload(ports, 2, xml_for(9, "2026-10-28T23:00:00Z"), chosen_task_ids=[TASK])
+    before = everything(ws)
+    with pytest.raises(ImportRefused) as refused:
+        import_scan(ports, 3, dataclasses.replace(scan(10), scan_end="1999-12-31T23:59:59Z"),
+                    chosen_task_ids=[TASK])
+    assert refused.value.reason == "malformed"
+    assert everything(ws) == before
+
+
+def test_year_9999_scan_time_is_refused_as_missing(ws, ports):
+    before = everything(ws)
+    with pytest.raises(ImportRefused, match="report has no scan time; refusing to import"):
+        import_upload(ports, 1, xml_for(1, "9999-12-31T23:30:00-02:00"), chosen_task_ids=[TASK])
+    assert everything(ws) == before
+
+
+def test_report_whose_scan_time_disagrees_with_gvmd_is_refused_and_the_next_imports(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    source.add(2)
+    source.add(3)
+    # gvmd lists report 2 on day 2; the report itself claims it finished on day 5.
+    source.scans[rid(2)] = dataclasses.replace(source.scans[rid(2)],
+                                               scan_end="2026-10-05T02:00:00Z")
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["report_id"] == rid(3)
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["refused"] == [{"report_id": rid(2), "reason": "malformed"}]
+    assert set(docs(ws, "scans")) == {rid(1), rid(3)}
+
+
+def test_baseline_not_imported_counts_only_untouched_done_reports(ws, ports):
+    source = FakeSource()
+    for n in (1, 2, 3):
+        source.add(n)
+    source.refuse[rid(3)] = ReportRefused("x", reason="malformed")
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["last_imported_report_id"] == rid(2)    # fallback below a refused newest
+    assert state["baseline_not_imported"] == 1           # report 1 only
+
+
+def test_pull_that_loses_the_race_to_an_upload_records_nothing_new(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    source.add(3)
+    real_fetch = source.fetch
+
+    def fetch_after_an_upload(report_id):
+        # The pre-check has passed; an upload commits for this task and cycle first.
+        other = ports_for(ws)
+        try:
+            import_upload(other, 2, xml_for(2), chosen_task_ids=[TASK])
+        finally:
+            other.docs.close()
+        return real_fetch(report_id)
+
+    source.fetch = fetch_after_an_upload
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["result"] == "nothing_new"
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["last_result"] == "nothing_new"
+    assert state["last_imported_report_id"] == rid(2)
+    assert state.get("refused", []) == []
+    assert set(docs(ws, "scans")) == {rid(1), rid(2)}
+
+
+def test_already_imported_this_cycle_has_a_closed_reason(ws, ports):
+    import_scan(ports, 1, scan(1), chosen_task_ids=[TASK])
+    with pytest.raises(ImportRefused) as refused:
+        import_scan(ports, 1, scan(2), chosen_task_ids=[TASK])
+    assert refused.value.reason == "already_imported_this_cycle"
+
+
+def test_hostname_and_last_seen_change_only_on_evidence(ws, ports):
+    import_scan(ports, 1, scan(1), chosen_task_ids=[TASK])
+    first = docs(ws, "assets")
+    hosts = tuple(dataclasses.replace(h, hostname=None, finished=False,
+                                      os_cpe="cpe:/o:debian:debian_linux:13")
+                  if h.ip == "192.0.2.10" else h for h in BASIC().hosts)
+    import_scan(ports, 2, scan(2, hosts=hosts), chosen_task_ids=[TASK])
+    assets = docs(ws, "assets")
+    web = assets[WEB]
+    assert web["hostname"] == "web.example.invalid"     # no hostname supplied: kept
+    assert web["os_cpe"] == "cpe:/o:debian:debian_linux:13"
+    assert web["last_seen_scan"] == rid(1)               # not covered: not "seen"
+    assert web["last_seen_real_ts"] == first[WEB]["last_seen_real_ts"]
+    clean = "gb-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    unfinished = "gb-cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    assert assets[clean]["last_seen_scan"] == rid(2)     # covered
+    # Listed in both reports but never finished: first seen, never "last seen".
+    assert assets[unfinished]["first_seen_scan"] == rid(1)
+    assert "last_seen_scan" not in assets[unfinished]
+
+
+def test_at_most_five_downloads_per_task_per_pull(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    for n in range(2, 9):
+        source.add(n)
+        source.refuse[rid(n)] = ReportRefused("x", reason="malformed")
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(n) for n in range(1, 7)]
+    assert result["pulled"][0]["deferred"] == 2
+    assert docs(ws, "scanner_state")[TASK]["deferred"] == 2
+    pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(n) for n in range(1, 9)]
+    assert docs(ws, "scanner_state")[TASK]["deferred"] == 0

@@ -225,3 +225,23 @@ def test_refusals_carry_a_closed_reason():
         with pytest.raises(ReportRefused) as refused:
             parse_report(data, max_bytes=1024 if reason == "too_large" else 64 * 1024 * 1024)
         assert refused.value.reason == reason
+
+
+
+def test_year_9999_with_an_offset_overflows_to_none():
+    report = _mutated(b"<scan_end>2026-10-20T01:30:00Z</scan_end>",
+                      b"<scan_end>9999-12-31T23:30:00-02:00</scan_end>")
+    assert report.scan_end is None
+
+
+def test_unexpected_error_during_validation_is_a_malformed_refusal(monkeypatch):
+    import tools.greenbone_report as module
+
+    def boom(node):
+        raise TypeError("unexpected")
+
+    monkeypatch.setattr(module, "_host", boom)
+    with pytest.raises(ReportRefused) as refused:
+        parse_report(FIX("report_basic.xml"))
+    assert refused.value.reason == "malformed"
+    assert "unexpected" not in str(refused.value)

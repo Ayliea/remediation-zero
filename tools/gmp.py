@@ -59,6 +59,21 @@ class GmpAuthError(GmpError):
     """Credentials are missing or gvmd rejected them."""
 
 
+class GmpReportRefused(GmpError):
+    """gvmd's response was refused as a document: too large, unsafe XML, or not well-formed.
+
+    `reason` is one of "too_large", "unsafe_xml", "malformed", so a caller can
+    record why a report was refused without keeping any server text. The client
+    is still poisoned afterwards, like any GmpError.
+    """
+
+    REASONS = ("too_large", "unsafe_xml", "malformed")
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason if reason in self.REASONS else "malformed"
+
+
 @dataclass(frozen=True)
 class GmpTarget:
     transport: str  # "unix" | "tls"
@@ -243,13 +258,15 @@ class GmpClient:
             if not chunk:
                 raise GmpError("gvmd closed the connection before the response was complete")
             if len(received) + len(chunk) > max_bytes:
-                raise GmpError(f"gvmd response is larger than {max_bytes} bytes")
+                raise GmpReportRefused(f"gvmd response is larger than {max_bytes} bytes",
+                                       reason="too_large")
             try:
                 # The overlap makes this equivalent to checking everything received so far,
                 # without re-lowercasing a 64 MiB report once per chunk.
                 refuse_unsafe_xml(bytes(received[-_OVERLAP:]) + chunk, max_bytes=max_bytes)
             except ReportRefused as exc:
-                raise GmpError(f"gvmd response refused: {exc}") from None
+                raise GmpReportRefused(f"gvmd response refused: {exc}",
+                                       reason=exc.reason) from None
             received += chunk
             try:
                 parser.feed(chunk)
@@ -259,7 +276,8 @@ class GmpClient:
                     elif event == "end" and element is root:
                         return root, bytes(received)
             except ET.ParseError:
-                raise GmpError("gvmd response is not well-formed XML") from None
+                raise GmpReportRefused("gvmd response is not well-formed XML",
+                                       reason="malformed") from None
 
     def _send(self, xml: str, *, max_bytes: int = MAX_RESPONSE_BYTES) -> tuple[ET.Element, bytes]:
         """Send one allowed command; return the response root and its raw bytes."""

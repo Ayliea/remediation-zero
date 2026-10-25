@@ -126,11 +126,13 @@ def _utc_or_none(value: str) -> Optional[str]:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:  # e.g. month 13: well-shaped, not a time
+        # Month 13 is well-shaped but not a time (ValueError); year 9999 with a
+        # negative offset leaves the representable range in UTC (OverflowError).
+        parsed = parsed.astimezone(timezone.utc)
+        pattern = "%Y-%m-%dT%H:%M:%S.%fZ" if parsed.microsecond else "%Y-%m-%dT%H:%M:%SZ"
+        return parsed.strftime(pattern)
+    except (ValueError, OverflowError):
         return None
-    parsed = parsed.astimezone(timezone.utc)
-    pattern = "%Y-%m-%dT%H:%M:%S.%fZ" if parsed.microsecond else "%Y-%m-%dT%H:%M:%SZ"
-    return parsed.strftime(pattern)
 
 
 def _scan_end(inner: ET.Element) -> Optional[str]:
@@ -270,6 +272,16 @@ def _result(node: ET.Element):
 
 def parse_report(data: bytes, *, max_bytes: int = MAX_REPORT_BYTES) -> GreenboneReport:
     refuse_unsafe_xml(data, max_bytes=max_bytes)
+    try:
+        return _parse(data)
+    except ReportRefused:
+        raise
+    except Exception:  # noqa: BLE001 - any surprise while validating untrusted input
+        # Nothing from the document is guessed at or echoed: refuse it whole.
+        raise ReportRefused("report could not be validated", reason="malformed") from None
+
+
+def _parse(data: bytes) -> GreenboneReport:
     try:
         root = ET.fromstring(data)
     except ET.ParseError:
