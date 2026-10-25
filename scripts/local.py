@@ -973,6 +973,10 @@ def main():
                 if holds_greenbone_findings(docs):
                     parser.exit(1, GREENBONE_RESCAN + '\n')
                 scan = load_scan(args.scan)
+                # A scan that claims a scanner task enters only through greenbone pull/upload,
+                # which check the report itself; a hand-made one must not seed fake findings.
+                if scan.get('source') or scan.get('task_id'):
+                    parser.exit(1, GREENBONE_RESCAN + '\n')
                 _print(run_rescan(_ports(docs, None if args.dry_run else ws.journal(), clock),
                                   args.cycle, scan, args.dry_run))
             finally:

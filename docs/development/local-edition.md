@@ -203,8 +203,8 @@ stays with a person.
 Scanner comments and advisory prose are untrusted. Each finding's text goes to
 the guard model before triage. With no guard model configured, nothing is
 screened, so untrusted text is withheld from the models: each model sees a
-withheld notice in its place, and the structured fields. One exception: a
-Greenbone test name that is plain text (after collapsing spaces, only ASCII
+withheld notice in its place, and the structured fields. One exception: for a
+Greenbone finding with no CVE, a test name that is plain text (after collapsing spaces, only ASCII
 letters, digits, spaces and `.,:()/_+-`, at most 120 characters) is shown
 unscreened, so a no-CVE finding is not triaged blind. Plain text can still be
 worded as an instruction; the decision record carries

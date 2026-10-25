@@ -455,7 +455,23 @@ def test_nvt_name_is_withheld_when_screening_blocks(ws):
     assert "IGNORE ALL RULES" not in seen and "nvt_name: " in seen
 
 
-def test_nvt_name_is_withheld_when_no_guard_is_configured(ws):
+@pytest.mark.parametrize("cves", [["CVE-2021-44228"], ["CVE-2021-44228", "CVE-2021-45046"]])
+def test_with_no_guard_a_cve_bearing_findings_name_stays_withheld(ws, cves):
+    # D1 covers no-CVE findings only: one with a CVE already carries evidence.
+    from tools.guardrail import NoGuard
+    from tools.inference import FENCE_BEGIN
+    ws.docs_for("seed").collection("findings").document(FINDING_ID).set(
+        dict(NO_CVE_RECORD, cve_ids=cves))
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+    run(ports_for(ws, roles_with(proposer, reviewer), guard=NoGuard()))
+    assert "IGNORE ALL RULES" not in proposer.calls[0].split(FENCE_BEGIN)[0]
+    store = ws.docs_for("dashboard")
+    recorded = [s.to_dict()["screening"] for s in store.collection("decisions").stream()]
+    store.close()
+    assert all("nvt_name_unscreened_strict" not in r for r in recorded)
+
+
+def test_with_no_guard_a_plain_no_cve_name_is_shown_under_the_strict_rule(ws):
     # R29 D1 (owner's decision): with no guard, a name that is plain text under the
     # strict rule IS shown in the header, even one worded like an instruction; the
     # decision record says so. A name with any character outside the rule stays withheld.

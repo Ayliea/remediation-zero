@@ -270,10 +270,12 @@ def screen_finding(ports: Ports, finding: dict, cycle: int,
     finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
     if raw_name:
         finding["nvt_name"] = apply_verdict(raw_name, verdict)
-        # D1: with no guard configured at all (not a guard that failed), a test
-        # name that is plain text under the strict rule is shown in the header.
+        # D1: with no guard configured at all (not a guard that failed), a
+        # no-CVE finding's test name that is plain text under the strict rule
+        # is shown in the header. A finding with a CVE already has evidence.
         plain = inference.plain_test_name(raw_name)
         if (isinstance(ports.guard, NoGuard) and plain is not None
+                and not finding_cves(finding)
                 and not inference.is_legacy_finding(finding)):
             finding[inference.PLAIN_NAME_KEY] = plain
             verdict = StrictNameVerdict(**{f.name: getattr(verdict, f.name)

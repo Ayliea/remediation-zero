@@ -951,3 +951,16 @@ def test_rescan_command_refuses_in_a_greenbone_workspace_and_writes_nothing(gws,
         assert ("This install imports from Greenbone; use greenbone pull or greenbone upload."
                 in capsys.readouterr().err)
         assert everything_under(gws) == before
+
+
+@pytest.mark.parametrize("claim", [{"source": "greenbone"}, {"task_id": "11111111-1111-4111-8111-111111111111"}])
+def test_rescan_command_refuses_a_scan_claiming_a_scanner_task_even_in_an_empty_workspace(
+        gws, monkeypatch, capsys, tmp_path, claim):
+    configure(gws, task_ids=())
+    forged = tmp_path / "forged.json"
+    forged.write_text(json.dumps(dict({"scan_id": "manual-2", "covered_asset_ids": ["gb-x"],
+                                       "findings": [{"finding_id": "gb-x:1.2.3:80/tcp"}]}, **claim)))
+    before = everything_under(gws)
+    assert run(monkeypatch, gws, "rescan", "--cycle", "1", "--scan", str(forged)) == 1
+    assert "use greenbone pull or greenbone upload" in capsys.readouterr().err
+    assert everything_under(gws) == before
