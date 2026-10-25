@@ -203,7 +203,14 @@ stays with a person.
 Scanner comments and advisory prose are untrusted. Each finding's text goes to
 the guard model before triage. With no guard model configured, nothing is
 screened, so untrusted text is withheld from the models: each model sees a
-withheld notice in its place, and the structured fields.
+withheld notice in its place, and the structured fields. One exception: a
+Greenbone test name that is plain text (after collapsing spaces, only ASCII
+letters, digits, spaces and `.,:()/_+-`, at most 120 characters) is shown
+unscreened, so a no-CVE finding is not triaged blind. Plain text can still be
+worded as an instruction; the decision record carries
+`screening.nvt_name_unscreened_strict` and the dashboard says "the test name
+was shown because it is plain text". Any other name stays withheld. With a
+guard configured, the name is screened with the notes as before.
 
 ## Permissions
 
@@ -242,9 +249,19 @@ issues are opened only when both `GITHUB_TICKET_REPO` and `GITHUB_TOKEN` are set
 
 ## Enrichment cache
 
-The cache is `data/cache/` (CISA KEV, EPSS, NVD). It is read only and offline:
-the local edition never fetches it. The installer does not ship it. When a
-source is absent:
+A cycle reads the workspace's own cache, `DIR/enrichment/` (CISA KEV, EPSS,
+NVD), read only and offline. It is filled only by
+`python3 -S -m scripts.local --database DIR update-enrichment`, the one command
+that reaches the internet (or, with "Fetch enrichment automatically after an
+import" on, by the timer after a Greenbone import).
+
+- **Demo workspaces** (seeded findings, none from Greenbone): when the
+  workspace cache is empty, the cycle reads the bundled demo cache
+  `data/cache/` instead, as before. The installer does not ship it.
+- **Greenbone workspaces** never read `data/cache/`: their enrichment comes
+  only from the workspace cache, and is empty until `update-enrichment` runs.
+
+When a source is absent from the cache the cycle reads:
 
 - `cycle` logs `enrichment_absent` and prints a warning naming the cache path
   and the sources that were not checked.

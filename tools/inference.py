@@ -195,6 +195,30 @@ def _clean_name(value: Any) -> str:
     return text or "not known"
 
 
+#: Where the triage stage puts a test name it may show unscreened (D1). Set only by
+#: `engine.triage_cycle.screen_finding`, which removes any stored value first.
+PLAIN_NAME_KEY = "_nvt_name_plain"
+#: The strict rule for showing a test name with no guard configured: after the
+#: whitespace collapse, plain ASCII letters, digits and ``.,:()/_+-`` only, 1-120.
+_PLAIN_NAME_RE = re.compile(r"[A-Za-z0-9 .,:()/_+\-]{1,120}")
+#: Characters a raw name may hold before the collapse: the same set, so a tab,
+#: newline or any other whitespace or control character is never collapsed away.
+_PLAIN_RAW_RE = re.compile(r"[A-Za-z0-9 .,:()/_+\-]+")
+
+
+def plain_test_name(value: Any) -> Any:
+    """The test name, collapsed, if it is plain enough to show unscreened; else None.
+
+    Used only when no screening guard is configured: such a name cannot carry
+    a quote, bracket, backtick, line break or markup, so it reads as a label,
+    never as an instruction. Anything else stays withheld.
+    """
+    if not isinstance(value, str) or not _PLAIN_RAW_RE.fullmatch(value.strip()):
+        return None
+    text = " ".join(value.split())
+    return text if _PLAIN_NAME_RE.fullmatch(text) else None
+
+
 def _percent(qod: Any) -> str:
     return f"{qod}%" if isinstance(qod, (int, float)) and not isinstance(qod, bool) else "not known"
 
@@ -212,6 +236,13 @@ def render_finding(
     # A finding with a single cve_id and none of the Greenbone fields renders
     # byte-for-byte as it always has: any change here changes every inference
     # fingerprint in the cloud edition (see test_single_cve_cloud_render_is_unchanged).
+    plain_name = None
+    if not is_legacy_finding(finding):
+        # D1: a test name the triage stage marked plain under the strict rule
+        # (no guard configured). Re-checked here; anything else stays fenced.
+        candidate = finding.get(PLAIN_NAME_KEY)
+        plain_name = candidate if (isinstance(candidate, str)
+                                   and plain_test_name(candidate) == candidate) else None
     if is_legacy_finding(finding):
         head = [f"finding_id: {finding['finding_id']}", f"cve_id: {finding['cve_id']}"]
         asset_value = lambda key: asset.get(key)  # noqa: E731
@@ -220,6 +251,8 @@ def render_finding(
         head = [f"finding_id: {_flat(finding['finding_id'])}",
                 f"cve_ids: {_flat(', '.join(cves)) if cves else 'none (no CVE)'}",
                 f"qod: {_percent(finding.get('qod'))}"]
+        if plain_name is not None:
+            head.append(f"nvt_name: {plain_name}")
         asset_value = lambda key: _flat("not known" if asset.get(key) is None  # noqa: E731
                                         else asset.get(key))
     applicable = getattr(enrichment, "applicable", True)
@@ -259,9 +292,10 @@ def render_finding(
         # line break (or any control character) that starts a forged line.
         lines = [_flat(line) for line in lines]
     untrusted = finding.get("scanner_comment") or "(empty)"
-    if not is_legacy_finding(finding):
+    if not is_legacy_finding(finding) and plain_name is None:
         # The test name came out of scanner XML: untrusted, so it sits inside
-        # the fence on one capped line, never in the trusted header.
+        # the fence on one capped line, never in the trusted header (unless it
+        # passed the strict plain-text rule above).
         untrusted = f"nvt_name: {_clean_name(finding.get('nvt_name'))}\n{untrusted}"
     lines += [
         "",

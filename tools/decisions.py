@@ -79,6 +79,10 @@ def to_decision_document(
     if screening is not None:
         document["screening"] = {"screened": bool(screening.screened),
                                  "blocked": bool(screening.blocked)}
+        if getattr(screening, "nvt_name_unscreened_strict", False) is True:
+            # Local edition, no guard: the test name was shown under the strict
+            # plain-text rule. Absent everywhere else, so other records are unchanged.
+            document["screening"]["nvt_name_unscreened_strict"] = True
     return document
 
 

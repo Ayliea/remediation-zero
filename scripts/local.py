@@ -39,7 +39,7 @@ from tools import local_settings
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
 from tools.delivery import GitHubDelivery
-from tools.enrichment import EnrichmentCache, finding_cves
+from tools.enrichment import DEFAULT_CACHE_DIR as DEMO_CACHE_DIR, EnrichmentCache, finding_cves
 from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.gmp import GmpAuthError, GmpClient, GmpError, credentials_from_env
@@ -169,9 +169,15 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
         # Only pending findings (Ruling 29): re-triaging a decided one would
         # pay for the models again and restart its SLA clock. The cache is the
         # workspace's enrichment folder (filled by update-enrichment), read only
-        # and offline; absent, enrichment is empty.
+        # and offline. When it is empty and the workspace holds seeded demo
+        # findings, the bundled data/cache is read instead, as before Greenbone.
+        # A Greenbone workspace never reads data/cache; absent, enrichment is empty.
         cache_dir = workspace_cache_dir(ws.root)
         enrichment = EnrichmentCache(cache_dir)
+        if (not (enrichment.has_kev or enrichment.has_epss or enrichment.has_nvd)
+                and not holds_greenbone_findings(triage_docs)):
+            cache_dir = DEMO_CACHE_DIR
+            enrichment = EnrichmentCache(cache_dir)
         missing = [name for name, present in (('kev', enrichment.has_kev), ('epss', enrichment.has_epss),
                                               ('nvd', enrichment.has_nvd)) if not present]
         if missing:

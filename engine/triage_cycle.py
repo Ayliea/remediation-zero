@@ -16,7 +16,7 @@ Standard library only: nothing here imports a cloud SDK.
 """
 import json
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Optional
 
 from engine.ports import Ports
@@ -28,6 +28,7 @@ from tools.decisions import DecisionWriter
 from tools.docstore import AlreadyExists, FieldFilter
 from tools.enrichment import Enrichment, enrich_finding, finding_cves
 from tools.idempotency import derive_key
+from tools.guardrail import NoGuard
 from tools.model_armor import ArmorVerdict, apply_verdict
 from tools.ownership import Assignment, resolve_owner
 
@@ -235,6 +236,17 @@ def _record_failure(ports: Ports, finding_id: str, cycle: int, cycle_id: str,
              error=type(write_error).__name__)
 
 
+@dataclass(frozen=True)
+class StrictNameVerdict(ArmorVerdict):
+    """A no-guard verdict whose test name was shown because it is plain text (D1).
+
+    Local only: the decision record gains `nvt_name_unscreened_strict`, so the
+    record says the name was shown unscreened under the strict rule.
+    """
+
+    nvt_name_unscreened_strict: bool = True
+
+
 def screen_finding(ports: Ports, finding: dict, cycle: int,
                    enrichment: Enrichment) -> tuple[dict, Enrichment, ArmorVerdict]:
     """The untrusted-content boundary, crossed before any model sees the text.
@@ -254,9 +266,18 @@ def screen_finding(ports: Ports, finding: dict, cycle: int,
         boundary_text += f"\n\nNVT NAME\n{raw_name}"
     verdict = ports.guard.screen(boundary_text)
     finding = dict(finding)
+    finding.pop(inference.PLAIN_NAME_KEY, None)  # only this function may set it
     finding["scanner_comment"] = apply_verdict(raw_comment, verdict)
     if raw_name:
         finding["nvt_name"] = apply_verdict(raw_name, verdict)
+        # D1: with no guard configured at all (not a guard that failed), a test
+        # name that is plain text under the strict rule is shown in the header.
+        plain = inference.plain_test_name(raw_name)
+        if (isinstance(ports.guard, NoGuard) and plain is not None
+                and not inference.is_legacy_finding(finding)):
+            finding[inference.PLAIN_NAME_KEY] = plain
+            verdict = StrictNameVerdict(**{f.name: getattr(verdict, f.name)
+                                           for f in fields(ArmorVerdict)})
     enrichment = replace(
         enrichment, description=apply_verdict(raw_description, verdict)
     )

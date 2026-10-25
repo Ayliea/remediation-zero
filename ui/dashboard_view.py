@@ -86,6 +86,8 @@ def screening_text(row):
     if not isinstance(screening, dict):
         return "Whether scanner notes were checked was not recorded."
     if not screening.get("screened"):
+        if screening.get("nvt_name_unscreened_strict") is True:
+            return "Scanner notes were not checked; the test name was shown because it is plain text."
         return "Scanner notes were not checked, so they were withheld; triaged on limited evidence."
     if screening.get("blocked"):
         return "Scanner notes were flagged as unsafe and withheld from the models."

@@ -714,6 +714,10 @@ def test_accept_without_kev_source_with_approval_proceeds(ws, tmp_path):
 
 def test_cycle_warns_when_enrichment_cache_absent(ws, caplog, capsys):
     from scripts.local import run_local_cycle
+    # A Greenbone workspace: a demo one falls back to data/cache instead (R29 D2).
+    seeder = ws.docs_for("seed")
+    seeder.collection("findings").document(FINDING_ID).update({"source": "greenbone"})
+    seeder.close()
     missing = ws.root / "enrichment"
     caplog.set_level(logging.INFO)
     run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
@@ -1077,6 +1081,10 @@ def test_cycle_reads_the_workspace_cache(ws, capsys):
 
 def test_cycle_warning_names_the_workspace_cache_path(ws, capsys):
     from scripts.local import run_local_cycle
+    # A Greenbone workspace: a demo one falls back to data/cache instead (R29 D2).
+    seeder = ws.docs_for("seed")
+    seeder.collection("findings").document(FINDING_ID).update({"source": "greenbone"})
+    seeder.close()
     run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
     err = capsys.readouterr().err
     assert f"enrichment cache not found at {ws.root / 'enrichment'}" in err
