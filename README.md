@@ -55,7 +55,10 @@ environment. Setup, what is imported and skipped, how closure works, and the
 manual check against a real gvmd are in the
 [Greenbone connection guide](docs/development/greenbone.md).
 
-This is a synthetic preview, not an infrastructure scanner. The original cloud
+Demo data is synthetic. A connected install keeps its owner's scan data on that
+machine and sends it nowhere except the model endpoints the owner configures.
+Never commit a real report or a workspace. It is still not a scanner: it reads
+results from scanners you already run. The original cloud
 evidence console below remains a separate application; these local Settings do
 not configure that service.
 

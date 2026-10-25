@@ -6,7 +6,10 @@ and models you configure. It needs Python 3.12 or newer and nothing from pip,
 and it makes no cloud calls. Python 3.12 on Linux is the tested runtime;
 Windows and macOS have not been exercised.
 
-It is still a synthetic preview. Do not feed real client data into it yet.
+Demo data is synthetic. A connected install keeps its owner's scan data on that
+machine and sends it nowhere except the model endpoints the owner configures.
+Never commit a real report or a workspace. It is still not a scanner: it reads
+results from scanners you already run.
 
 ## Single-file installer
 

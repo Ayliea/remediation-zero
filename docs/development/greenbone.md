@@ -12,8 +12,19 @@ this connection takes its finished reports.
 
 ## Setup
 
-Use a new, empty workspace. A workspace that holds the seeded demo data
-refuses every Greenbone import, so demo and real findings never mix.
+Use a new, empty workspace folder (`DIR` below). A workspace that holds the
+seeded demo data refuses every Greenbone import, so demo and real findings
+never mix.
+
+Start the launcher on that workspace's saved records, not the demo examples:
+
+```bash
+python3 -S start-remediation-zero.py --saved --database DIR
+```
+
+(or set *Open by default* to *Saved records* in Settings). Pass the same
+`--database DIR` to every `scripts.local` command; without it a command uses
+a different default workspace.
 
 ### Credentials
 
@@ -47,8 +58,8 @@ list tasks** does, using the saved settings, and gives up after 5 seconds.
 From a terminal:
 
 ```bash
-python3 -S -m scripts.local greenbone test    # Connected / Signed in / Tasks listed
-python3 -S -m scripts.local greenbone tasks   # task_id  name, one per line
+python3 -S -m scripts.local --database DIR greenbone test    # Connected / Signed in / Tasks listed
+python3 -S -m scripts.local --database DIR greenbone tasks   # task_id  name, one per line
 ```
 
 ### Choosing tasks
@@ -59,7 +70,7 @@ one per line*. An empty list means nothing is pulled at all.
 ### Pulling
 
 ```bash
-python3 -S -m scripts.local greenbone pull    # one line per chosen task
+python3 -S -m scripts.local --database DIR greenbone pull    # one line per chosen task
 ```
 
 With *Run a cycle automatically every N minutes* above 0, the launcher pulls
@@ -68,7 +79,7 @@ class and the cycle still runs.
 
 *Fetch enrichment automatically after an import* is off by default. Then
 CISA KEV, EPSS and NVD data come only from
-`python3 -S -m scripts.local update-enrichment`, the one command that
+`python3 -S -m scripts.local --database DIR update-enrichment`, the one command that
 reaches the internet.
 
 ### Upload instead of pulling
@@ -77,8 +88,8 @@ A report exported from Greenbone as XML can be imported by hand, through the
 same checks as a pulled one:
 
 ```bash
-python3 -S -m scripts.local greenbone upload report.xml
-python3 -S -m scripts.local greenbone upload report.xml --add-task  # also choose its task
+python3 -S -m scripts.local --database DIR greenbone upload report.xml
+python3 -S -m scripts.local --database DIR greenbone upload report.xml --add-task  # also choose its task
 ```
 
 The dashboard's upload form does the same. It accepts the form a browser
@@ -103,10 +114,10 @@ credentials and make no connection.
   listing of it (more than 1 day before the listing time or 14 days after
   it). Scans running longer than 14 days are therefore refused. A refused
   report is recorded and skipped; the next report is still imported.
-- **Clock.** A report whose scan time is more than a day ahead of this
-  machine's clock is retried later if Greenbone's own listing time is also
-  ahead (Greenbone's clock is ahead); otherwise it is refused permanently as
-  malformed. If this machine's clock runs behind, valid reports can be
+- **Clock.** A report whose scan time is more than one day ahead of this
+  machine's clock is retried later only when Greenbone's listing time for it
+  is also more than one day ahead of this machine's clock (Greenbone's clock
+  is ahead); otherwise it is refused permanently as malformed. If this machine's clock runs behind, valid reports can be
   refused. Keep the clock synchronised.
 - **Results.** Log-level results (severity 0) and results below the
   quality-of-detection floor (default 70) are skipped and counted on the
@@ -124,9 +135,17 @@ task that first saw it, and only that task's reports may close or reopen
 it; another task's report on the same host changes nothing about it.
 
 When a newer report from the owning task covers the host and no longer
-shows the finding, the finding is resolved, and chase closes its ticket
-when the cycle after that pull runs. If a later report shows it again, it is reopened as
-regressed and chase reopens the ticket. A host that is absent or did not
+shows the finding, the finding is marked resolved. If a later report shows
+it again, it is reopened as regressed.
+
+Greenbone assets arrive without an owner. A finding on an unowned asset is
+triaged, then goes to the human queue as needing an owner; no ticket is
+opened. Until an owner is recorded, closure shows as the finding marked
+resolved: no ticket exists, so there is nothing to close. Once an asset has
+an owner, chase opens a ticket for its findings, closes it in the cycle that
+follows the resolving pull, and reopens it on a regression.
+
+A host that is absent or did not
 finish closes nothing. A report that could not be tied to its hosts closes
 nothing either; its card says it "could not be trusted for coverage".
 
@@ -137,30 +156,37 @@ a real one before relying on the connection, and again after a Greenbone
 upgrade. **Never commit a real report**, or anything copied from one, to
 this repository.
 
-1. Create a new, empty workspace folder outside the repository and start
-   the launcher with `--database` pointing at it.
+1. Create a new, empty workspace folder `DIR` outside the repository and
+   start the launcher on its saved records:
+   `python3 -S start-remediation-zero.py --saved --database DIR`.
 2. Set `RZ_GREENBONE_USERNAME` and `RZ_GREENBONE_PASSWORD` for a read-only
    account, save the connection in Settings, and click **Test connection
    and list tasks**. Expect three "yes" lines and the task count.
-3. Run `greenbone tasks`. Confirm every task the account can see is listed
+3. Run `python3 -S -m scripts.local --database DIR greenbone tasks`. Confirm every task the account can see is listed
    (this checks that gvmd accepts `get_tasks` with `filter="rows=-1"` and
    returns all tasks, not one page).
-4. Choose one task that has at least two Done reports. Run
-   `greenbone pull`. Expect `imported` for that task, and only its newest
-   Done report imported.
+4. Choose one task that has at least two Done reports and save it in
+   Settings. Run `python3 -S -m scripts.local --database DIR greenbone pull
+   --cycle 1`. Expect `imported` for that task, and only its newest Done
+   report imported. Then run `python3 -S -m scripts.local --database DIR
+   cycle --cycle 1` (this calls your configured models) to triage it.
 5. Open the dashboard's **My infrastructure** view. Check the task's card:
    last imported report, its scan end, what it changed, skipped counts.
    Compare the findings, hosts and ports with the same report in
    Greenbone's web interface.
-6. Run `greenbone pull` again. Expect `nothing_new` (or
-   `already_imported_this_cycle` within the same cycle).
+6. Run `python3 -S -m scripts.local --database DIR greenbone pull --cycle 1`
+   again. Expect `already_imported_this_cycle`. With `--cycle 2`, expect
+   `nothing_new`.
 7. Run a new scan of that task in Greenbone, after fixing or switching off
    one detected service on a scanned host. When the report is Done, run
-   `greenbone pull` and then a cycle. Expect that finding resolved and its
-   ticket closed; nothing on hosts the scan did not finish is closed.
-8. Stop a scan of the task partway. Pull. Expect the Stopped report shown
-   as skipped, never imported.
-9. Search the workspace folder, its settings file, and the launcher's
+   `python3 -S -m scripts.local --database DIR greenbone pull --cycle 2`
+   and then `python3 -S -m scripts.local --database DIR cycle --cycle 2`.
+   Expect that finding marked resolved, with no ticket to close (the asset
+   has no owner), and nothing closed on hosts the scan did not finish.
+8. Stop a scan of the task partway. Run
+   `python3 -S -m scripts.local --database DIR greenbone pull --cycle 3`.
+   Expect the Stopped report shown as skipped, never imported.
+9. Search `DIR`, its settings file (`DIR.settings.json`, beside it), and the launcher's
    terminal output for the username and password. Expect no match.
 10. Confirm the protocol and report assumptions below hold, and record any
     that do not. A mismatch is a bug to fix in `tools/gmp.py` or

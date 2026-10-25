@@ -217,7 +217,8 @@ def test_greenbone_lifecycle_end_to_end(tmp_path, gvmd, capsys, caplog):  # noqa
     assert rows(ws, "tickets")[LOG4J]["status"] == "open"  # chase has not run yet
     second = cycle(2)
     assert second["outcomes"] == {}  # decided findings are not triaged again
-    assert second["chase"].get("close_ticket") == 1
+    # The no-CVE ticket was opened a day ago: not yet due for a nudge.
+    assert second["chase"] == {"close_ticket": 1, "wait": 1}
     ticket = rows(ws, "tickets")[LOG4J]
     assert ticket["status"] == "resolved" and ticket["resolved_by_scan"] == a2
     assert [e["action"] for e in ticket["history"]] == ["open_ticket", "close_ticket"]
@@ -232,7 +233,8 @@ def test_greenbone_lifecycle_end_to_end(tmp_path, gvmd, capsys, caplog):  # noqa
     assert rows(ws, "scanner_state")[TASK_A]["last_counts"]["regressed"] == 1
     third = cycle(3)
     assert third["outcomes"] == {}
-    assert third["chase"].get("open_ticket") == 1
+    # Two days after it opened, the no-CVE ticket is nudged (a 7-day SLA nudges every 1.75 days).
+    assert third["chase"] == {"open_ticket": 1, "nudge": 1}
     ticket = rows(ws, "tickets")[LOG4J]
     assert ticket["status"] == "open"
     assert [e["action"] for e in ticket["history"]] == ["open_ticket", "close_ticket", "open_ticket"]
@@ -260,7 +262,7 @@ def test_greenbone_lifecycle_end_to_end(tmp_path, gvmd, capsys, caplog):  # noqa
         page = render(snapshot(store), "infrastructure", chosen_tasks=[TASK_A, TASK_B])
     finally:
         store.close()
-    assert "Stopped" in page and a4 in page
+    assert f"<li>Stopped: {a4}</li>" in page
 
     # Read-only GMP: nothing but authenticate and get_reports was ever sent.
     assert {ET.fromstring(raw).tag for raw in server.requests} == {"authenticate", "get_reports"}
