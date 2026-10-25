@@ -55,6 +55,7 @@ def test_cves_are_collected_and_absent_cves_are_empty():
 def test_malformed_result_is_rejected_with_a_reason_not_guessed():
     report = parse_report(FIX("report_basic.xml"))
     assert len(report.rejected) == 1 and "severity" in report.rejected[0][1]
+    assert report.rejected[0][2] == "192.0.2.10"
     assert len(report.results) == 5
 
 

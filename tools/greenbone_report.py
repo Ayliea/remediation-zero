@@ -13,7 +13,7 @@ UTF-16/32, which would hide a DOCTYPE from the byte check), or if it contains
 `<!DOCTYPE` or `<!ENTITY` in any case. Refusing DOCTYPEs removes entity
 expansion and external entities outright, so the standard-library parser is
 safe to use. A result with a value that does not parse is not guessed at: it is
-listed in `rejected` with a reason. QoD and log-level filtering are not done
+listed in `rejected` with a reason and, when readable, the host ip. QoD and log-level filtering are not done
 here; this module returns everything structurally valid.
 
 Standard library only. No clock is read here.
@@ -66,7 +66,7 @@ class GreenboneReport:
     scan_status: str
     hosts: tuple[ScannedHost, ...]
     results: tuple[Result, ...]
-    rejected: tuple[tuple[str, str], ...]
+    rejected: tuple[tuple[str, str, Optional[str]], ...]
 
 
 def refuse_unsafe_xml(data: bytes, *, max_bytes: int) -> None:
@@ -124,27 +124,27 @@ def _summary(tags: str) -> str:
 
 
 def _result(node: ET.Element):
-    """Return (Result, None) or (None, (result_id_or_?, reason))."""
+    """Return (Result, None) or (None, (result_id_or_?, reason, ip_or_None))."""
     rid = node.get("id") or ""
     label = rid or "?"
     host = node.find("host")
     ip = _text(host)
     if not rid or not ip:
-        return None, (label, "result has no id or no host address")
+        return None, (label, "result has no id or no host address", ip or None)
     nvt = node.find("nvt")
     oid = (nvt.get("oid") or "").strip() if nvt is not None else ""
     if not oid:
-        return None, (label, "result has no NVT oid")
+        return None, (label, "result has no NVT oid", ip)
     try:
         severity = float(_child_text(node, "severity"))
         if not math.isfinite(severity):
             raise ValueError
     except ValueError:
-        return None, (label, "severity is not a number")
+        return None, (label, "severity is not a number", ip)
     try:
         qod = int(_text(node.find("qod/value")))
     except ValueError:
-        return None, (label, "qod is not an integer")
+        return None, (label, "qod is not an integer", ip)
     port_text = _child_text(node, "port")
     port, _, proto = port_text.partition("/")
     asset = host.find("asset") if host is not None else None

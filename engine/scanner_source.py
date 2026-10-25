@@ -36,6 +36,7 @@ class NormalisedScan:
     assets: tuple[dict, ...]
     findings: tuple[dict, ...]
     covered_asset_ids: tuple[str, ...]
+    withheld_finding_ids: tuple[str, ...]
     skipped: dict[str, int]
 
 
@@ -92,8 +93,16 @@ def _finding(result: Result, asset_id: str, scan_id: str, task_id: str) -> dict:
 
 
 def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD_FLOOR) -> NormalisedScan:
+    """Reduce a report to assets, findings and coverage, failing closed.
+
+    A skipped (log, below-floor) result means the scanner saw something there,
+    so its finding ID is withheld: absence of it must not be read as a fix. A
+    parser-rejected result uncovers its host (or every host, when it cannot be
+    attributed), because a result we could not read may be the one that proves
+    the finding is still present.
+    """
     scan_id = report.report_id
-    assets, covered, by_ip = [], [], {}
+    assets, by_ip = [], {}
     for host in report.hosts:
         asset_id, origin = asset_key(SOURCE, host.asset_id, host.ip)
         by_ip[host.ip] = (asset_id, host.finished)
@@ -108,21 +117,29 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
             "first_seen_scan": scan_id,
             "last_seen_scan": scan_id,
         })
-        if host.finished and asset_id not in covered:
-            covered.append(asset_id)
 
-    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected)}
+    unattributed = any(ip is None for _, _, ip in report.rejected)
+    uncovered = {by_ip[ip][0] for _, _, ip in report.rejected if ip in by_ip}
+    covered = [] if unattributed else [
+        aid for aid, finished in by_ip.values() if finished and aid not in uncovered
+    ]
+    covered = list(dict.fromkeys(covered))
+    covered_set = set(covered)
+
+    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected), "not_finished": 0}
     findings: dict[str, dict] = {}
+    withheld: dict[str, None] = {}
     for result in report.results:
-        if result.severity <= 0:
-            skipped["log"] += 1
-        elif result.qod < qod_floor:
-            skipped["below_qod"] += 1
+        asset_id, finished = by_ip.get(result.ip, (None, False))
+        is_log = result.severity <= 0
+        if is_log or result.qod < qod_floor:
+            skipped["log" if is_log else "below_qod"] += 1
+            if asset_id in covered_set:
+                withheld[finding_key(asset_id, result.nvt_oid, _port_spec(result))] = None
+        elif asset_id not in covered_set:
+            if asset_id is None or not finished:
+                skipped["not_finished"] += 1  # host unfinished or unknown: cannot be reconciled
         else:
-            asset_id, finished = by_ip.get(result.ip, (None, False))
-            if asset_id is None or not finished:  # host not finished: cannot be reconciled
-                skipped["rejected"] += 1
-                continue
             finding = _finding(result, asset_id, scan_id, report.task_id)
             kept = findings.get(finding["finding_id"])
             if kept is None or finding["scanner_severity"] > kept["scanner_severity"]:
@@ -135,6 +152,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         assets=tuple(assets),
         findings=tuple(findings.values()),
         covered_asset_ids=tuple(covered),
+        withheld_finding_ids=tuple(withheld),
         skipped=skipped,
     )
 
@@ -144,6 +162,7 @@ def to_rescan_input(scan: NormalisedScan) -> dict:
         "scan_id": scan.scan_id,
         "covered_asset_ids": list(scan.covered_asset_ids),
         "findings": list(scan.findings),
+        "withheld_finding_ids": list(scan.withheld_finding_ids),
         "task_id": scan.task_id,
         "source": scan.source,
         "report_status": scan.report_status,
