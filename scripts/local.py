@@ -38,7 +38,7 @@ from tools.delivery import GitHubDelivery
 from tools.enrichment import EnrichmentCache, finding_cves
 from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
-from tools.gmp import GmpClient, GmpError, credentials_from_env
+from tools.gmp import GmpAuthError, GmpClient, GmpError, credentials_from_env
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
@@ -252,24 +252,38 @@ class _View:
 
 
 def scanner_probe(settings, *, test=False):
-    """What the Scanner section learns from Greenbone, from the saved settings.
+    """What the Scanner section learns from Greenbone, from the saved settings. Only the
+    token-protected scanner_test POST calls this with test=True; a GET never contacts Greenbone.
 
     Never raises, never returns server text: a failure is reported as its class name only.
-    With credentials unset or no connection saved, no connection is attempted."""
+    With credentials unset or no connection saved, no connection is attempted. The whole
+    session (connect, sign-in, task list) is bounded by one deadline, because this server
+    handles one request at a time."""
     try:
         username, password = credentials_from_env(os.environ)
     except GmpError:
         return {'state': 'unset', 'test': test}
+    if not test:
+        return {'state': 'idle'}
     try:
         target = local_settings.gmp_target(settings, timeout=SCANNER_PAGE_TIMEOUT)
     except ValueError:
         return {'state': 'unconfigured', 'test': test}
     try:
-        with GmpClient(target, username, password) as client:
+        with GmpClient(target, username, password, total_timeout=SCANNER_PAGE_TIMEOUT) as client:
             tasks = client.list_tasks()
-    except Exception as error:
+    except GmpAuthError:
+        return {'state': 'auth', 'test': test}
+    except Exception as error:  # GmpError, OSError or anything else: the class name only
         return {'state': 'error', 'error': type(error).__name__, 'test': test}
     return {'state': 'ok', 'tasks': tasks, 'test': test}
+
+
+MAX_CHOSEN_TASKS = 500
+
+
+class TooManyTasks(ValueError):
+    pass
 
 
 def _scanner_values(fields, values):
@@ -287,6 +301,8 @@ def _scanner_values(fields, values):
         line = line.strip().lower()
         if line and line not in task_ids:
             task_ids.append(line)
+    if len(task_ids) > MAX_CHOSEN_TASKS:
+        raise TooManyTasks()
     return dict(transport=fields['transport'], socket_path=fields['socket_path'], host=fields['host'],
                 ca_file=fields['ca_file'], task_ids=task_ids, auto_enrichment='auto_enrichment' in fields, **ints)
 
@@ -347,13 +363,15 @@ def handler(store, demo, config_path=None, approve_command=None):
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if (not 0 < length <= 8192 or self.headers.get('Transfer-Encoding')
+                if (not 0 < length <= 65536 or self.headers.get('Transfer-Encoding')
                         or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
                     raise ValueError()
                 raw = self.rfile.read(length).decode('utf-8')
                 # Only the Scanner form repeats a field (one task_ids per ticked task) and may be longer.
                 scanner_form = 'section=scanner' in raw.split('&')
-                fields = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=200 if scanner_form else 20)
+                if length > 8192 and not scanner_form:
+                    raise ValueError()
+                fields = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=1100 if scanner_form else 20)
                 if any(len(v) != 1 for k, v in fields.items() if not (scanner_form and k == 'task_ids')):
                     raise ValueError()
                 fields = {k: '\n'.join(v) if k == 'task_ids' else v[0] for k, v in fields.items()}
@@ -393,6 +411,9 @@ def handler(store, demo, config_path=None, approve_command=None):
                 else:
                     raise ValueError()
                 local_settings.save(config_path, values)
+            except TooManyTasks:
+                self.send_error(400, 'At most 500 scan tasks can be chosen. Nothing was saved.')
+                return
             except (ValueError, UnicodeError):
                 self.send_error(400, 'Invalid preferences. Nothing was saved. Check the endpoint, model, port, and interval.')
                 return

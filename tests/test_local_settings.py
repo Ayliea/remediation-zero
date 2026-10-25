@@ -129,9 +129,10 @@ def app(tmp_path, monkeypatch):
         obj.send_response = status.append
         obj.send_header = lambda k, v: headers.update({k:v})
         obj.end_headers = lambda: None
-        obj.send_error = lambda code, *args: status.append(code)
+        obj.send_error = lambda code, *args: (status.append(code), request.errors.append(args))
         getattr(obj, 'do_' + method)()
         return status[0], obj.wfile.getvalue().decode(), headers
+    request.errors = []
     return path, request
 
 
@@ -453,7 +454,9 @@ def test_v2_settings_upgrade_to_v3_with_scanner_defaults(tmp_path):
     assert loaded['version'] == 3
     assert loaded['scanner'] == SCANNER_DEFAULTS
     assert (loaded['port'], loaded['mode'], loaded['roles']['proposer']['model']) == (8090, 'saved', 'kept')
-    # The upgrade is written back atomically, through save(), leaving no temp file behind.
+    # load() never writes: the file is still v2 until the next save, as for v1.
+    assert json.loads(path.read_text())['version'] == 2
+    config.save(path, loaded)
     on_disk = json.loads(path.read_text())
     assert on_disk['version'] == 3 and on_disk['scanner'] == SCANNER_DEFAULTS
     assert list(tmp_path.iterdir()) == [path]
@@ -586,8 +589,8 @@ class FakeClient:
     tasks = []
     error = None
 
-    def __init__(self, target, username, password):
-        self.target, self.username, self.password = target, username, password
+    def __init__(self, target, username, password, total_timeout=None):
+        self.target, self.username, self.password, self.total_timeout = target, username, password, total_timeout
         self.skipped_tasks = 0
         FakeClient.instances.append(self)
 
@@ -616,6 +619,10 @@ def gmp(app, monkeypatch):
 
 def scanner_page(request):
     return request(route='/?view=settings&section=scanner')
+
+
+def scanner_test_page(request):
+    return request('POST', '/settings', dict(token=_token(request), section='scanner_test'))
 
 
 def _task_inputs(body):
@@ -674,14 +681,14 @@ def test_scanner_section_never_shows_the_password(gmp):
     token = _token(request)
     assert SECRET not in request('POST', '/settings', dict(token=token, section='scanner_test'))[1]
     FakeClient.error = RuntimeError(f'boom {SECRET}')
-    assert SECRET not in scanner_page(request)[1]
+    assert SECRET not in scanner_test_page(request)[1]
     assert SECRET not in path.read_text()
 
 
 def test_task_list_is_read_with_a_short_timeout_and_names_are_escaped(gmp):
     path, request = gmp
     config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_2]))
-    body = scanner_page(request)[1]
+    body = scanner_test_page(request)[1]
     assert len(FakeClient.instances) == 1
     client = FakeClient.instances[0]
     assert client.target.timeout == 5.0 and (client.username, client.password) == ('reader', SECRET)
@@ -703,7 +710,7 @@ def test_ticked_and_typed_tasks_are_united_and_deduplicated(gmp):
 def test_a_chosen_task_greenbone_no_longer_lists_stays_chosen(gmp):
     path, request = gmp
     config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_3]))
-    body = scanner_page(request)[1]
+    body = scanner_test_page(request)[1]
     assert 'not found on Greenbone' in body
     assert any(TASK_3 in t and 'checked' in t for t in _task_inputs(body))
 
@@ -713,7 +720,7 @@ def test_unreachable_greenbone_shows_only_the_error_class(gmp):
     config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_1]))
     from tools.gmp import GmpError
     FakeClient.error = GmpError('server said: ' + SECRET + ' <script>alert(1)</script>')
-    status, body, _ = scanner_page(request)
+    status, body, _ = scanner_test_page(request)
     assert status == 200
     assert 'Could not reach Greenbone: GmpError' in body
     assert 'server said' not in body and 'alert(1)' not in body
@@ -728,9 +735,9 @@ def test_test_connection_uses_saved_settings_and_never_saves(gmp):
     token = _token(request)
     status, body, _ = request('POST', '/settings', dict(token=token, section='scanner_test'))
     assert status == 200 and path.read_bytes() == before
-    assert 'Connected' in body and 'Authenticated' in body and '2 tasks' in body
+    assert 'Connected: yes' in body and 'Signed in: yes' in body and 'Tasks listed: yes (2)' in body
     assert 'saved settings' in body
-    assert FakeClient.instances[0].target.timeout == 5.0
+    assert FakeClient.instances[0].target.timeout == 5.0 and FakeClient.instances[0].total_timeout == 5.0
     assert FakeClient.instances[0].target.socket_path == '/run/gvmd/gvmd.sock'
     FakeClient.error = RuntimeError('zq-secret-text')
     body = request('POST', '/settings', dict(token=token, section='scanner_test'))[1]
@@ -805,8 +812,134 @@ def test_task_list_from_a_real_fake_gvmd_over_a_unix_socket(app, fake_gvmd, monk
     monkeypatch.setenv(PASS_VAR, PASSWORD)
     path, request = app
     config.save(path, with_scanner(socket_path=sock_path))
-    body = scanner_page(request)[1]
+    body = scanner_test_page(request)[1]
     assert 'Weekly LAN' in body and 'DMZ' in body and TASK_A in body and TASK_B in body
     assert PASSWORD not in body
     sent = b''.join(server.requests)
     assert b'get_tasks' in sent and b'authenticate' in sent
+
+
+# --- review fixes: no GET contacts Greenbone, bounded sessions, limits --------------------------
+
+def test_get_scanner_section_never_contacts_greenbone(app, monkeypatch):
+    from scripts import local
+    monkeypatch.setenv(USER_VAR, 'reader')
+    monkeypatch.setenv(PASS_VAR, SECRET)
+    monkeypatch.setattr(local, 'GmpClient', lambda *a, **k: pytest.fail('a GET contacted Greenbone'))
+    path, request = app
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_1]))
+    for route in ('/?view=settings&section=scanner', '/?view=settings&section=scanner&saved=1', '/?view=settings'):
+        status, body, _ = request(route=route)
+        assert status == 200
+    body = scanner_page(request)[1]
+    assert TASK_1 in body  # saved chosen IDs are shown from the settings file
+    assert 'Test connection and list tasks' in body
+    assert 'name="section" value="scanner_test"' in body
+
+
+def test_scanner_test_lists_tasks_as_tickboxes(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_2, TASK_3]))
+    status, body, _ = scanner_test_page(request)
+    assert status == 200
+    assert 'Connected: yes' in body and 'Signed in: yes' in body and 'Tasks listed: yes' in body
+    ticks = _task_inputs(body)
+    assert any(TASK_1 in t and 'checked' not in t for t in ticks)
+    assert any(TASK_2 in t and 'checked' in t for t in ticks)
+    assert any(TASK_3 in t and 'checked' in t for t in ticks)
+    assert 'not found on Greenbone' in body
+    assert 'name="section" value="scanner"' in body  # the save form is on the result page
+    assert config.load(path)['scanner']['task_ids'] == [TASK_2, TASK_3]
+
+
+def test_wrong_credentials_are_signed_in_no(gmp):
+    from tools.gmp import GmpAuthError
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    FakeClient.error = GmpAuthError('authenticate failed: ' + SECRET)
+    body = scanner_test_page(request)[1]
+    assert 'Connected: yes' in body and 'Signed in: no' in body and 'Tasks listed: no' in body
+    assert 'Could not reach Greenbone' not in body and SECRET not in body
+
+
+@pytest.mark.parametrize('error', [OSError('zq-secret-text'), __import__('tools.gmp', fromlist=['GmpError']).GmpError('zq-secret-text')])
+def test_other_failures_are_could_not_reach_with_the_class(gmp, error):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    FakeClient.error = error
+    body = scanner_test_page(request)[1]
+    assert f'Could not reach Greenbone: {type(error).__name__}' in body
+    assert 'zq-secret-text' not in body and 'Signed in: no' in body
+
+
+def test_more_than_500_chosen_tasks_are_refused(gmp):
+    path, request = gmp
+    token = _token(request)
+
+    def ids(n):
+        return [f'{i:08x}-0000-4000-8000-000000000000' for i in range(n)]
+    pairs = list(scanner_form(token).items()) + [('task_ids', i) for i in ids(501)]
+    assert request('POST', '/settings', pairs)[0] == 400
+    assert not path.exists()
+    pairs = list(scanner_form(token, task_ids='\n'.join(ids(250))).items()) + [('task_ids', i) for i in ids(500)[250:]]
+    assert request('POST', '/settings', pairs)[0] == 303  # 500 is allowed, and exceeds the old 8 KiB body cap
+    assert len(config.load(path)['scanner']['task_ids']) == 500
+
+
+def test_the_refusal_message_is_explicit(gmp):
+    path, request = gmp
+    pairs = list(scanner_form(_token(request)).items()) + [('task_ids', f'{i:08x}-0000-4000-8000-000000000000') for i in range(501)]
+    assert request('POST', '/settings', pairs)[0] == 400
+    assert 'At most 500 scan tasks can be chosen.' in request.errors[-1][0]
+    assert not path.exists()
+
+
+def test_large_unchosen_list_is_truncated_with_a_note(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_1]))
+    FakeClient.tasks = [{'task_id': f'{i:08x}-0000-4000-8000-000000000000', 'name': f'Task {i}'} for i in range(150)] \
+        + [{'task_id': TASK_1, 'name': 'Chosen one'}]
+    body = scanner_test_page(request)[1]
+    assert 'Showing 101 of 151 tasks.' in body
+    assert any(TASK_1 in t and 'checked' in t for t in _task_inputs(body))
+    assert len([t for t in _task_inputs(body) if 'type="checkbox"' in t]) == 101
+
+
+def test_an_account_with_no_tasks_says_so(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    FakeClient.tasks = []
+    body = scanner_test_page(request)[1]
+    assert 'This account has no tasks.' in body and 'Tasks listed: yes (0)' in body
+
+
+def test_a_trickling_gvmd_cannot_hold_the_settings_page(app, tmp_path_factory, fake_endpoints, monkeypatch):
+    import socket as socket_module
+    import time
+    from tests.test_gmp import FakeGvmd, OK_AUTH, USER, PASSWORD
+
+    def trickle(conn):
+        for byte in OK_AUTH:
+            conn.sendall(bytes([byte]))
+            time.sleep(0.4)  # slow enough that the whole reply takes about 20 s
+        return None
+
+    def handler_fn(tag, raw):
+        return [trickle]
+    sock_path = str(tmp_path_factory.mktemp('g') / 'gvmd.sock')
+    listener = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    listener.bind(sock_path)
+    listener.listen(4)
+    fake_endpoints.unix(sock_path)
+    server = FakeGvmd(listener, handler_fn)
+    try:
+        monkeypatch.setenv(USER_VAR, USER)
+        monkeypatch.setenv(PASS_VAR, PASSWORD)
+        path, request = app
+        config.save(path, with_scanner(socket_path=sock_path))
+        started = time.monotonic()
+        status, body, _ = scanner_test_page(request)
+        assert time.monotonic() - started < 7
+        assert status == 200 and 'Could not reach Greenbone: GmpError' in body
+    finally:
+        server.close()

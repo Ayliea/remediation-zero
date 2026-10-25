@@ -88,8 +88,11 @@ def _uuid(value: str, what: str) -> str:
 
 
 class GmpClient:
-    def __init__(self, target: GmpTarget, username: str, password: str):
+    def __init__(self, target: GmpTarget, username: str, password: str,
+                 total_timeout: Optional[float] = None):
         self._target = target
+        self._total_timeout = total_timeout  # one absolute deadline for the whole session, if set
+        self._total_deadline: Optional[float] = None
         self._username = username
         self._password = password
         self._sock: Optional[socket.socket] = None
@@ -102,7 +105,21 @@ class GmpClient:
 
     __str__ = __repr__
 
+    def _cap(self, deadline: float) -> float:
+        """A per-phase deadline, never later than the session's total deadline."""
+        if self._total_deadline is None:
+            return deadline
+        return min(deadline, self._total_deadline)
+
+    def _remaining(self, per_op: float, deadline: float) -> float:
+        remaining = self._cap(deadline) - time.monotonic()
+        if remaining <= 0:
+            raise GmpError("the GMP session ran out of time")
+        return min(per_op, remaining)
+
     def __enter__(self) -> "GmpClient":
+        if self._total_timeout is not None:
+            self._total_deadline = time.monotonic() + self._total_timeout
         try:
             self._connect()
             self._authenticate()
@@ -127,14 +144,14 @@ class GmpClient:
     def _connect(self) -> None:
         target = self._target
         # One overall deadline for connect and handshake, as for every request.
-        deadline = time.monotonic() + target.timeout * _DEADLINE_FACTOR
+        deadline = self._cap(time.monotonic() + target.timeout * _DEADLINE_FACTOR)
         try:
             if target.transport == "unix":
                 if not target.socket_path:
                     raise GmpError("a unix GMP target needs a socket path")
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
-                    sock.settimeout(target.timeout)
+                    sock.settimeout(self._remaining(target.timeout, deadline))
                     sock.connect(target.socket_path)
                 except BaseException:
                     sock.close()
@@ -255,12 +272,12 @@ class GmpClient:
         sock = self._sock
         if sock is None:
             raise GmpError("not connected to gvmd")
-        deadline = time.monotonic() + self._target.timeout * _DEADLINE_FACTOR
+        deadline = self._cap(time.monotonic() + self._target.timeout * _DEADLINE_FACTOR)
         try:
             try:
-                sock.settimeout(self._target.timeout)
+                sock.settimeout(self._remaining(self._target.timeout, deadline))
                 sock.sendall(xml.encode("utf-8"))
-            except (OSError, ssl.SSLError) as exc:
+            except (OSError, ssl.SSLError) as exc:  # GmpError (out of time) passes through
                 raise GmpError(f"writing to gvmd failed ({type(exc).__name__})") from None
             root, raw = self._read_response(deadline, max_bytes)
             self._check_status(command, root)

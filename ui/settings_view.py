@@ -94,7 +94,7 @@ def _scanner_body(cfg, probe, form, token, e):
         f'<label>Port (TLS)<input name="port" type="number" min="1" max="65535" required value="{e(cfg["port"])}"></label>'
         f'<label>CA certificate file (TLS, optional)<input name="ca_file" maxlength="1024" value="{e(cfg["ca_file"])}" placeholder="/etc/ssl/gvm-ca.pem"></label>'
         f'{ticks}'
-        f'<label>Task IDs, one per line<textarea name="task_ids" rows="4" maxlength="4096">{e(typed)}</textarea></label>'
+        f'<label>Task IDs, one per line<textarea name="task_ids" rows="4" maxlength="20000">{e(typed)}</textarea></label>'
         '<p>Only the tasks you choose are imported. An empty list pulls nothing.</p>'
         f'<label>Quality-of-detection floor (0-100)<input name="qod_floor" type="number" min="0" max="100" step="1" required value="{e(cfg["qod_floor"])}"></label>'
         f'<label class="check"><input name="auto_enrichment" type="checkbox" value="yes" {"checked" if cfg["auto_enrichment"] else ""}> Fetch enrichment automatically after an import</label>'
@@ -107,10 +107,15 @@ def _scanner_body(cfg, probe, form, token, e):
         body += '<p class="notice">Save a socket path (Unix) or host (TLS) to list the account\'s tasks.</p>'
     elif state == 'error':
         body += f'<p class="notice">Could not reach Greenbone: {e(probe.get("error", "Error"))}. You can still type task IDs by hand.</p>'
+    elif state == 'auth':
+        body += '<p class="notice">Greenbone did not accept the credentials in RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD. You can still type task IDs by hand.</p>'
     if probe.get('test'):
-        if state == 'ok':
-            body += f'<p role="status" class="notice">Connected: yes. Authenticated: yes. Listed {len(tasks)} tasks.</p>'
+        yes = lambda ok: 'yes' if ok else 'no'
+        if state in {'ok', 'auth', 'error'}:
+            count = f' ({len(tasks)})' if state == 'ok' else ''
+            body += (f'<ul role="status" class="notice"><li>Connected: {yes(state in {"ok", "auth"})}</li>'
+                     f'<li>Signed in: {yes(state == "ok")}</li><li>Tasks listed: {yes(state == "ok")}{count}</li></ul>')
         body += '<p>The test used the saved settings, not unsaved changes to the form. Nothing was saved.</p>'
     body += (f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}">'
-             '<input type="hidden" name="section" value="scanner_test"><div class="row"><button type="submit">Test connection</button></div></form>')
+             '<input type="hidden" name="section" value="scanner_test"><div class="row"><button type="submit">Test connection and list tasks</button></div></form>')
     return body

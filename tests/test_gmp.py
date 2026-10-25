@@ -502,3 +502,28 @@ def test_connect_is_bounded_by_the_overall_deadline(fake_endpoints, tmp_path_fac
     for conn in held:
         conn.close()
     listener.close()
+
+
+def test_total_timeout_bounds_a_multi_request_session(unix_target):
+    """Each reply is within the per-operation timeout, but together they exceed total_timeout."""
+    def slow(conn):
+        time.sleep(0.4)
+
+    def handler(tag, raw):
+        if tag == "authenticate":
+            return [slow, OK_AUTH]
+        return [slow, tasks_response((TASK_A, "Weekly LAN"))]
+    target, _ = unix_target(handler, timeout=5.0)
+    started = time.monotonic()
+    with pytest.raises(GmpError):
+        with GmpClient(target, USER, PASSWORD, total_timeout=0.6) as client:
+            client.list_tasks()
+    assert time.monotonic() - started < 2.0
+
+
+def test_total_timeout_unset_changes_nothing(unix_target):
+    target, _ = unix_target(default_handler())
+    with GmpClient(target, USER, PASSWORD, total_timeout=None) as client:
+        assert len(client.list_tasks()) == 2
+    with GmpClient(target, USER, PASSWORD, total_timeout=5.0) as client:
+        assert len(client.list_tasks()) == 2

@@ -131,12 +131,7 @@ def load(path):
     if isinstance(raw, dict) and 'version' not in raw:
         raw = _upgrade_v1(raw)
     elif isinstance(raw, dict) and raw.get('version') == 2:
-        upgraded = _upgrade_v2(raw)
-        try:
-            save(path, upgraded)  # atomic write-back; a read-only folder still loads
-        except OSError:
-            pass
-        return upgraded
+        return _upgrade_v2(raw)  # in memory only; the next save writes v3, as for v1
     return validate(raw)
 
 
