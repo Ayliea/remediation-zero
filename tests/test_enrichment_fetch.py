@@ -247,7 +247,7 @@ def _load_script():
     return module
 
 
-def test_fetch_script_prints_its_lines_and_always_exits_zero(tmp_path, monkeypatch, capsys):
+def test_fetch_script_prints_its_lines_and_exit_code_follows_kev_and_epss(tmp_path, monkeypatch, capsys):
     script = _load_script()
     findings = tmp_path / "findings.json"
     findings.write_text(json.dumps([{"cve_id": f"CVE-2021-{n:05d}"} for n in range(1, 12)]))
@@ -268,5 +268,15 @@ def test_fetch_script_prints_its_lines_and_always_exits_zero(tmp_path, monkeypat
     assert script.main() == 0
     out = capsys.readouterr().out
     assert "KEV :" in out and "EPSS:" not in out and "NVD :" not in out
-    monkeypatch.setattr(script, "urllib_get", lambda *a, **k: (_ for _ in ()).throw(OSError("down")))
+    capsys.readouterr()
+    # Only NVD CVEs failing: still 0.
+    monkeypatch.setattr("sys.argv", ["fetch-enrichment.py"])
+    monkeypatch.setattr(script, "urllib_get", fake_get([], fail={"CVE-2021-00001"}))
+    (tmp_path / "cache" / "nvd.json").unlink()
     assert script.main() == 0
+    assert "1 failed" in capsys.readouterr().out
+    # KEV or EPSS failing: 1, and the previous file is kept.
+    for bad in ({"kev": b"not json"}, {"epss": b"not gzip"}):
+        monkeypatch.setattr(script, "urllib_get", fake_get([], **bad))
+        assert script.main() == 1
+        assert "failed; the previous file was kept" in capsys.readouterr().out

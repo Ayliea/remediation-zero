@@ -70,7 +70,9 @@ def main() -> int:
 
     print("\nCache populated. The runtime path reads these files and never")
     print("performs network I/O, so the demo does not depend on these APIs.")
-    return 0
+    # A failed KEV or EPSS source is a failed run; individual NVD failures are
+    # retried next run and, as before, do not fail it.
+    return 1 if "failed" in (result["kev"], result["epss"]) else 0
 
 
 if __name__ == "__main__":
