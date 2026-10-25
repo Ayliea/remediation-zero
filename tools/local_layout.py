@@ -43,7 +43,7 @@ AGENT_FILES = {
     # Its own file, so the approve command reaches findings only read-only.
     # Workspaces made before this kept approvals in references; init moves them.
     "approvals": ("approvals",),
-    # Scanner bookkeeping (enrichment status now, per-task pull state later).
+    # Scanner bookkeeping: per-task pull state and the enrichment-refresh status.
     "scanner": ("scanner_state",),
 }
 SHARED = ("human_queue", "sla_clocks")
@@ -58,6 +58,9 @@ STAGE_WRITES = {
     "seed": {"findings", "assets", "owners"},
     "approve": {"approvals"},
     "enrichment_refresh": {"scanner_state"},
+    # Greenbone reports in: assets before findings, the scan record, and the
+    # per-task pull state, all in one transaction per report.
+    "scanner_import": {"assets", "findings", "scans", "scanner_state"},
     "exception_accept": {"exceptions"} | set(SHARED),
     # The served dashboard reads everything and writes nothing (Ruling 43).
     "dashboard": set(),

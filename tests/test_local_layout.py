@@ -304,15 +304,16 @@ def test_move_keeps_the_new_file_copy_after_an_interrupted_move(ws):
         ("RZ-1-c001", '{"approved_by": "new"}')]
 
 
-def test_scanner_state_is_writable_only_by_the_enrichment_refresh_stage(ws):
-    assert [s for s, writes in STAGE_WRITES.items() if "scanner_state" in writes] == [
-        "enrichment_refresh"]
+def test_scanner_state_is_written_only_by_import_and_enrichment_stages(ws):
+    writers = {"enrichment_refresh", "scanner_import"}
+    assert {s for s, writes in STAGE_WRITES.items() if "scanner_state" in writes} == writers
+    assert STAGE_WRITES["scanner_import"] == {"assets", "findings", "scans", "scanner_state"}
     assert ws.file_for("scanner_state").name == "scanner.sqlite3"
     for stage in STAGE_WRITES:
         store = ws.docs_for(stage)
         try:
             ref = store.collection("scanner_state").document("X-1")
-            if stage == "enrichment_refresh":
+            if stage in writers:
                 ref.set({"a": 1})
             else:
                 with pytest.raises(PermissionError):
@@ -326,3 +327,54 @@ def test_an_older_workspace_gains_the_scanner_file_on_open(ws):
     ws.file_for("scanner_state").unlink()
     ws.docs_for("dashboard").close()
     assert ws.file_for("scanner_state").exists()
+
+
+def _journal_keys(ws):
+    conn = sqlite3.connect(ws.root / "shared.sqlite3")
+    try:
+        return [row[0] for row in conn.execute("SELECT key FROM journal")]
+    finally:
+        conn.close()
+
+
+def test_one_transaction_spans_documents_and_the_journal(ws):
+    journal = ws.journal()
+    store = ws.docs_for("scanner_import")
+    record = derive_record("RZ-1", "ingest_finding", 1)
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            with store.transaction(journal=Path(journal.path), clock=journal.clock) as bound:
+                store.collection("findings").document("RZ-1").set({"a": 1})
+                store.collection("scanner_state").document("T").set({"b": 2})
+                bound.put(CompletedCall(record=record, result="ok"))
+                # Reads inside see the transaction's own writes.
+                assert store.collection("findings").document("RZ-1").get().exists
+                raise RuntimeError("stop")
+        assert not store.collection("findings").document("RZ-1").get().exists
+        assert not store.collection("scanner_state").document("T").get().exists
+        assert _journal_keys(ws) == []
+
+        with store.transaction(journal=Path(journal.path), clock=journal.clock) as bound:
+            store.collection("findings").document("RZ-1").set({"a": 1})
+            bound.put(CompletedCall(record=record, result="ok"))
+        assert store.collection("findings").document("RZ-1").get().to_dict() == {"a": 1}
+        assert _journal_keys(ws) == [record.key]
+        # The journal file is detached again: an ordinary write still commits alone.
+        store.collection("findings").document("RZ-2").set({"a": 2})
+    finally:
+        store.close()
+
+
+def test_a_failed_batch_inside_a_transaction_undoes_only_itself(ws):
+    store = ws.docs_for("scanner_import")
+    try:
+        with store.transaction():
+            store.collection("findings").document("RZ-1").set({"a": 1})
+            batch = store.batch()
+            batch.set(store.collection("findings").document("RZ-2"), {"a": 2})
+            batch.update(store.collection("findings").document("missing"), {"a": 3})
+            with pytest.raises(Exception):
+                batch.commit()
+        assert {s.id for s in store.collection("findings").stream()} == {"RZ-1"}
+    finally:
+        store.close()

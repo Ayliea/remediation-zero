@@ -51,6 +51,7 @@ Standard library only.
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 from urllib.parse import quote
@@ -121,6 +122,7 @@ class SQLiteDocStore(DocStoreBase):
         # autocommit, holding a lock only for the statement. Within a store,
         # write locks are taken in the sorted order of its writable files.
         self._lock = threading.RLock()
+        self._in_transaction = False
         self._conn_for: dict = {}
         self._write_conn = self._open(sorted(rw, key=lambda e: str(e[0])), "rwc")
         self._read_conn = None
@@ -165,6 +167,87 @@ class SQLiteDocStore(DocStoreBase):
     def batch(self) -> "_Batch":
         return _Batch(self)
 
+    @contextmanager
+    def transaction(self, *, journal: Optional[Path] = None,
+                    clock: Optional[Any] = None) -> Iterator[Optional[Any]]:
+        """Every write made inside commits together, or none of them does.
+
+        One `BEGIN IMMEDIATE` on the write connection holds every writable
+        file until the block ends: COMMIT when it ends normally, ROLLBACK when
+        it raises. Writes and batches made through this store inside the block
+        apply in that transaction (each under its own SAVEPOINT, so a failed
+        batch still undoes only itself), and reads of a writable collection
+        see them. With `journal`, the idempotency journal's file is attached
+        to the same connection for the block and a journal bound to the
+        transaction is yielded, so idempotency keys commit or roll back with
+        the documents they guard; otherwise None is yielded.
+
+        Atomic across a crash for the same reason batches are: every attached
+        file is in the rollback journal mode, so SQLite commits them through
+        one master journal.
+        """
+        from tools.sqlite_store import TransactionJournal
+
+        conn = self._write_conn
+        if conn is None:
+            raise PermissionError("this store has no writable collection")
+        with self._lock:
+            if self._in_transaction:
+                raise RuntimeError("a transaction is already open on this store")
+            attached = None
+            if journal is not None:
+                attached = self._attach_journal(conn, Path(journal))
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                self._in_transaction = True
+                try:
+                    yield (TransactionJournal(conn, clock=clock)
+                           if journal is not None else None)
+                    conn.execute("COMMIT")
+                except BaseException:
+                    if conn.in_transaction:
+                        try:
+                            conn.execute("ROLLBACK")
+                        except sqlite3.Error:
+                            pass  # the original error is the one worth raising
+                    raise
+                finally:
+                    self._in_transaction = False
+            finally:
+                if attached is not None:
+                    conn.execute(f"DETACH DATABASE {attached}")
+
+    def _attach_journal(self, conn: sqlite3.Connection, path: Path) -> Optional[str]:
+        """Attach the journal file under `jrnl` unless it is already attached.
+
+        Returns the alias to detach afterwards, or None when nothing was
+        attached here. Refuses unless exactly one attached file holds a
+        `journal` table, since the journal's statements name it unqualified.
+        """
+        path = path.resolve()
+        listed = {Path(row[2]).resolve(): row[1]
+                  for row in conn.execute("PRAGMA database_list") if row[2]}
+        alias, attached = listed.get(path), None
+        if alias is None:
+            if not path.exists():
+                raise FileNotFoundError(f"{path} does not exist")
+            alias = attached = "jrnl"
+            conn.execute(f"ATTACH DATABASE ? AS {alias}", (_uri(path, "rw"),))
+        try:
+            got = conn.execute(f"PRAGMA {alias}.journal_mode=DELETE").fetchone()[0]
+            if got.lower() != "delete":
+                raise RuntimeError(f"{path} stayed in journal mode {got}")
+            holders = [name for name in (row[1] for row in conn.execute("PRAGMA database_list"))
+                       if conn.execute(f"SELECT 1 FROM {name}.sqlite_master WHERE "
+                                       "type = 'table' AND name = 'journal'").fetchone()]
+            if holders != [alias]:
+                raise RuntimeError("the journal table is not in exactly the journal file")
+        except BaseException:
+            if attached is not None:
+                conn.execute(f"DETACH DATABASE {attached}")
+            raise
+        return attached
+
     def close(self) -> None:
         with self._lock:
             for conn in (self._write_conn, self._read_conn):
@@ -204,6 +287,19 @@ class SQLiteDocStore(DocStoreBase):
             return
         conn = self._write_conn  # every op passed _require_writable
         with self._lock:
+            if self._in_transaction:
+                # Inside transaction(): a savepoint keeps this write all-or-
+                # nothing on its own, and the outer COMMIT makes it durable.
+                conn.execute("SAVEPOINT rz_write")
+                try:
+                    for op in ops:
+                        self._apply(*op)
+                except BaseException:
+                    conn.execute("ROLLBACK TO rz_write")
+                    conn.execute("RELEASE rz_write")
+                    raise
+                conn.execute("RELEASE rz_write")
+                return
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 for op in ops:

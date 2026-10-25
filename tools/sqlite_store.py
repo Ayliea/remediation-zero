@@ -96,3 +96,31 @@ class SQLiteStore:
             rows = db.execute('SELECT document FROM decisions ORDER BY rowid DESC LIMIT 60').fetchall()
         return {'decisions': [json.loads(row[0]) for row in rows], 'counts': {},
                 'scans': [], 'human_queue': []}
+
+
+class TransactionJournal(SQLiteStore):
+    """The journal, inside a transaction someone else opened and will end.
+
+    Every read and write runs on `conn` with no BEGIN, COMMIT or ROLLBACK of
+    its own: the owner of the transaction commits the journal together with
+    whatever else it wrote, or rolls all of it back. `conn` must have the
+    journal's file attached, and exactly one attached file may hold a
+    `journal` table, because the statements name it unqualified.
+    """
+
+    def __init__(self, conn, *, clock=None):
+        self.path = None
+        self.clock = clock or SimClock(ClockMode.REAL)
+        self._conn = conn
+
+    @contextmanager
+    def transaction(self):
+        if not self._conn.in_transaction:
+            # Outside its transaction a write would autocommit on its own.
+            raise RuntimeError("the transaction this journal belongs to has ended")
+        cursor = self._conn.cursor()
+        cursor.row_factory = sqlite3.Row
+        try:
+            yield cursor
+        finally:
+            cursor.close()
