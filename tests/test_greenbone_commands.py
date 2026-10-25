@@ -581,3 +581,144 @@ def test_a_cve_whose_first_fetch_failed_is_retried_on_the_next_imported_report(g
     asked = sorted(u.split("=")[1] for u, _ in calls if "cveId" in u)
     assert asked == ["CVE-2023-4863"]
     assert "CVE-2023-4863" in json.loads((gws.root / "enrichment" / "nvd.json").read_text())
+
+
+# --- upload from the dashboard ---------------------------------------------------------
+
+
+BOUNDARY = "rzTestBoundary7MA4YWxk"
+
+
+def multipart(fields, files=(), boundary=BOUNDARY):
+    body = b""
+    for name, value in fields:
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode()
+    for name, filename, data in files:
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                 'Content-Type: application/xml\r\n\r\n').encode() + data + b"\r\n"
+    return body + f"--{boundary}--\r\n".encode()
+
+
+@pytest.fixture
+def page(gws, monkeypatch):
+    """(request, token, gws): the dashboard handler with the page's upload bound to the workspace."""
+    import io
+    from types import SimpleNamespace
+    from scripts import local
+    configure(gws, task_ids=())
+    path = local_settings.settings_path(gws.root)
+    shown = {"scanner_state": [], "counts": {}, "scans": []}
+    cls = local.handler(SimpleNamespace(snapshot=lambda: shown), False, path, None,
+                        local.page_upload(gws, path, {}))
+
+    def request(method="POST", route="/upload", body=b"", *, headers=None, host="127.0.0.1:8081"):
+        obj = object.__new__(cls)
+        obj.server = SimpleNamespace(server_port=8081)
+        obj.path = route
+        base = {"Host": host, "Origin": f"http://{host}", "Content-Type": f"multipart/form-data; boundary={BOUNDARY}",
+                "Content-Length": str(len(body))}
+        base.update(headers or {})
+        obj.headers = {k: v for k, v in base.items() if v is not None}
+        obj.rfile, obj.wfile = io.BytesIO(body), io.BytesIO()
+        status, sent = [], {}
+        obj.send_response = status.append
+        obj.send_header = lambda k, v: sent.update({k: v})
+        obj.end_headers = lambda: None
+        obj.send_error = lambda code, *a: status.append(code)
+        getattr(obj, "do_" + method)()
+        return status[0], obj.wfile.getvalue().decode(), sent, obj.rfile.tell()
+    token = re.search('name="token" value="([^"]+)"', request("GET", "/?view=infrastructure")[1])[1]
+    return request, token, gws
+
+
+def post_report(request, token, data=CLEAN_REPORT, *, add_task=False, extra=()):
+    fields = [("token", token)] + ([("add_task", "yes")] if add_task else []) + list(extra)
+    return request(body=multipart(fields, [("report", "r.xml", data)]))
+
+
+def test_upload_imports_through_the_same_path(page):
+    request, token, gws = page
+    status, _, sent, _ = post_report(request, token, add_task=True)
+    assert status == 303 and sent["Location"] == "/?view=infrastructure&upload=imported"
+    assert REPORT in docs(gws, "scans")
+    assert task_ids(gws) == [TASK_A]
+    assert docs(gws, "scanner_state")[TASK_A]["last_import_via"] == "upload"
+
+
+def test_upload_from_unchosen_task_without_add_task_shows_the_refusal(page):
+    request, token, gws = page
+    before = everything_under(gws)
+    status, _, sent, _ = post_report(request, token)
+    assert status == 303 and sent["Location"] == "/?view=infrastructure&upload=not_chosen"
+    assert everything_under(gws) == before and task_ids(gws) == []
+    from ui import dashboard_view
+    assert "not chosen for this install" in dashboard_view.UPLOAD_MESSAGES["not_chosen"]
+
+
+def test_upload_that_parses_badly_changes_nothing(page):
+    request, token, gws = page
+    before = everything_under(gws)
+    status, _, sent, _ = post_report(request, token, b"<not-a-report/>", add_task=True)
+    assert sent["Location"].endswith("upload=parse_refused") and status == 303
+    assert everything_under(gws) == before
+
+
+def test_upload_older_report_is_refused_with_its_reason_code(page):
+    request, token, gws = page
+    assert post_report(request, token, add_task=True)[0] == 303
+    older = CLEAN_REPORT.replace(REPORT.encode(), b"44444444-4444-4444-8444-444444444444")
+    status, _, sent, _ = post_report(request, token, older)
+    assert status == 303 and sent["Location"] == "/?view=infrastructure&upload=refused_already_imported_this_cycle"
+
+
+def test_upload_rejects_cross_origin_and_oversized(page):
+    request, token, gws = page
+    before = everything_under(gws)
+    good = multipart([("token", token), ("add_task", "yes")], [("report", "r.xml", CLEAN_REPORT)])
+    assert request(body=good, headers={"Origin": "https://evil.invalid"})[0] == 403
+    assert request(body=good, headers={"Origin": None})[0] == 403
+    assert request(body=good, headers={"Sec-Fetch-Site": "cross-site"})[0] == 403
+    assert request(body=good, host="evil.invalid:8081")[0] == 403
+    from tools.greenbone_report import MAX_REPORT_BYTES
+    status, _, _, consumed = request(body=b"", headers={"Content-Length": str(MAX_REPORT_BYTES + 64 * 1024 + 1)})
+    assert status == 413 and consumed == 0
+    assert request(body=good, headers={"Content-Type": "application/x-www-form-urlencoded"})[0] == 400
+    assert request(body=multipart([("token", "wrong")], [("report", "r.xml", CLEAN_REPORT)]))[0] == 403
+    assert everything_under(gws) == before
+
+
+def test_upload_missing_content_length_refused_without_reading(page):
+    request, token, gws = page
+    good = multipart([("token", token), ("add_task", "yes")], [("report", "r.xml", CLEAN_REPORT)])
+    for length in (None, "abc", "-5", "1e3", " 12", "٣"):
+        status, _, _, consumed = request(body=good, headers={"Content-Length": length})
+        assert status == 400 and consumed == 0, length
+    assert docs(gws, "scans") == {}
+
+
+def test_upload_with_extra_field_is_refused(page):
+    request, token, gws = page
+    before = everything_under(gws)
+    assert post_report(request, token, add_task=True, extra=[("section", "scanner")])[0] == 400
+    two = multipart([("token", token)], [("report", "a.xml", CLEAN_REPORT), ("report", "b.xml", CLEAN_REPORT)])
+    assert request(body=two)[0] == 400
+    assert request(body=multipart([("token", token)], [("other", "a.xml", CLEAN_REPORT)]))[0] == 400
+    assert request(body=multipart([("token", token), ("add_task", "no")], [("report", "a.xml", CLEAN_REPORT)]))[0] == 400
+    assert request(body=multipart([("token", token), ("token", token)], [("report", "a.xml", CLEAN_REPORT)]))[0] == 400
+    assert request(body=multipart([("token", token)], []))[0] == 400
+    assert everything_under(gws) == before
+
+
+def test_upload_is_not_offered_without_the_page_wiring(gws):
+    import io
+    from types import SimpleNamespace
+    from scripts import local
+    configure(gws, task_ids=())
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, local_settings.settings_path(gws.root))
+    obj = object.__new__(cls)
+    obj.server, obj.path = SimpleNamespace(server_port=8081), "/upload"
+    obj.headers = {"Host": "127.0.0.1:8081", "Origin": "http://127.0.0.1:8081", "Content-Length": "0"}
+    codes = []
+    obj.send_error = lambda code, *a: codes.append(code)
+    obj.do_POST()
+    assert codes == [403]

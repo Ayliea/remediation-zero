@@ -132,3 +132,118 @@ def test_limited_evidence_wording():
     text = dashboard_view.screening_text({"screening": {"screened": False, "blocked": True}})
     assert text == ("Scanner notes were not checked, so they were withheld; "
                     "triaged on limited evidence.")
+
+
+# --- scanner status on the infrastructure view (local edition only) ------------------------
+
+TASK = "11111111-1111-4111-8111-111111111111"
+TASK_2 = "22222222-2222-4222-8222-222222222222"
+REPORT_ID = "33333333-3333-4333-8333-000000000001"
+
+
+def scanner_page(rows, chosen=None, **extra):
+    data = {"counts": {"assets": 1}, "scans": [], "scanner_state": rows}
+    return dashboard_view.render(data, "infrastructure", chosen_tasks=chosen, **extra)
+
+
+def pulled(**fields):
+    return {"task_id": TASK, "last_pull_real_ts": 1793145600.0, "last_pull_sim_ts": 1793145600.0, **fields}
+
+
+def test_infrastructure_shows_failed_pull_as_failed():
+    page = scanner_page([pulled(last_result="failed", last_error_class="GmpError")], [TASK])
+    assert "Failed: GmpError" in page
+    assert "The last pull failed. This is not the same as no new findings." in page
+    assert "Nothing new" not in page and "Imported" not in page
+    assert "Wall time: 2026-10-28 00:00 UTC" in page
+
+
+def test_infrastructure_says_when_no_tasks_are_chosen():
+    assert "No scan tasks chosen — nothing is imported" in scanner_page([], [])
+    unpulled = scanner_page([], [TASK])
+    assert "Not pulled yet" in unpulled and "No scan tasks chosen" not in unpulled
+
+
+def test_imported_task_shows_report_changes_and_skips():
+    row = pulled(task_name="Weekly <b>LAN</b>", last_result="imported", last_imported_report_id=REPORT_ID,
+                 last_imported_scan_end="2026-10-20T01:30:00Z",
+                 last_counts={"new": 3, "resolved": 2, "regressed": 1, "persisting": 4, "unverifiable": 5},
+                 last_skipped={"log": 7, "below_qod": 6, "rejected": 1, "not_finished": 2},
+                 last_uncovered_all=True, deferred=2, baseline_not_imported=3)
+    page = scanner_page([row], [TASK])
+    assert "Weekly &lt;b&gt;LAN&lt;/b&gt;" in page and "<b>LAN</b>" not in page
+    assert "Result: Imported" in page and REPORT_ID in page
+    assert "3 new, 2 resolved, 1 reopened, 4 kept, 5 unverifiable" in page
+    assert "7 log-level, 6 below the quality floor, 1 rejected, 2 not finished" in page
+    assert "This report could not be trusted for coverage, so it closed nothing." in page
+    assert "2 newer reports are waiting" in page
+    assert "3 older reports were not imported when this task started." in page
+
+
+def test_skipped_counts_are_shown():
+    page = scanner_page([pulled(last_result="imported", last_imported_report_id=REPORT_ID,
+                                last_skipped={"log": 11, "below_qod": 12, "rejected": 13, "not_finished": 14})])
+    for number in ("11 log-level", "12 below the quality floor", "13 rejected", "14 not finished"):
+        assert number in page
+
+
+def test_refused_reports_are_listed_newest_first_at_most_five_in_plain_words():
+    refused = [{"report_id": f"33333333-3333-4333-8333-{n:012d}", "reason": "too_large" if n == 1 else "not_newer"}
+               for n in range(1, 8)]
+    page = scanner_page([pulled(last_result="refused", refused=refused)], [TASK])
+    assert "Result: Refused: the report is not newer than the last one imported" in page
+    assert page.count("<li>Refused:") == 5 and "Refused reports: 7" in page
+    assert "larger than the size limit" not in page  # the oldest is not among the newest five
+    assert "not_newer" not in page and "too_large" not in page
+
+
+def test_every_closed_reason_has_plain_words():
+    for reason in ("unsafe_xml", "too_large", "malformed", "no_scan_time", "not_newer",
+                   "scan_time_in_future", "already_imported_this_cycle"):
+        line = dashboard_view.refusal_line(reason)
+        assert line.startswith("Refused: ") and reason not in line
+
+
+def test_unknown_refusal_reason_is_not_echoed():
+    evil = "<script>alert(1)</script>_zz-secret"
+    page = scanner_page([pulled(last_result="refused", last_refusal={"report_id": REPORT_ID, "reason": evil},
+                                refused=[{"report_id": REPORT_ID, "reason": evil}])], [TASK])
+    assert "Refused (reason not recognised)" in page
+    assert "zz-secret" not in page and "<script>" not in page and "alert(1)" not in page
+
+
+def test_enrichment_status_and_failures_are_shown():
+    enrichment = {"last_run_real_ts": 1793145600.0, "last_run_sim_ts": 1793145600.0, "kev": "ok",
+                  "epss": "failed", "nvd_fetched": 4, "failed": ["epss", "CVE-2021-44228"]}
+    page = scanner_page([enrichment], [])
+    assert "Advisories fetched: 4" in page and "Failures: epss, CVE-2021-44228" in page
+    assert "Enrichment has not run." in scanner_page([], [])
+
+
+def test_cloud_render_without_scanner_state_is_unchanged():
+    data = {"counts": {"assets": 2}, "scans": [{"scan_id": "s1", "real_ts": 1793145600.0, "sim_ts": 1793145600.0}]}
+    plain = dashboard_view.render(data, "infrastructure")
+    assert plain == dashboard_view.render(data, "infrastructure", upload_token=None, upload_code="imported",
+                                          chosen_tasks=[TASK])
+    for marker in ("Scanner imports", "Upload a report", "multipart", "No scan tasks chosen", "Enrichment"):
+        assert marker not in plain
+    assert "2 assets recorded" in plain and "Scan recorded:" in plain
+
+
+def test_upload_form_only_when_a_token_is_supplied():
+    assert "Upload a report" not in scanner_page([], [])
+    page = scanner_page([], [], upload_token="tok-123")
+    assert 'enctype="multipart/form-data"' in page and 'action="/upload"' in page
+    assert 'name="report"' in page and 'name="add_task"' in page and 'name="token" value="tok-123"' in page
+    assert "Also add this report's scan task to the tasks this install imports" in page
+    assert "checked before anything is imported" in page
+
+
+def test_upload_code_in_url_is_closed_set():
+    codes = ("imported", "not_chosen", "too_many_tasks", "saved_failed", "parse_refused", "bad_request",
+             "refused_other", "refused_not_newer")
+    for code in codes:
+        assert 'role="status"' in scanner_page([], [], upload_token="t", upload_code=code)
+    for code in ("<script>x</script>", "refused_<img>", "refused_made_up", "", None, "IMPORTED"):
+        page = scanner_page([], [], upload_token="t", upload_code=code)
+        assert 'role="status"' not in page and "made_up" not in page and "<img>" not in page

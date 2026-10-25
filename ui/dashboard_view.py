@@ -136,8 +136,138 @@ def failed_runs_section(data):
     return body
 
 
+#: Every closed refusal reason, in plain words. The only place a reason becomes text:
+#: an unknown value never reaches the page as itself.
+REFUSAL_WORDS = {
+    "unsafe_xml": "the report contained markup that is never accepted",
+    "too_large": "the report was larger than the size limit",
+    "malformed": "the report was not a well-formed Greenbone report",
+    "no_scan_time": "the report has no scan time",
+    "not_newer": "the report is not newer than the last one imported",
+    "scan_time_in_future": "the report's scan time is in the future",
+    "already_imported_this_cycle": "this task already imported a report in this cycle",
+}
+UNKNOWN_REFUSAL = "Refused (reason not recognised)"
+
+#: What the page says after an upload, by the closed code in the redirect URL.
+#: Nothing from the request or the report ever reaches the URL or these messages.
+UPLOAD_MESSAGES = {
+    "imported": "The report was checked and imported.",
+    "not_chosen": "This report is from a scan task that is not chosen for this install. Nothing was imported. "
+                  "Tick the box to add the task, then upload again.",
+    "too_many_tasks": "At most 500 scan tasks can be chosen. Nothing was saved or imported.",
+    "saved_failed": "The report was imported, but its task could not be saved to the settings. "
+                    "Add the task in Settings.",
+    "parse_refused": "The report was refused: it could not be read as a Greenbone report. Nothing was imported.",
+    "bad_request": "The upload was not accepted. Nothing was imported.",
+    "refused_other": "The report was refused. Nothing was imported.",
+}
+UPLOAD_MESSAGES.update({f"refused_{reason}": f"The report was refused: {words}. Nothing was imported."
+                        for reason, words in REFUSAL_WORDS.items()})
+
+
+def refusal_line(reason):
+    """"Refused: <plain words>" for a closed reason; anything else is not echoed."""
+    words = REFUSAL_WORDS.get(reason) if isinstance(reason, str) else None
+    return f"Refused: {words}" if words else UNKNOWN_REFUSAL
+
+
+def _result_words(state):
+    result = state.get("last_result")
+    if result == "imported":
+        return "Imported"
+    if result == "nothing_new":
+        return "Nothing new"
+    if result == "refused":
+        refusal = state.get("last_refusal")
+        refused = state.get("refused")
+        reason = (refusal or {}).get("reason") if isinstance(refusal, dict) else None
+        if reason is None and isinstance(refused, list) and refused and isinstance(refused[-1], dict):
+            reason = refused[-1].get("reason")
+        return refusal_line(reason)
+    if result == "failed":
+        return "Failed: " + str(state.get("last_error_class") or "unknown error")
+    return "Not pulled yet"
+
+
+def _task_card(state, task_id):
+    name = state.get("task_name") or task_id
+    body = f'<article class="card"><h3>{text(name)}</h3>'
+    if name != task_id:
+        body += f'<p>Task: {text(task_id)}</p>'
+    if state.get("last_pull_real_ts") is None and not state.get("last_result"):
+        return body + '<p>Result: Not pulled yet. Nothing has been imported for this task.</p></article>'
+    body += f'<p>Last pull: {stamp(state.get("last_pull_real_ts"), state.get("last_pull_sim_ts"))}</p>'
+    body += f'<p>Result: {text(_result_words(state))}</p>'
+    if state.get("last_result") == "failed":
+        body += '<p>The last pull failed. This is not the same as no new findings.</p>'
+    if state.get("last_imported_report_id"):
+        body += (f'<p>Last imported report: {text(state.get("last_imported_report_id"))} '
+                 f'(scan ended {text(state.get("last_imported_scan_end"))})</p>')
+        counts = state.get("last_counts") or {}
+        labels = (("new", "new"), ("resolved", "resolved"), ("regressed", "reopened"),
+                  ("persisting", "kept"), ("unverifiable", "unverifiable"))
+        body += ('<p>What it changed: ' + ", ".join(f'{text(counts.get(key, 0))} {label}' for key, label in labels)
+                 + '.</p>')
+        if state.get("last_uncovered_all"):
+            body += '<p>This report could not be trusted for coverage, so it closed nothing.</p>'
+        skipped = state.get("last_skipped") or {}
+        body += ('<p>Skipped: ' + ", ".join(f'{text(skipped.get(key, 0))} {label}' for key, label in (
+            ("log", "log-level"), ("below_qod", "below the quality floor"), ("rejected", "rejected"),
+            ("not_finished", "not finished"))) + '.</p>')
+    refused = [r for r in (state.get("refused") or []) if isinstance(r, dict)]
+    if refused:
+        body += f'<p>Refused reports: {text(len(refused))}. Newest first:</p><ul>'
+        for item in list(reversed(refused))[:5]:
+            body += f'<li>{text(refusal_line(item.get("reason")))}</li>'
+        body += '</ul>'
+    if state.get("deferred"):
+        body += f'<p>{text(state.get("deferred"))} newer reports are waiting for a later pull.</p>'
+    if state.get("baseline_not_imported"):
+        body += f'<p>{text(state.get("baseline_not_imported"))} older reports were not imported when this task started.</p>'
+    return body + '</article>'
+
+
+def scanner_section(data, chosen_tasks=None):
+    """Per chosen task: last pull and what it did. Only when the snapshot carries `scanner_state`."""
+    if "scanner_state" not in data:
+        return ""  # the cloud edition does not supply it
+    rows = [r for r in (data.get("scanner_state") or []) if isinstance(r, dict)]
+    by_task = {r.get("task_id"): r for r in rows if r.get("task_id")}
+    enrichment = next((r for r in rows if not r.get("task_id") and "last_run_real_ts" in r), None)
+    body = '<h2>Scanner imports</h2>'
+    ids = list(chosen_tasks) if chosen_tasks is not None else list(by_task)
+    if not ids:
+        body += '<p class="card">No scan tasks chosen — nothing is imported.</p>'
+    for task_id in ids:
+        body += _task_card(by_task.get(task_id, {}), task_id)
+    body += '<h3>Enrichment</h3>'
+    if enrichment is None:
+        body += '<p>Enrichment has not run.</p>'
+    else:
+        body += (f'<p>Last run: {stamp(enrichment.get("last_run_real_ts"), enrichment.get("last_run_sim_ts"))}</p>'
+                 f'<p>Known-exploited list: {text(enrichment.get("kev"))} · Exploit-probability scores: '
+                 f'{text(enrichment.get("epss"))} · Advisories fetched: {text(enrichment.get("nvd_fetched"))}</p>')
+        failed = enrichment.get("failed") or []
+        body += (f'<p>Failures: {text(", ".join(str(f) for f in failed))}</p>' if failed
+                 else '<p>No failures in the last run.</p>')
+    return body
+
+
+def upload_form(token, base="/"):
+    """The report upload form; rendered only by an edition that supplies a token."""
+    return (f'<h2>Upload a report</h2><form class="card" method="post" action="{base}upload" enctype="multipart/form-data">'
+            f'<input type="hidden" name="token" value="{text(token)}">'
+            '<p>The report is checked before anything is imported.</p>'
+            '<label>Greenbone report (XML) <input type="file" name="report" required></label>'
+            '<p><label><input type="checkbox" name="add_task" value="yes"> '
+            "Also add this report's scan task to the tasks this install imports</label></p>"
+            '<button type="submit">Check and import</button></form>')
+
+
 def render(data, view="overview", demo=False, unavailable=False, settings_html=None,
-           base="/", logo_url=None, approve_command=None):
+           base="/", logo_url=None, approve_command=None, upload_token=None, upload_code=None,
+           chosen_tasks=None):
     # base: where this page is mounted. logo_url: a served, cacheable logo; the
     # local server has no static route, so it falls back to an inline data URI.
     # approve_command: the local edition's command prefix for approving a
@@ -178,6 +308,12 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
             body += f'<details class="card"><summary>Scan recorded: {stamp(scan.get("real_ts"), scan.get("sim_ts"))}</summary><pre>{text(json.dumps(scan, indent=2, default=str))}</pre></details>'
         if not data.get("scans"):
             body += '<p class="card">No scan records returned. We cannot confirm what was checked.</p>'
+        body += scanner_section(data, chosen_tasks)
+        if upload_token is not None:
+            message = UPLOAD_MESSAGES.get(upload_code) if isinstance(upload_code, str) else None
+            if message:
+                body += f'<section class="notice" role="status"><p>{text(message)}</p></section>'
+            body += upload_form(upload_token, base)
     else:
         body = '<p>Recent decision history, including previous reviews. Times are UTC; scenario time is labeled separately when it differs from wall time.</p>'
         body += "".join(decision_card(r, approve_command) for r in data.get("decisions", [])) or '<p class="card">No decision activity returned.</p>'

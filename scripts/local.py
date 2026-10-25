@@ -21,6 +21,8 @@ import secrets
 import shlex
 import sys
 import unicodedata
+from email import policy
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -49,7 +51,7 @@ from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
 from tools.model_check import check_models
 from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
-from ui.dashboard_view import VIEWS, demo_snapshot, render
+from ui.dashboard_view import REFUSAL_WORDS, VIEWS, demo_snapshot, render
 from ui.settings_view import SECTIONS, render_settings
 from worker.envelope import cycle_for_day
 
@@ -422,48 +424,33 @@ def _read_capped(path):
     return data if len(data) <= MAX_REPORT_BYTES else None
 
 
-def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, clock=None):
-    """`greenbone upload FILE`: one report through the same checks as a pulled one.
+def upload_report(ws, preferences, environ, data, cycle, *, add_task=False, clock=None):
+    """One report's bytes through the same checks as a pulled one: the command and the page both call this.
 
-    The report's own task decides. An unchosen task needs --add-task, and is saved to the
-    settings only after the report parses and the import succeeds."""
+    The report's own task decides. An unchosen task needs `add_task`, and is saved to the settings
+    only after the report parses and the import succeeds. Returns `code` (a closed set: imported,
+    refused_<reason>, not_chosen, too_many_tasks, saved_failed, parse_refused, bad_request), the
+    report and result when there are ones, and `detail`, text only the command prints."""
     scanner = preferences['scanner']
-    try:
-        data = _read_capped(Path(path))
-    except OSError as error:
-        print(f'Could not read the file ({type(error).__name__}). Nothing was written.', file=sys.stderr)
-        return 1
-    if data is None:
-        print(f'The report is larger than {MAX_REPORT_BYTES} bytes. It was not read. Nothing was written.',
-              file=sys.stderr)
-        return 1
     try:
         report = parse_report(data)
     except Exception as error:  # a refused or malformed document: the closed reason or the class
-        reason = getattr(error, 'reason', None) or type(error).__name__
-        print(f'The report was refused ({terminal_safe(reason)}). Nothing was written.', file=sys.stderr)
-        return 1
+        return {'code': 'parse_refused', 'detail': getattr(error, 'reason', None) or type(error).__name__}
     chosen = list(scanner['task_ids'])
     if report.task_id not in chosen:
         if not add_task:
-            print(f'Task {terminal_safe(report.task_id)} is not chosen for this install. '
-                  'Re-run with --add-task to add it.', file=sys.stderr)
-            return 1
+            return {'code': 'not_chosen', 'report': report}
         if not local_settings.TASK_ID_RE.fullmatch(report.task_id or ''):
-            print('The report names a task id that is not a lowercase UUID. Nothing was written.', file=sys.stderr)
-            return 1
+            return {'code': 'bad_request', 'report': report}
         if len(chosen) >= MAX_CHOSEN_TASKS:  # before the import, so no findings are left without their task
-            print(f'At most {MAX_CHOSEN_TASKS} scan tasks can be chosen. Nothing was saved or imported.',
-                  file=sys.stderr)
-            return 1
+            return {'code': 'too_many_tasks', 'report': report}
     ports = _ports(ws.docs_for('scanner_import'), ws.journal(), clock or SimClock.from_env(environ))
     try:
         result = import_upload(ports, cycle, data, chosen_task_ids=chosen,
                                qod_floor=scanner['qod_floor'], add_task=add_task)
     except ImportRefused as exc:
-        reason = f' ({exc.reason})' if exc.reason else ''
-        print(f'Refused{reason}: {terminal_safe(exc, 200)} Nothing was written.', file=sys.stderr)
-        return 1
+        reason = exc.reason if exc.reason in REFUSAL_WORDS else None
+        return {'code': 'refused_' + (reason or 'other'), 'report': report, 'refusal': exc}
     finally:
         ports.docs.close()
     if result['task_added']:
@@ -473,13 +460,56 @@ def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, c
             saved['scanner']['task_ids'].append(report.task_id)
             local_settings.save(settings_file, saved)
         except (OSError, ValueError):
-            print(f'Imported, but task {report.task_id} was not saved; add it in Settings.', file=sys.stderr)
-            return 1
-        print(f'Adding task {terminal_safe(report.task_name) or "(unnamed)"} ({report.task_id}) to this install.')
-    _print({'cycle': result['cycle'], 'scan_id': result['scan_id'], 'task_id': result['task_id'],
-            'counts': result['counts'], 'newly_ingested': result['newly_ingested'],
-            'newly_resolved': result['newly_resolved'], 'task_added': result['task_added']})
-    return 0
+            return {'code': 'saved_failed', 'report': report, 'result': result}
+    return {'code': 'imported', 'report': report, 'result': result}
+
+
+def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, clock=None):
+    """`greenbone upload FILE`: read the file (capped), then `upload_report`, then say what happened."""
+    try:
+        data = _read_capped(Path(path))
+    except OSError as error:
+        print(f'Could not read the file ({type(error).__name__}). Nothing was written.', file=sys.stderr)
+        return 1
+    if data is None:
+        print(f'The report is larger than {MAX_REPORT_BYTES} bytes. It was not read. Nothing was written.',
+              file=sys.stderr)
+        return 1
+    outcome = upload_report(ws, preferences, environ, data, cycle, add_task=add_task, clock=clock)
+    code, report = outcome['code'], outcome.get('report')
+    if code == 'parse_refused':
+        print(f'The report was refused ({terminal_safe(outcome["detail"])}). Nothing was written.', file=sys.stderr)
+    elif code == 'not_chosen':
+        print(f'Task {terminal_safe(report.task_id)} is not chosen for this install. '
+              'Re-run with --add-task to add it.', file=sys.stderr)
+    elif code == 'bad_request':
+        print('The report names a task id that is not a lowercase UUID. Nothing was written.', file=sys.stderr)
+    elif code == 'too_many_tasks':
+        print(f'At most {MAX_CHOSEN_TASKS} scan tasks can be chosen. Nothing was saved or imported.',
+              file=sys.stderr)
+    elif code.startswith('refused_'):
+        exc = outcome['refusal']
+        reason = f' ({exc.reason})' if exc.reason else ''
+        print(f'Refused{reason}: {terminal_safe(exc, 200)} Nothing was written.', file=sys.stderr)
+    elif code == 'saved_failed':
+        print(f'Imported, but task {report.task_id} was not saved; add it in Settings.', file=sys.stderr)
+    else:
+        result = outcome['result']
+        if result['task_added']:
+            print(f'Adding task {terminal_safe(report.task_name) or "(unnamed)"} ({report.task_id}) to this install.')
+        _print({'cycle': result['cycle'], 'scan_id': result['scan_id'], 'task_id': result['task_id'],
+                'counts': result['counts'], 'newly_ingested': result['newly_ingested'],
+                'newly_resolved': result['newly_resolved'], 'task_added': result['task_added']})
+        return 0
+    return 1
+
+
+def page_upload(ws, config_path, environ):
+    """The page's upload, bound to a workspace: `(bytes, add_task) -> closed code`, the same call the command makes."""
+    def upload(data, add_task):
+        outcome = upload_report(ws, local_settings.load(config_path), environ, data, next_cycle(ws), add_task=add_task)
+        return outcome['code']
+    return upload
 
 
 def _uncached_cves(ws, cves):
@@ -523,6 +553,7 @@ def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
 
 
 MAX_CHOSEN_TASKS = 500
+UPLOAD_OVERHEAD = 64 * 1024  # multipart framing and the other two fields
 
 
 class TooManyTasks(ValueError):
@@ -550,7 +581,7 @@ def _scanner_values(fields, values):
                 ca_file=fields['ca_file'], task_ids=task_ids, auto_enrichment='auto_enrichment' in fields, **ints)
 
 
-def handler(store, demo, config_path=None, approve_command=None):
+def handler(store, demo, config_path=None, approve_command=None, upload=None):
     token = secrets.token_urlsafe(32)
     class DashboardHandler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -568,13 +599,18 @@ def handler(store, demo, config_path=None, approve_command=None):
                 return
             try:
                 settings_html = None
+                chosen = None
                 if config_path:
                     saved = local_settings.load(config_path)
+                    chosen = saved['scanner']['task_ids']
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
                         message='Preferences saved. No model calls were made.' if parse_qs(parsed.query).get('saved') == ['1'] else '',
                         scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None)
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
-                              approve_command=None if demo else approve_command)
+                              approve_command=None if demo else approve_command,
+                              upload_token=token if upload and not demo else None,
+                              upload_code=parse_qs(parsed.query).get('upload', [None])[0],
+                              chosen_tasks=chosen)
                 status = 200
             except Exception:
                 body, status = render({}, view, unavailable=True, settings_html="" if config_path else None), 503
@@ -596,13 +632,76 @@ def handler(store, demo, config_path=None, approve_command=None):
             self.send_header('Referrer-Policy', 'no-referrer')
             self.end_headers()
             self.wfile.write(encoded)
+        def _upload(self):
+            """POST /upload. Host, Origin and Sec-Fetch-Site were checked before this; the token is in the
+            body, so it is checked after parsing and before anything is imported. Nothing from the request
+            or the report reaches the redirect: only a code from a closed set."""
+            try:
+                length = self.headers.get('Content-Length')
+                if length is None or not (length.isascii() and length.isdigit()) or self.headers.get('Transfer-Encoding'):
+                    self.send_error(400, 'Content-Length is required.')
+                    return
+                length = int(length)
+                if length > MAX_REPORT_BYTES + UPLOAD_OVERHEAD:
+                    self.send_error(413, 'The upload is too large. Nothing was read.')
+                    return
+                content_type = self.headers.get('Content-Type') or ''
+                if (not 0 < length or not content_type.lower().startswith('multipart/form-data;')
+                        or any(c in content_type for c in '\r\n') or not content_type.isascii()):
+                    raise ValueError()
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    raise ValueError()
+                message = BytesParser(policy=policy.HTTP).parsebytes(
+                    b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)
+                if not message.is_multipart() or message.defects:
+                    raise ValueError()
+                parts = {}
+                for part in message.iter_parts():
+                    name = part.get_param('name', header='content-disposition')
+                    if name not in {'token', 'report', 'add_task'} or name in parts or part.is_multipart():
+                        raise ValueError()
+                    parts[name] = part
+                if not {'token', 'report'} <= set(parts) or parts['report'].get_filename() is None:
+                    raise ValueError()
+                supplied = parts['token'].get_payload(decode=True) or b''
+                data = parts['report'].get_payload(decode=True)
+                add_task = False
+                if 'add_task' in parts:
+                    if parts['add_task'].get_payload(decode=True) != b'yes':
+                        raise ValueError()
+                    add_task = True
+            except (ValueError, UnicodeError, OSError, LookupError):
+                self.send_error(400, 'Invalid upload. Nothing was imported.')
+                return
+            if not secrets.compare_digest(supplied, token.encode()):
+                self.send_error(403)
+                return
+            if not data or len(data) > MAX_REPORT_BYTES:
+                code = 'refused_too_large' if data else 'bad_request'
+            else:
+                try:
+                    code = upload(data, add_task)
+                except Exception as error:  # class only; the page says the upload was not accepted
+                    _log('upload_failed', error=type(error).__name__)
+                    code = 'bad_request'
+            self.send_response(303)
+            self.send_header('Location', f'/?view=infrastructure&upload={code}')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
         def do_POST(self):
             host = self.headers.get('Host')
             allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
-            if (not config_path or host not in allowed or self.path != '/settings'
+            if (not config_path or host not in allowed or self.path not in ('/settings', '/upload')
+                    or (self.path == '/upload' and not upload)
                     or self.headers.get('Origin') != f'http://{host}'
                     or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
                 self.send_error(403)
+                return
+            if self.path == '/upload':
+                self._upload()
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -839,7 +938,8 @@ def main():
         elif args.command == 'serve':
             docs = ws.docs_for('dashboard')  # reads only: no collection is writable
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
-            with HTTPServer(('127.0.0.1', args.port), handler(_View(docs), args.demo, config_path, command)) as server:
+            upload = None if args.demo else page_upload(ws, config_path, os.environ)
+            with HTTPServer(('127.0.0.1', args.port), handler(_View(docs), args.demo, config_path, command, upload)) as server:
                 print(f'Local synthetic preview: http://127.0.0.1:{server.server_port}', flush=True)
                 server.serve_forever()
         else:
