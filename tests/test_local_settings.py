@@ -77,14 +77,14 @@ def test_v1_settings_upgrade_to_proposer_role(tmp_path):
     path.write_text(json.dumps({'endpoint': 'http://127.0.0.1:11434/v1/chat/completions', 'model': 'llama3.1',
                                 'mode': 'saved', 'open_browser': False, 'port': 8083}))
     loaded = config.load(path)
-    assert loaded['version'] == 2
+    assert loaded['version'] == 3
     assert loaded['roles']['proposer'] == dict(format='openai_chat', model='llama3.1', family='llama',
         endpoint='http://127.0.0.1:11434/v1/chat/completions')
     assert [loaded['roles'][r] for r in ('reviewer', 'summarizer', 'guard')] == [None] * 3
     assert loaded['same_family_policy'] == 'wait'
     assert (loaded['mode'], loaded['open_browser'], loaded['port']) == ('saved', False, 8083)
     config.save(path, loaded)
-    assert json.loads(path.read_text())['version'] == 2
+    assert json.loads(path.read_text())['version'] == 3
 
 
 def test_blank_v1_connection_upgrades_to_no_proposer(tmp_path):
@@ -420,3 +420,393 @@ def test_invalid_interval_leaves_a_saved_file_unchanged(app):
     before = path.read_bytes()
     assert request('POST', '/settings', dict(good, cycle_interval_minutes='2000'))[0] == 400
     assert path.read_bytes() == before
+
+
+# --- Scanner settings (v3) ------------------------------------------------------------------
+
+TASK_1 = 'abcdef12-aaaa-4aaa-8aaa-aaaaaaaaaaa1'
+TASK_2 = '22222222-2222-4222-8222-222222222222'
+TASK_3 = '33333333-3333-4333-8333-333333333333'
+SCANNER_DEFAULTS = {'transport': 'unix', 'socket_path': '', 'host': '', 'port': 9390, 'ca_file': '',
+                    'task_ids': [], 'qod_floor': 70, 'auto_enrichment': False}
+
+
+def with_scanner(**change):
+    value = copy.deepcopy(config.DEFAULTS)
+    value['scanner'] = dict(value['scanner'], **change)
+    return value
+
+
+def _v2_file(**change):
+    v2 = {k: v for k, v in copy.deepcopy(config.DEFAULTS).items() if k != 'scanner'}
+    v2.update(version=2)
+    v2.update(change)
+    return v2
+
+
+def test_v2_settings_upgrade_to_v3_with_scanner_defaults(tmp_path):
+    path = tmp_path / 'prefs.json'
+    v2 = _v2_file(port=8090, mode='saved')
+    v2['roles']['proposer'] = proposer(model='kept')
+    path.write_text(json.dumps(v2))
+    loaded = config.load(path)
+    assert loaded['version'] == 3
+    assert loaded['scanner'] == SCANNER_DEFAULTS
+    assert (loaded['port'], loaded['mode'], loaded['roles']['proposer']['model']) == (8090, 'saved', 'kept')
+    # The upgrade is written back atomically, through save(), leaving no temp file behind.
+    on_disk = json.loads(path.read_text())
+    assert on_disk['version'] == 3 and on_disk['scanner'] == SCANNER_DEFAULTS
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_v1_settings_reach_v3(tmp_path):
+    path = tmp_path / 'prefs.json'
+    path.write_text(json.dumps({'endpoint': '', 'model': '', 'mode': 'demo', 'open_browser': True, 'port': 8081}))
+    loaded = config.load(path)
+    assert loaded['version'] == 3 and loaded['scanner'] == SCANNER_DEFAULTS
+
+
+def test_v2_file_with_unknown_key_is_refused(tmp_path):
+    path = tmp_path / 'prefs.json'
+    path.write_text(json.dumps(_v2_file(api_key='x')))
+    with pytest.raises(ValueError):
+        config.load(path)
+
+
+def test_v3_file_with_unknown_key_is_refused(tmp_path):
+    path = tmp_path / 'prefs.json'
+    path.write_text(json.dumps(dict(config.DEFAULTS, api_key='x')))
+    with pytest.raises(ValueError):
+        config.load(path)
+
+
+def test_scanner_defaults():
+    assert config.DEFAULTS['version'] == 3
+    assert config.DEFAULTS['scanner'] == SCANNER_DEFAULTS
+
+
+def test_empty_task_list_is_valid_and_means_pull_nothing():
+    value = config.validate(with_scanner(task_ids=[]))
+    assert value['scanner']['task_ids'] == []
+
+
+def test_valid_scanner_round_trips(tmp_path):
+    path = tmp_path / 'prefs.json'
+    value = with_scanner(transport='tls', host='gvm.example.invalid', port=9391, ca_file='/etc/ssl/gvm-ca.pem',
+                         task_ids=[TASK_1, TASK_2], qod_floor=80, auto_enrichment=True)
+    config.save(path, value)
+    assert config.load(path) == value
+
+
+@pytest.mark.parametrize('bad', ['not-a-uuid', TASK_1.upper(), TASK_1 + ' ', TASK_1[:-1], '', 5, None])
+def test_bad_task_id_is_rejected(bad):
+    with pytest.raises(ValueError):
+        config.validate(with_scanner(task_ids=[bad]))
+
+
+def test_duplicate_task_ids_are_rejected():
+    with pytest.raises(ValueError):
+        config.validate(with_scanner(task_ids=[TASK_1, TASK_1]))
+
+
+@pytest.mark.parametrize('key', ['password', 'username', 'Password', 'USERNAME', 'token'])
+def test_credentials_cannot_be_saved(key):
+    value = with_scanner()
+    value['scanner'][key] = 'hunter2'
+    with pytest.raises(ValueError):
+        config.validate(value)
+
+
+def test_tls_requires_host():
+    with pytest.raises(ValueError):
+        config.validate(with_scanner(transport='tls', host=''))
+    config.validate(with_scanner(transport='tls', host='203.0.113.7'))
+
+
+@pytest.mark.parametrize('change', [
+    dict(transport='http'), dict(transport='UNIX'), dict(transport=None),
+    dict(port=0), dict(port=65536), dict(port=True), dict(port='9390'),
+    dict(qod_floor=-1), dict(qod_floor=101), dict(qod_floor=True), dict(qod_floor=70.5),
+    dict(auto_enrichment=1), dict(auto_enrichment='yes'),
+    dict(socket_path='relative/gvmd.sock'), dict(ca_file='ca.pem'),
+    dict(socket_path='/run/gvmd.sock\n'), dict(task_ids='abc'), dict(task_ids=None),
+    dict(host='https://gvm.example.invalid'), dict(host='gvm.example.invalid/x'),
+    dict(host='gvm example'), dict(host='gvm.example.invalid\n'), dict(host='gvm.example.invalid:9390')])
+def test_invalid_scanner_values_are_rejected(change):
+    with pytest.raises(ValueError):
+        config.validate(with_scanner(**change))
+
+
+@pytest.mark.parametrize('change', [
+    dict(qod_floor=0), dict(qod_floor=100), dict(port=1), dict(port=65535),
+    dict(socket_path='/run/gvmd/gvmd.sock'), dict(host='gvm.example.invalid'), dict(host='198.51.100.9'),
+    dict(host='2001:db8::1')])
+def test_valid_scanner_values_are_accepted(change):
+    config.validate(with_scanner(**change))
+
+
+def test_missing_scanner_field_is_rejected():
+    value = with_scanner()
+    del value['scanner']['qod_floor']
+    with pytest.raises(ValueError):
+        config.validate(value)
+
+
+def test_gmp_target_unix_and_tls():
+    unix = config.gmp_target(with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    assert (unix.transport, unix.socket_path, unix.host, unix.ca_file, unix.timeout) == (
+        'unix', '/run/gvmd/gvmd.sock', None, None, 30.0)
+    tls = config.gmp_target(with_scanner(transport='tls', host='gvm.example.invalid', port=9391,
+                                         ca_file='/etc/ssl/ca.pem'), timeout=5.0)
+    assert (tls.transport, tls.host, tls.port, tls.ca_file, tls.timeout, tls.socket_path) == (
+        'tls', 'gvm.example.invalid', 9391, '/etc/ssl/ca.pem', 5.0, None)
+
+
+def test_gmp_target_refuses_an_unconfigured_connection():
+    with pytest.raises(ValueError):
+        config.gmp_target(with_scanner())  # unix with no socket path
+
+
+# --- the served Scanner section ---------------------------------------------------------------
+
+USER_VAR, PASS_VAR = 'RZ_GREENBONE_USERNAME', 'RZ_GREENBONE_PASSWORD'
+SECRET = 'synthetic-greenbone-password'
+
+
+def scanner_form(token, **given):
+    fields = {'token': token, 'section': 'scanner', 'transport': 'unix', 'socket_path': '/run/gvmd/gvmd.sock',
+              'host': '', 'port': '9390', 'ca_file': '', 'task_ids': '', 'qod_floor': '70'}
+    fields.update(given)
+    return fields
+
+
+class FakeClient:
+    """Stands in for GmpClient: records its target, never opens a socket."""
+    instances = []
+    tasks = []
+    error = None
+
+    def __init__(self, target, username, password):
+        self.target, self.username, self.password = target, username, password
+        self.skipped_tasks = 0
+        FakeClient.instances.append(self)
+
+    def __enter__(self):
+        if FakeClient.error:
+            raise FakeClient.error
+        return self
+
+    def __exit__(self, *exc):
+        return None
+
+    def list_tasks(self):
+        return list(FakeClient.tasks)
+
+
+@pytest.fixture
+def gmp(app, monkeypatch):
+    from scripts import local
+    FakeClient.instances, FakeClient.error = [], None
+    FakeClient.tasks = [{'task_id': TASK_1, 'name': 'Weekly LAN'}, {'task_id': TASK_2, 'name': 'DMZ <b>'}]
+    monkeypatch.setattr(local, 'GmpClient', FakeClient)
+    monkeypatch.setenv(USER_VAR, 'reader')
+    monkeypatch.setenv(PASS_VAR, SECRET)
+    return app
+
+
+def scanner_page(request):
+    return request(route='/?view=settings&section=scanner')
+
+
+def _task_inputs(body):
+    return re.findall(r'<input[^>]*name="task_ids"[^>]*>', body)
+
+
+def test_scanner_section_renders_and_saves(app, monkeypatch):
+    monkeypatch.delenv(USER_VAR, raising=False)
+    monkeypatch.delenv(PASS_VAR, raising=False)
+    path, request = app
+    status, body, _ = scanner_page(request)
+    assert status == 200 and '>Scanner</a>' in body
+    for name in ('transport', 'socket_path', 'host', 'port', 'ca_file', 'task_ids', 'qod_floor', 'auto_enrichment'):
+        assert f'name="{name}"' in body
+    assert 'name="username"' not in body.lower() and 'name="password"' not in body.lower()
+    assert 'RZ_GREENBONE_USERNAME' in body and 'RZ_GREENBONE_PASSWORD' in body
+    assert re.search(r'<input[^>]*name="auto_enrichment"(?![^>]*checked)[^>]*>', body)
+    token = re.search('name="token" value="([^"]+)"', body)[1]
+    fields = scanner_form(token, transport='tls', host='gvm.example.invalid', port='9391', ca_file='/etc/ssl/ca.pem',
+                          task_ids=f'{TASK_1.upper()}\n\n{TASK_2}\r\n{TASK_1}\n', qod_floor='80', auto_enrichment='yes')
+    status, _, headers = request('POST', '/settings', fields)
+    assert status == 303 and headers['Location'] == '/?view=settings&section=scanner&saved=1'
+    saved = config.load(path)['scanner']
+    assert saved == {'transport': 'tls', 'socket_path': '/run/gvmd/gvmd.sock', 'host': 'gvm.example.invalid',
+                     'port': 9391, 'ca_file': '/etc/ssl/ca.pem', 'task_ids': [TASK_1, TASK_2],
+                     'qod_floor': 80, 'auto_enrichment': True}
+    body = scanner_page(request)[1]
+    assert 'value="gvm.example.invalid"' in body and 'value="80"' in body and TASK_2 in body
+    # Saving without the checkbox turns auto-enrichment off; other sections are untouched.
+    assert request('POST', '/settings', scanner_form(token))[0] == 303
+    after = config.load(path)
+    assert after['scanner']['auto_enrichment'] is False and after['scanner']['task_ids'] == []
+    assert after['roles'] == config.DEFAULTS['roles']
+
+
+def test_unset_credentials_name_both_variables_and_make_no_connection(app, monkeypatch):
+    from scripts import local
+    monkeypatch.delenv(USER_VAR, raising=False)
+    monkeypatch.delenv(PASS_VAR, raising=False)
+    monkeypatch.setattr(local, 'GmpClient', lambda *a: pytest.fail('connected without credentials'))
+    path, request = app
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_1]))
+    body = scanner_page(request)[1]
+    assert 'Set RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD' in body
+    assert TASK_1 in body  # task IDs can still be typed and kept by hand
+    token = re.search('name="token" value="([^"]+)"', body)[1]
+    test = request('POST', '/settings', dict(token=token, section='scanner_test'))
+    assert test[0] == 200 and 'RZ_GREENBONE_USERNAME' in test[1]
+
+
+def test_scanner_section_never_shows_the_password(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    for route in ('/?view=settings&section=scanner', '/?view=settings&section=model'):
+        assert SECRET not in request(route=route)[1]
+    token = _token(request)
+    assert SECRET not in request('POST', '/settings', dict(token=token, section='scanner_test'))[1]
+    FakeClient.error = RuntimeError(f'boom {SECRET}')
+    assert SECRET not in scanner_page(request)[1]
+    assert SECRET not in path.read_text()
+
+
+def test_task_list_is_read_with_a_short_timeout_and_names_are_escaped(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_2]))
+    body = scanner_page(request)[1]
+    assert len(FakeClient.instances) == 1
+    client = FakeClient.instances[0]
+    assert client.target.timeout == 5.0 and (client.username, client.password) == ('reader', SECRET)
+    assert 'Weekly LAN' in body and 'DMZ &lt;b&gt;' in body and 'DMZ <b>' not in body
+    ticks = _task_inputs(body)
+    assert any(TASK_2 in t and 'checked' in t for t in ticks)
+    assert any(TASK_1 in t and 'checked' not in t for t in ticks)
+
+
+def test_ticked_and_typed_tasks_are_united_and_deduplicated(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    token = _token(request)
+    pairs = list(scanner_form(token, task_ids=f'{TASK_3}\n{TASK_1}').items()) + [('task_ids', TASK_1), ('task_ids', TASK_2)]
+    assert request('POST', '/settings', pairs)[0] == 303
+    assert config.load(path)['scanner']['task_ids'] == [TASK_3, TASK_1, TASK_2]
+
+
+def test_a_chosen_task_greenbone_no_longer_lists_stays_chosen(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_3]))
+    body = scanner_page(request)[1]
+    assert 'not found on Greenbone' in body
+    assert any(TASK_3 in t and 'checked' in t for t in _task_inputs(body))
+
+
+def test_unreachable_greenbone_shows_only_the_error_class(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock', task_ids=[TASK_1]))
+    from tools.gmp import GmpError
+    FakeClient.error = GmpError('server said: ' + SECRET + ' <script>alert(1)</script>')
+    status, body, _ = scanner_page(request)
+    assert status == 200
+    assert 'Could not reach Greenbone: GmpError' in body
+    assert 'server said' not in body and 'alert(1)' not in body
+    assert TASK_1 in body and 'name="task_ids"' in body  # still usable by hand
+
+
+def test_test_connection_uses_saved_settings_and_never_saves(gmp):
+    path, request = gmp
+    config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
+    before = path.read_bytes()
+    FakeClient.instances.clear()
+    token = _token(request)
+    status, body, _ = request('POST', '/settings', dict(token=token, section='scanner_test'))
+    assert status == 200 and path.read_bytes() == before
+    assert 'Connected' in body and 'Authenticated' in body and '2 tasks' in body
+    assert 'saved settings' in body
+    assert FakeClient.instances[0].target.timeout == 5.0
+    assert FakeClient.instances[0].target.socket_path == '/run/gvmd/gvmd.sock'
+    FakeClient.error = RuntimeError('zq-secret-text')
+    body = request('POST', '/settings', dict(token=token, section='scanner_test'))[1]
+    assert 'Could not reach Greenbone: RuntimeError' in body and 'zq-secret-text' not in body
+    assert path.read_bytes() == before
+
+
+def test_test_connection_needs_the_csrf_token_and_origin(gmp):
+    path, request = gmp
+    assert request('POST', '/settings', dict(token='wrong', section='scanner_test'))[0] == 403
+    token = _token(request)
+    assert request('POST', '/settings', dict(token=token, section='scanner_test'), origin='https://evil.invalid')[0] == 403
+    assert not FakeClient.instances
+
+
+@pytest.mark.parametrize('key', ['username', 'password', 'Username', 'PASSWORD'])
+def test_posting_a_credential_is_refused_and_saves_nothing(gmp, key):
+    path, request = gmp
+    fields = scanner_form(_token(request), **{key: 'hunter2'})
+    assert request('POST', '/settings', fields)[0] == 400
+    assert not path.exists()
+
+
+@pytest.mark.parametrize('change', [
+    dict(task_ids='nope'), dict(port='0'), dict(port='99999'), dict(port='9 '), dict(port='٣'),
+    dict(qod_floor='101'), dict(qod_floor='-1'), dict(qod_floor='x'), dict(transport='tls', host=''),
+    dict(transport='http'), dict(socket_path='relative.sock'), dict(ca_file='ca.pem'),
+    dict(host='https://gvm.example.invalid'), dict(auto_enrichment='on')])
+def test_invalid_scanner_posts_are_refused_and_save_nothing(gmp, change):
+    path, request = gmp
+    assert request('POST', '/settings', scanner_form(_token(request), **change))[0] == 400
+    assert not path.exists()
+
+
+def test_scanner_post_requires_exactly_the_scanner_fields(gmp):
+    path, request = gmp
+    token = _token(request)
+    missing = scanner_form(token)
+    del missing['qod_floor']
+    assert request('POST', '/settings', missing)[0] == 400
+    assert request('POST', '/settings', scanner_form(token, extra='1'))[0] == 400
+    assert not path.exists()
+
+
+def test_other_sections_still_reject_repeated_fields(app):
+    path, request = app
+    token = _token(request)
+    pairs = [('token', token), ('section', 'application'), ('mode', 'saved'), ('port', '8082'), ('task_ids', TASK_1)]
+    assert request('POST', '/settings', pairs)[0] == 400
+    assert not path.exists()
+
+
+@pytest.fixture
+def fake_gvmd(tmp_path_factory, fake_endpoints):
+    import socket as socket_module
+    from tests.test_gmp import FakeGvmd, default_handler
+    sock_dir = tmp_path_factory.mktemp('g')
+    sock_path = str(sock_dir / 'gvmd.sock')
+    listener = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    listener.bind(sock_path)
+    listener.listen(4)
+    fake_endpoints.unix(sock_path)
+    server = FakeGvmd(listener, default_handler())
+    yield sock_path, server
+    server.close()
+
+
+def test_task_list_from_a_real_fake_gvmd_over_a_unix_socket(app, fake_gvmd, monkeypatch):
+    from tests.test_gmp import TASK_A, TASK_B, USER, PASSWORD
+    sock_path, server = fake_gvmd
+    monkeypatch.setenv(USER_VAR, USER)
+    monkeypatch.setenv(PASS_VAR, PASSWORD)
+    path, request = app
+    config.save(path, with_scanner(socket_path=sock_path))
+    body = scanner_page(request)[1]
+    assert 'Weekly LAN' in body and 'DMZ' in body and TASK_A in body and TASK_B in body
+    assert PASSWORD not in body
+    sent = b''.join(server.requests)
+    assert b'get_tasks' in sent and b'authenticate' in sent

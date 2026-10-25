@@ -8,10 +8,10 @@ from tools.model_roles import FAMILIES, ROLES
 from tools.models import FORMATS
 
 SECTIONS = {'model': 'Model connection', 'storage': 'Data & storage',
-            'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
+            'scanner': 'Scanner', 'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
 
 
-def render_settings(values, section, token, *, message='', keys=None, overrides=False):
+def render_settings(values, section, token, *, message='', keys=None, overrides=False, scanner=None):
     e = lambda v: escape(str(v), quote=True)
     tabs = '<nav class="settings-tabs" aria-label="Settings sections">' + ''.join(
         f'<a href="/?view=settings&amp;section={k}" aria-current="{"page" if k == section else "false"}">{v}</a>'
@@ -47,6 +47,8 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
         if overrides:
             body += '<p class="notice">RZ_MODEL_ENDPOINT or RZ_MODEL is set in this process. Environment values override the saved proposer for command-line runs.</p>'
         body += '<details><summary>Run an optional sample check</summary><p>From your installation folder, run <code>python3 -m scripts.local check-models</code> (add <code>--role reviewer</code> to check one role). This sends the bundled synthetic example to each configured model and may incur provider charges. On Windows, use <code>py -3.12</code>. Use the same database and environment as the dashboard. No check runs when you open this page.</p></details>'
+    elif section == 'scanner':
+        body = _scanner_body(values['scanner'], scanner or {}, form, token, e)
     elif section == 'application':
         options = ''.join(f'<option value="{v}" {"selected" if values["mode"] == v else ""}>{label}</option>' for v, label in [('demo','Demo examples'),('saved','Saved records')])
         body = '<h2>Make it yours</h2><p>These preferences apply the next time you start the installed launcher. Command-line flags take priority.</p>'
@@ -59,3 +61,56 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
     else:
         body = '<h2>Keep your workspace intact</h2><dl><dt>Edition</dt><dd>Local preview</dd><dt>Version</dt><dd>Development build</dd><dt>Update check</dt><dd>Unavailable — no automatic check runs</dd></dl><details><summary>Install a newer preview</summary><ol><li>Stop the app and back up your database and preferences.</li><li>Install the new build into a separate directory.</li><li>Keep the original installation until you have verified the new version.</li></ol><p>There is no automatic upgrade or database migration workflow. Do not overwrite your existing installation.</p></details><details><summary>Destination already exists</summary><p>Use its start-remediation-zero.py launcher, or choose a new directory with the installer’s --directory option. Nothing was overwritten.</p></details><details><summary>Port already in use</summary><p>Stop the previous launcher or start with --port 8082.</p></details><p>Installer signatures are not available. Checksums detect corruption; they do not establish publisher authenticity.</p>'
     return tabs + (f'<p role="status" class="notice">{e(message)}</p>' if message else '') + '<section class="card settings-card">' + body + '</section>'
+
+
+def _scanner_body(cfg, probe, form, token, e):
+    """The Scanner section. `probe` is what the server learned from Greenbone, if anything:
+    state ('unset' | 'unconfigured' | 'ok' | 'error'), tasks, error (a class name), test (bool).
+    Task names are server-supplied and untrusted: they are escaped and go no further than this page."""
+    state, tasks = probe.get('state', 'unconfigured'), probe.get('tasks') or []
+    chosen = cfg['task_ids']
+    listed = {t['task_id'] for t in tasks}
+    transport = ''.join(f'<option value="{v}" {"selected" if cfg["transport"] == v else ""}>{label}</option>'
+                        for v, label in [('unix', 'Unix socket (same machine)'), ('tls', 'TLS (remote gvmd)')])
+    ticks, typed = '', '\n'.join(chosen)
+    if state == 'ok':
+        typed = ''
+        shown = [t for t in tasks if t['task_id'] in chosen]
+        shown += [t for t in tasks if t['task_id'] not in chosen][:100]
+        ticks = '<fieldset class="role-block"><legend>Tasks on this Greenbone account</legend>'
+        ticks += ''.join(
+            f'<label class="check"><input name="task_ids" type="checkbox" value="{e(t["task_id"])}" {"checked" if t["task_id"] in chosen else ""}> {e(t["name"])} <code>{e(t["task_id"])}</code></label>'
+            for t in shown) or '<p>This account has no tasks.</p>'
+        if len(tasks) > len(shown):
+            ticks += f'<p>Showing {len(shown)} of {len(tasks)} tasks. Chosen tasks are always shown; type any other ID below.</p>'
+        ticks += ''.join(
+            f'<label class="check"><input name="task_ids" type="checkbox" value="{e(i)}" checked> <code>{e(i)}</code> (not found on Greenbone)</label>'
+            for i in chosen if i not in listed)
+        ticks += '</fieldset>'
+    fields = (
+        f'<label>Connection<select name="transport">{transport}</select></label>'
+        f'<label>Socket path (Unix)<input name="socket_path" maxlength="1024" value="{e(cfg["socket_path"])}" placeholder="/run/gvmd/gvmd.sock"></label>'
+        f'<label>Host (TLS)<input name="host" maxlength="253" value="{e(cfg["host"])}" placeholder="gvm.example.invalid"></label>'
+        f'<label>Port (TLS)<input name="port" type="number" min="1" max="65535" required value="{e(cfg["port"])}"></label>'
+        f'<label>CA certificate file (TLS, optional)<input name="ca_file" maxlength="1024" value="{e(cfg["ca_file"])}" placeholder="/etc/ssl/gvm-ca.pem"></label>'
+        f'{ticks}'
+        f'<label>Task IDs, one per line<textarea name="task_ids" rows="4" maxlength="4096">{e(typed)}</textarea></label>'
+        '<p>Only the tasks you choose are imported. An empty list pulls nothing.</p>'
+        f'<label>Quality-of-detection floor (0-100)<input name="qod_floor" type="number" min="0" max="100" step="1" required value="{e(cfg["qod_floor"])}"></label>'
+        f'<label class="check"><input name="auto_enrichment" type="checkbox" value="yes" {"checked" if cfg["auto_enrichment"] else ""}> Fetch enrichment automatically after an import</label>'
+        '<p>Credentials are never entered or saved here. Set <code>RZ_GREENBONE_USERNAME</code> and <code>RZ_GREENBONE_PASSWORD</code> in the environment before starting the app.</p>')
+    body = '<h2>Connect Greenbone</h2><p>Remediation Zero reads tasks and finished reports from Greenbone. It never changes anything there.</p>'
+    body += form(fields)
+    if state == 'unset':
+        body += '<p class="notice">Set RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD in the environment to list tasks. No connection was attempted.</p>'
+    elif state == 'unconfigured':
+        body += '<p class="notice">Save a socket path (Unix) or host (TLS) to list the account\'s tasks.</p>'
+    elif state == 'error':
+        body += f'<p class="notice">Could not reach Greenbone: {e(probe.get("error", "Error"))}. You can still type task IDs by hand.</p>'
+    if probe.get('test'):
+        if state == 'ok':
+            body += f'<p role="status" class="notice">Connected: yes. Authenticated: yes. Listed {len(tasks)} tasks.</p>'
+        body += '<p>The test used the saved settings, not unsaved changes to the form. Nothing was saved.</p>'
+    body += (f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}">'
+             '<input type="hidden" name="section" value="scanner_test"><div class="row"><button type="submit">Test connection</button></div></form>')
+    return body

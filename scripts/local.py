@@ -38,6 +38,7 @@ from tools.delivery import GitHubDelivery
 from tools.enrichment import EnrichmentCache, finding_cves
 from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
+from tools.gmp import GmpClient, GmpError, credentials_from_env
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
@@ -55,6 +56,9 @@ NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.js
 MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
 # mode and port are required; the checkbox and the interval may be absent.
 APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes'}
+SCANNER_REQUIRED = {'transport', 'socket_path', 'host', 'port', 'ca_file', 'task_ids', 'qod_floor'}
+SCANNER_FIELDS = SCANNER_REQUIRED | {'auto_enrichment'}
+SCANNER_PAGE_TIMEOUT = 5.0  # the settings page must stay responsive when Greenbone is not
 NOT_A_WORKSPACE = ('{} is not a Remediation Zero workspace directory (a single-file database from an earlier '
                    'version, or a non-empty folder). Choose a new or empty directory with --database DIR; '
                    'nothing was changed.')
@@ -247,6 +251,46 @@ class _View:
         return snapshot(self._docs)
 
 
+def scanner_probe(settings, *, test=False):
+    """What the Scanner section learns from Greenbone, from the saved settings.
+
+    Never raises, never returns server text: a failure is reported as its class name only.
+    With credentials unset or no connection saved, no connection is attempted."""
+    try:
+        username, password = credentials_from_env(os.environ)
+    except GmpError:
+        return {'state': 'unset', 'test': test}
+    try:
+        target = local_settings.gmp_target(settings, timeout=SCANNER_PAGE_TIMEOUT)
+    except ValueError:
+        return {'state': 'unconfigured', 'test': test}
+    try:
+        with GmpClient(target, username, password) as client:
+            tasks = client.list_tasks()
+    except Exception as error:
+        return {'state': 'error', 'error': type(error).__name__, 'test': test}
+    return {'state': 'ok', 'tasks': tasks, 'test': test}
+
+
+def _scanner_values(fields, values):
+    """The scanner settings a posted form describes: the union of the typed and ticked task IDs."""
+    ints = {}
+    for name in ('port', 'qod_floor'):
+        text = fields[name]
+        if not (text.isascii() and text.isdigit()):  # ASCII digits only; validate checks the range
+            raise ValueError()
+        ints[name] = int(text)
+    if fields.get('auto_enrichment', 'yes') != 'yes':
+        raise ValueError()
+    task_ids = []
+    for line in fields['task_ids'].splitlines():
+        line = line.strip().lower()
+        if line and line not in task_ids:
+            task_ids.append(line)
+    return dict(transport=fields['transport'], socket_path=fields['socket_path'], host=fields['host'],
+                ca_file=fields['ca_file'], task_ids=task_ids, auto_enrichment='auto_enrichment' in fields, **ints)
+
+
 def handler(store, demo, config_path=None, approve_command=None):
     token = secrets.token_urlsafe(32)
     class DashboardHandler(BaseHTTPRequestHandler):
@@ -266,15 +310,23 @@ def handler(store, demo, config_path=None, approve_command=None):
             try:
                 settings_html = None
                 if config_path:
-                    settings_html = render_settings(local_settings.load(config_path), section if section in SECTIONS else 'model', token,
+                    saved = local_settings.load(config_path)
+                    settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
                         message='Preferences saved. No model calls were made.' if parse_qs(parsed.query).get('saved') == ['1'] else '',
-                        keys={role: key_present(role, os.environ) for role in ROLES},
-                        overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')))
+                        scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None)
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
                               approve_command=None if demo else approve_command)
                 status = 200
             except Exception:
                 body, status = render({}, view, unavailable=True, settings_html="" if config_path else None), 503
+            self._send_html(body, status)
+
+        def _settings_html(self, values, section, *, message='', scanner=None):
+            return render_settings(values, section, token, message=message,
+                keys={role: key_present(role, os.environ) for role in ROLES},
+                overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
+
+        def _send_html(self, body, status):
             encoded = body.encode()
             self.send_response(status)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -298,16 +350,30 @@ def handler(store, demo, config_path=None, approve_command=None):
                 if (not 0 < length <= 8192 or self.headers.get('Transfer-Encoding')
                         or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
                     raise ValueError()
-                fields = parse_qs(self.rfile.read(length).decode('utf-8'), keep_blank_values=True, strict_parsing=True, max_num_fields=20)
-                if any(len(v) != 1 for v in fields.values()):
+                raw = self.rfile.read(length).decode('utf-8')
+                # Only the Scanner form repeats a field (one task_ids per ticked task) and may be longer.
+                scanner_form = 'section=scanner' in raw.split('&')
+                fields = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=200 if scanner_form else 20)
+                if any(len(v) != 1 for k, v in fields.items() if not (scanner_form and k == 'task_ids')):
                     raise ValueError()
-                fields = {k: v[0] for k, v in fields.items()}
+                fields = {k: '\n'.join(v) if k == 'task_ids' else v[0] for k, v in fields.items()}
                 if not secrets.compare_digest(fields.pop('token', '').encode(), token.encode()):
                     self.send_error(403)
                     return
                 section = fields.pop('section', '')
                 values = local_settings.load(config_path)
-                if section == 'model' and set(fields) == MODEL_FIELDS:
+                if section == 'scanner_test' and not fields:
+                    # Tests the saved settings. Never saves, so nothing below runs.
+                    self._send_html(render(demo_snapshot() if demo else store.snapshot(), 'settings', demo=demo,
+                                           settings_html=self._settings_html(values, 'scanner', scanner=scanner_probe(values, test=True)),
+                                           approve_command=None if demo else approve_command), 200)
+                    return
+                if section == 'scanner':
+                    # A credential is never accepted, whatever the field is called or how it is cased.
+                    if any(k.lower() in {'username', 'password'} for k in fields) or not SCANNER_REQUIRED <= set(fields) <= SCANNER_FIELDS:
+                        raise ValueError()
+                    values['scanner'] = _scanner_values(fields, values)
+                elif section == 'model' and set(fields) == MODEL_FIELDS:
                     for role in ROLES:
                         endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
                         values['roles'][role] = None if not (endpoint or model) else {
