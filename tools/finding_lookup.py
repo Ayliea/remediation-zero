@@ -40,7 +40,7 @@ from dataclasses import replace
 from typing import Any, Optional
 
 from tools.docstore import as_docstore
-from tools.enrichment import EnrichmentCache
+from tools.enrichment import EnrichmentCache, enrich_finding
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.inference import render_finding
 
@@ -180,7 +180,7 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     finding["scanner_comment"] = _screen_comment(
         finding.get("scanner_comment") or "")
 
-    enrichment = _enrichment_cache().enrich(finding.get("cve_id", ""))
+    enrichment = enrich_finding(_enrichment_cache(), finding)
     enrichment = replace(
         enrichment,
         description=_screen_comment(enrichment.description or ""),

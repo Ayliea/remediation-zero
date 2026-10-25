@@ -17,7 +17,8 @@ import logging
 from typing import Any, Optional
 
 from engine.ports import Ports
-from tools.enrichment import EnrichmentCache
+from tools.enrichment import EnrichmentCache, enrich_finding, finding_cves
+from tools.docstore import FieldFilter
 from tools.exception_store import ExceptionWriter
 from tools.exceptions import Exception_, ExceptionAction, next_action
 
@@ -74,6 +75,18 @@ def run_sweep(ports: Ports, cycle: int) -> dict[str, int]:
     return actions
 
 
+def _decided_severity(ports: Ports, finding_id: str) -> str:
+    """The severity of the finding's latest decision; "critical" when there is
+    none, so an unjudged no-CVE finding fails closed."""
+    rows = [d.to_dict() or {} for d in ports.docs.collection("decisions").where(
+        filter=FieldFilter("finding_id", "==", finding_id)).stream()]
+    rows = [r for r in rows if r.get("proposed_severity")]
+    if not rows:
+        return "critical"
+    latest = max(rows, key=lambda r: (r.get("cycle") or 0, r.get("sim_ts") or 0))
+    return str(latest["proposed_severity"]).lower()
+
+
 def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
            cycle: int, *, approved_by_human: bool = False,
            enrichment: Optional[Any] = None) -> str:
@@ -92,13 +105,22 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
     # No KEV source: membership is unknown (None), which the acceptance rules
     # refuse without a person. The getattr(..., True) fallback exists only for
     # test fakes; production always passes an EnrichmentCache, which has has_kev.
-    in_kev = (cache.enrich(finding["cve_id"]).in_kev
-              if getattr(cache, "has_kev", True) else None)
+    # A finding with no CVE cannot be checked against KEV at all: in_kev is
+    # False, and the acceptance rule is the decided severity instead. With
+    # several CVEs, in_kev is True if any one of them is.
+    no_cve_severity = None
+    if not finding_cves(finding):
+        in_kev = False
+        no_cve_severity = _decided_severity(ports, finding_id)
+    else:
+        in_kev = (enrich_finding(cache, finding).in_kev
+                  if getattr(cache, "has_kev", True) else None)
     try:
         result = _writer(ports).accept(
             finding_id=finding_id, cycle=cycle, accepted_by=by,
             reason=reason, ttl_days=ttl_days, in_kev=in_kev,
             approved_by_human=approved_by_human,
+            no_cve_severity=no_cve_severity,
         )
         _log("risk_accepted", cycle_id, finding_id, ttl_days=ttl_days,
              in_kev=in_kev, approved_by_human=approved_by_human,

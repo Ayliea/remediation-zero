@@ -287,9 +287,10 @@ def run_lifecycle(h, clock, tmp_path):
     assert (report["metrics"]["ratified"], report["metrics"]["held_for_approval"],
             report["metrics"]["unreviewed"]) == (1, 1, 2)
 
-    # A corpus record with no CVE stops the next cycle. The failure is kept
-    # (class only) and the reopened D is re-triaged once before it.
-    extra = write_corpus(tmp_path / "corpus-2", [{"finding_id": E, "asset_id": "ast-02",
+    # A corpus record with no asset stops the next cycle (a finding with no CVE
+    # is valid now, so the malformation is the missing asset). The failure is
+    # kept (class only) and the reopened D is re-triaged once before it.
+    extra = write_corpus(tmp_path / "corpus-2", [{"finding_id": E, "cve_id": "CVE-2021-44228",
                                                   "status": "open"}], [], [])
     seed(ports(h, "seed", clock), extra)
     with pytest.raises(KeyError):

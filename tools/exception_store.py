@@ -48,6 +48,7 @@ class ExceptionWriter:
         ttl_days: int,
         in_kev: Optional[bool],
         approved_by_human: bool = False,
+        no_cve_severity: Optional[str] = None,
     ) -> str:
         """Record a risk acceptance.
 
@@ -61,6 +62,7 @@ class ExceptionWriter:
                 reason=reason,
                 in_kev=in_kev,
                 approved_by_human=approved_by_human,
+                no_cve_severity=no_cve_severity,
             )
         except ValueError as exc:
             # The refusal is a side effect, so it takes a key like every other

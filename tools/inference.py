@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.adjudication import CapacityError, Proposal, Verdict
-from tools.enrichment import Enrichment
+from tools.enrichment import Enrichment, finding_cves
 from tools.models import ChatAdapter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -147,6 +147,10 @@ def _defang_fence(text: str) -> str:
     return text
 
 
+def _percent(qod: Any) -> str:
+    return f"{qod}%" if isinstance(qod, (int, float)) and not isinstance(qod, bool) else "not known"
+
+
 def render_finding(
     finding: Mapping[str, Any], asset: Mapping[str, Any], enrichment: Enrichment
 ) -> str:
@@ -157,29 +161,55 @@ def render_finding(
     between system-supplied fact and scanner-supplied text is explicit in the
     context rather than implied by position.
     """
-    lines = [
-        f"finding_id: {finding['finding_id']}",
-        f"cve_id: {finding['cve_id']}",
+    # A finding with a single cve_id and none of the Greenbone fields renders
+    # byte-for-byte as it always has: any change here changes every inference
+    # fingerprint in the cloud edition (see test_single_cve_cloud_render_is_unchanged).
+    legacy = (bool(finding.get("cve_id")) and "cve_ids" not in finding
+              and "nvt_name" not in finding and "qod" not in finding)
+    if legacy:
+        head = [f"finding_id: {finding['finding_id']}", f"cve_id: {finding['cve_id']}"]
+        asset_value = lambda key: asset.get(key)  # noqa: E731
+    else:
+        cves = finding_cves(finding)
+        head = [f"finding_id: {finding['finding_id']}",
+                f"cve_ids: {', '.join(cves) if cves else 'none (no CVE)'}",
+                f"nvt_name: {finding.get('nvt_name') or 'not known'}",
+                f"qod: {_percent(finding.get('qod'))}"]
+        asset_value = lambda key: ("not known" if asset.get(key) is None  # noqa: E731
+                                   else asset.get(key))
+    applicable = getattr(enrichment, "applicable", True)
+    na = "not applicable (no CVE)"
+    lines = head + [
         f"scanner_severity: {finding.get('scanner_severity')}",
         f"scanner_cvss: {finding.get('scanner_cvss')}",
         f"port: {finding.get('port')}",
         "",
         "ASSET",
-        f"  hostname: {asset.get('hostname')}",
-        f"  environment: {asset.get('environment')}",
-        f"  criticality: {asset.get('criticality')}",
-        f"  internet_facing: {asset.get('internet_facing')}",
+        f"  hostname: {asset_value('hostname')}",
+        f"  environment: {asset_value('environment')}",
+        f"  criticality: {asset_value('criticality')}",
+        f"  internet_facing: {asset_value('internet_facing')}",
         "",
         "ENRICHMENT",
-        f"  in_cisa_kev: {enrichment.in_kev if getattr(enrichment, 'kev_checked', True) else 'unknown (KEV list not available)'}",
-        f"  kev_due_date: {enrichment.kev_due_date or 'not applicable'}",
-        f"  kev_known_ransomware_use: {enrichment.kev_ransomware}",
-        f"  epss_score: {enrichment.epss_score if enrichment.epss_score is not None else 'no data'}",
-        f"  epss_percentile: {enrichment.epss_percentile if enrichment.epss_percentile is not None else 'no data'}",
-        f"  cvss_base: {enrichment.cvss_base if enrichment.cvss_base is not None else 'no data'}",
-        f"  cvss_severity: {enrichment.cvss_severity or 'no data'}",
-        f"  nvd_description: {(enrichment.description or 'no data')[:400]}",
-        f"  sources_available: {', '.join(enrichment.sources) or 'none'}",
+    ]
+    if applicable:
+        lines += [
+            f"  in_cisa_kev: {enrichment.in_kev if getattr(enrichment, 'kev_checked', True) else 'unknown (KEV list not available)'}",
+            f"  kev_due_date: {enrichment.kev_due_date or 'not applicable'}",
+            f"  kev_known_ransomware_use: {enrichment.kev_ransomware}",
+            f"  epss_score: {enrichment.epss_score if enrichment.epss_score is not None else 'no data'}",
+            f"  epss_percentile: {enrichment.epss_percentile if enrichment.epss_percentile is not None else 'no data'}",
+            f"  cvss_base: {enrichment.cvss_base if enrichment.cvss_base is not None else 'no data'}",
+            f"  cvss_severity: {enrichment.cvss_severity or 'no data'}",
+            f"  nvd_description: {(enrichment.description or 'no data')[:400]}",
+            f"  sources_available: {', '.join(enrichment.sources) or 'none'}",
+        ]
+    else:
+        lines += [f"  {name}: {na}" for name in (
+            "in_cisa_kev", "kev_due_date", "kev_known_ransomware_use", "epss_score",
+            "epss_percentile", "cvss_base", "cvss_severity", "nvd_description",
+            "sources_available")]
+    lines += [
         "",
         FENCE_BEGIN,
         _defang_fence(finding.get("scanner_comment") or "(empty)"),

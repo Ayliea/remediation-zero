@@ -34,9 +34,9 @@ triage can reason about and cite.
 """
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "cache"
@@ -64,6 +64,10 @@ class Enrichment:
     sources: tuple[str, ...] = field(default_factory=tuple)
     #: False when no KEV list was available, so `in_kev` is unknown, not "no".
     kev_checked: bool = True
+    #: False when the finding has no CVE, so KEV, EPSS and NVD do not apply.
+    #: That is "not applicable", which is different from "no data" and from
+    #: "unknown", and must never be read as evidence of safety.
+    applicable: bool = True
 
     @property
     def has_evidence(self) -> bool:
@@ -187,3 +191,45 @@ class EnrichmentCache:
             )
 
         return None, None, None, description
+
+
+def finding_cves(finding: Mapping[str, Any]) -> list[str]:
+    """Every CVE a finding carries, in order, without duplicates.
+
+    Greenbone findings carry `cve_ids` (possibly empty); older findings carry
+    only a single `cve_id`.
+    """
+    listed = finding.get("cve_ids")
+    if listed is None:
+        listed = [finding["cve_id"]] if finding.get("cve_id") else []
+    seen: list[str] = []
+    for cve in listed:
+        if cve and cve not in seen:
+            seen.append(cve)
+    return seen
+
+
+def enrich_finding(cache: EnrichmentCache, finding: Mapping[str, Any]) -> Enrichment:
+    """The one enrichment rule for a finding with zero, one or several CVEs.
+
+    No CVE: not applicable (KEV, EPSS and NVD have nothing to say), which is
+    not the same as unknown. One CVE: exactly `cache.enrich`. Several: the one
+    in KEV, else the highest EPSS score, else the first, with every CVE's
+    sources merged so the citation covers what was consulted.
+    """
+    cves = finding_cves(finding)
+    if not cves:
+        return Enrichment(cve_id="", applicable=False, kev_checked=getattr(cache, "has_kev", True))
+    if len(cves) == 1:
+        return cache.enrich(cves[0])
+    found = [cache.enrich(cve) for cve in cves]
+    chosen = next((e for e in found if e.in_kev), None)
+    if chosen is None:
+        scored = [e for e in found if e.epss_score is not None]
+        chosen = max(scored, key=lambda e: e.epss_score) if scored else found[0]
+    merged: list[str] = []
+    for e in found:
+        for source in e.sources:
+            if source not in merged:
+                merged.append(source)
+    return replace(chosen, sources=tuple(merged))

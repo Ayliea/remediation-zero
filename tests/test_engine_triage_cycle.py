@@ -411,3 +411,20 @@ def test_decision_records_whether_the_untrusted_text_was_screened(ws, verdict, e
     decision = everything(ws)["decisions"]["RZ-0001-c001"][0]
     # The flags only. Reasons can quote the untrusted text they describe.
     assert decision["screening"] == expected
+
+
+def test_no_cve_finding_is_triaged_end_to_end(ws):
+    ws.docs_for("seed").collection("findings").document(FINDING_ID).set({
+        "finding_id": FINDING_ID, "asset_id": "ast-01", "cve_ids": [],
+        "nvt_name": "SSH Weak Encryption Algorithms Supported", "qod": 95,
+        "scanner_severity": "medium", "port": "22/tcp", "scanner_comment": "benign"})
+    proposer, reviewer = FakeAdapter(PROPOSAL_JSON), FakeAdapter(RATIFY)
+
+    record = run(ports_for(ws, roles_with(proposer, reviewer)))
+
+    assert record["outcomes"] == {"ratified": 1}
+    seen = proposer.calls[0]
+    assert "cve_ids: none (no CVE)" in seen and "not applicable (no CVE)" in seen
+    assert "nvt_name: SSH Weak Encryption Algorithms Supported" in seen
+    assert "criticality: not known" in seen
+    assert "unknown (KEV list not available)" not in seen

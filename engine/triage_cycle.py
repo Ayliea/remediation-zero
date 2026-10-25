@@ -26,7 +26,7 @@ from tools.assignments import AssignmentWriter
 from tools.cycles import merge_cycle_record
 from tools.decisions import DecisionWriter
 from tools.docstore import AlreadyExists, FieldFilter
-from tools.enrichment import Enrichment
+from tools.enrichment import Enrichment, enrich_finding, finding_cves
 from tools.idempotency import derive_key
 from tools.model_armor import ArmorVerdict, apply_verdict
 from tools.ownership import Assignment, resolve_owner
@@ -171,13 +171,13 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
     finding = snapshot.to_dict()
     asset = assets.get(finding["asset_id"], {})
     finding, enriched, verdict = screen_finding(
-        ports, finding, cycle, enrichment.enrich(finding["cve_id"]))
+        ports, finding, cycle, enrich_finding(enrichment, finding))
     if verdict.blocked or not verdict.screened:
         _log("untrusted_text_screened", cycle_id, finding_id,
              blocked=verdict.blocked, screened=verdict.screened,
              confidence=verdict.confidence, reasons=list(verdict.reasons))
 
-    _log("triage_started", cycle_id, finding_id, cve_id=finding["cve_id"],
+    _log("triage_started", cycle_id, finding_id, cve_id=finding.get("cve_id"), cve_ids=finding_cves(finding),
          in_kev=enriched.in_kev, epss=enriched.epss_score)
 
     try:

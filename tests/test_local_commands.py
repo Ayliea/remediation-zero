@@ -167,9 +167,9 @@ def test_failed_triage_still_runs_chase_sweep_and_report(ws, monkeypatch, capsys
     """A finding whose run raises must not stop the rest of the lifecycle."""
     from scripts import local
     seeder = ws.docs_for("seed")
-    # A malformed reference record (no CVE) stops the second finding's triage.
+    # A malformed reference record (no asset) stops the second finding's triage.
     seeder.collection("findings").document("RZ-0002").set({
-        "finding_id": "RZ-0002", "asset_id": "ast-01", "status": "open"})
+        "finding_id": "RZ-0002", "cve_id": "CVE-2021-44228", "status": "open"})
     seeder.close()
     ran = []
     for name in ("run_chase", "run_sweep", "run_report"):
@@ -887,9 +887,9 @@ def test_failed_runs_shown_on_dashboard(ws):
     from engine.snapshot import snapshot
     from scripts.local import run_local_cycle
     from ui.dashboard_view import render
-    # A malformed reference record (no CVE) stops the finding's run partway.
+    # A malformed reference record (no asset) stops the finding's run partway.
     seeder = ws.docs_for("seed")
-    seeder.collection("findings").document(FINDING_ID).update({"cve_id": DELETE_FIELD})
+    seeder.collection("findings").document(FINDING_ID).update({"asset_id": DELETE_FIELD})
     seeder.close()
     with pytest.raises(KeyError):
         run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
@@ -901,7 +901,7 @@ def test_failed_runs_shown_on_dashboard(ws):
     page = render(data, "actions")
     section = page[page.index("Runs that did not finish"):]
     assert FINDING_ID in section and "Cycle 1" in section and "Error type: KeyError" in section
-    assert "cve_id" not in section  # the class only, never the message
+    assert "asset_id" not in section  # the class only, never the message
     # The cloud snapshot has no failed_runs key; nothing is rendered for it.
     assert "Runs that did not finish" not in render({}, "actions")
 

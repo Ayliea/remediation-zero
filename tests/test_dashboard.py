@@ -114,7 +114,7 @@ def test_old_dashboard_url_redirects_permanently_and_keeps_the_view():
 @pytest.mark.parametrize("screening, phrase", [
     ({"screened": True, "blocked": False}, "checked for unsafe content"),
     ({"screened": True, "blocked": True}, "flagged as unsafe and withheld"),
-    ({"screened": False, "blocked": True}, "were not checked, so they were withheld"),
+    ({"screened": False, "blocked": True}, "triaged on limited evidence"),
     (None, "was not recorded"),
 ])
 def test_both_pages_say_whether_scanner_notes_were_screened(screening, phrase):
@@ -126,3 +126,9 @@ def test_both_pages_say_whether_scanner_notes_were_screened(screening, phrase):
              "exceptions": [], "cycles": [], "reports": [], "scans": [],
              "latest_scan": {}, "counts": {}, "sim_now": 0, "resolved_total": 0}
     assert phrase in console.render(empty)
+
+
+def test_limited_evidence_wording():
+    text = dashboard_view.screening_text({"screening": {"screened": False, "blocked": True}})
+    assert text == ("Scanner notes were not checked, so they were withheld; "
+                    "triaged on limited evidence.")

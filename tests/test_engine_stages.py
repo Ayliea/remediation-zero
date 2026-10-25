@@ -177,6 +177,51 @@ def test_accept_refuses_kev_without_a_person(ws):
         "acceptance-refused-RZ-0001-c010").get().to_dict()["kind"] == "acceptance_refused"
 
 
+def _no_cve_finding(ws, severity):
+    docs = ws.docs_for("seed")
+    docs.collection("findings").document("RZ-0007").set(
+        {"finding_id": "RZ-0007", "asset_id": "ast-001", "status": "open", "cve_ids": []})
+    if severity is not None:
+        ws.docs_for("triage_cycle").collection("decisions").document("RZ-0007-c001").set(
+            {"finding_id": "RZ-0007", "cycle": 1, "proposed_severity": severity})
+
+
+@pytest.mark.parametrize("severity, refused", [("high", True), ("critical", True),
+                                               ("medium", False), (None, True)])
+def test_accept_of_a_no_cve_finding_uses_the_decided_severity(ws, severity, refused):
+    from engine.sweep import accept
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, severity)
+    cache = type("C", (), {"has_kev": True, "enrich": lambda self, cve: pytest.fail("no CVE")})()
+    ports = ports_for(ws, "exception_accept", clock)
+    if refused:
+        with pytest.raises(ValueError, match="No CVE"):
+            accept(ports, "RZ-0007", 30, "own-1", "x", 10, enrichment=cache)
+        assert accept(ports, "RZ-0007", 30, "own-1", "x", 10, approved_by_human=True,
+                      enrichment=cache) == "accepted:RZ-0007"
+    else:
+        assert accept(ports, "RZ-0007", 30, "own-1", "x", 10, enrichment=cache) == \
+            "accepted:RZ-0007"
+    doc = ws.docs_for("report").collection("exceptions").document("RZ-0007").get().to_dict()
+    assert doc["in_kev"] is False
+
+
+def test_accept_of_a_multi_cve_finding_is_kev_if_any_cve_is(ws):
+    from engine.sweep import accept
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    ws.docs_for("seed").collection("findings").document("RZ-0008").set(
+        {"finding_id": "RZ-0008", "asset_id": "ast-001", "status": "open",
+         "cve_ids": ["CVE-2023-5129", "CVE-2023-4863"]})
+    table = {"CVE-2023-5129": Enrichment(cve_id="CVE-2023-5129", in_kev=False),
+             "CVE-2023-4863": Enrichment(cve_id="CVE-2023-4863", in_kev=True)}
+    cache = type("C", (), {"has_kev": True, "enrich": lambda self, cve: table[cve]})()
+    with pytest.raises(ValueError, match="KEV"):
+        accept(ports_for(ws, "exception_accept", clock), "RZ-0008", 30, "own-1", "x", 10,
+               enrichment=cache)
+
+
 def test_accept_unknown_finding_raises_no_such_finding(ws):
     from engine.sweep import NoSuchFinding, accept
     clock = SimClock(mode=ClockMode.SIM)

@@ -117,3 +117,51 @@ def test_a_kev_file_that_is_not_an_object_is_an_absent_source(tmp_path, payload)
     assert cache.has_kev is False
     result = cache.enrich("CVE-2021-44228")
     assert result.in_kev is False and result.kev_checked is False
+
+
+# --- findings with zero, one or several CVEs -------------------------------------
+
+class _Cache:
+    """Answers `enrich` from a table; stands in for the on-disk cache."""
+
+    def __init__(self, table, has_kev=True):
+        self.table, self.has_kev = table, has_kev
+
+    def enrich(self, cve):
+        return self.table[cve]
+
+
+def _e(cve, **kw):
+    from tools.enrichment import Enrichment
+    return Enrichment(cve_id=cve, **kw)
+
+
+def test_no_cve_finding_is_not_applicable_and_keeps_kev_checked():
+    from tools.enrichment import enrich_finding
+    result = enrich_finding(_Cache({}, has_kev=False), {"cve_ids": []})
+    assert result.cve_id == "" and result.applicable is False and result.kev_checked is False
+
+
+def test_single_cve_is_exactly_the_cache_answer():
+    from tools.enrichment import enrich_finding
+    one = _e("CVE-2021-44228", in_kev=True)
+    assert enrich_finding(_Cache({"CVE-2021-44228": one}), {"cve_id": "CVE-2021-44228"}) is one
+
+
+def test_multi_cve_enrichment_picks_the_kev_one():
+    from tools.enrichment import enrich_finding
+    cache = _Cache({
+        "CVE-2023-5129": _e("CVE-2023-5129", epss_score=0.9, sources=("FIRST EPSS",)),
+        "CVE-2023-4863": _e("CVE-2023-4863", in_kev=True, epss_score=0.1,
+                            sources=("CISA KEV catalog",))})
+    result = enrich_finding(cache, {"cve_ids": ["CVE-2023-5129", "CVE-2023-4863"]})
+    assert result.cve_id == "CVE-2023-4863" and result.in_kev
+    assert set(result.sources) == {"FIRST EPSS", "CISA KEV catalog"}
+
+
+def test_multi_cve_without_kev_picks_highest_epss_else_first():
+    from tools.enrichment import enrich_finding
+    cache = _Cache({"CVE-1": _e("CVE-1", epss_score=0.2), "CVE-2": _e("CVE-2", epss_score=0.7),
+                    "CVE-3": _e("CVE-3"), "CVE-4": _e("CVE-4")})
+    assert enrich_finding(cache, {"cve_ids": ["CVE-1", "CVE-2", "CVE-3"]}).cve_id == "CVE-2"
+    assert enrich_finding(cache, {"cve_ids": ["CVE-3", "CVE-4"]}).cve_id == "CVE-3"

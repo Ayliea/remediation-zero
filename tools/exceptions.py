@@ -83,8 +83,14 @@ def validate_acceptance(
     reason: str,
     in_kev: Optional[bool],
     approved_by_human: bool,
+    no_cve_severity: Optional[str] = None,
 ) -> None:
     """Refuse an acceptance the fleet is not permitted to make.
+
+    `no_cve_severity` is the decided severity of a finding that has no CVE.
+    Such a finding cannot be checked against KEV, so a high or critical one is
+    not accepted without a person; the caller fails closed by passing
+    "critical" when no severity is known.
 
     Raises:
         ValueError: naming which rule was broken, so the refusal is
@@ -109,6 +115,11 @@ def validate_acceptance(
     if in_kev is None and not approved_by_human:
         # KEV membership unknown (no KEV source): fail closed, as for a KEV CVE.
         raise ValueError("KEV list not available: a person must approve this acceptance")
+    if no_cve_severity in {"high", "critical"} and not approved_by_human:
+        raise ValueError(
+            "No CVE, so exploitation status cannot be checked: a person must "
+            "approve accepting a high or critical finding"
+        )
     if in_kev and not approved_by_human:
         raise ValueError(
             "This CVE is in the CISA KEV catalog, meaning it is being exploited "

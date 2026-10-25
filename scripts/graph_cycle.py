@@ -55,7 +55,7 @@ from tools.assignments import AssignmentWriter
 from tools.clock import SimClock
 from tools.decisions import DecisionWriter
 from tools.docstore import as_docstore
-from tools.enrichment import EnrichmentCache
+from tools.enrichment import EnrichmentCache, enrich_finding
 from tools.fleet_memory import FleetMemory
 from tools.guardrail import ModelArmorGuard
 from tools.model_armor import ModelArmor
@@ -114,7 +114,7 @@ def build_handlers(clients: dict) -> dict:
         asset = db.collection("assets").document(
             finding.get("asset_id", "")).get().to_dict() or {}
         finding, enrichment, verdict = screen_finding(
-            ports, finding, cycle, cache.enrich(finding.get("cve_id", "")))
+            ports, finding, cycle, enrich_finding(cache, finding))
 
         # Not the model input (triage_and_review re-renders from the screened
         # fields); kept because the guard tests read it.

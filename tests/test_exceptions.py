@@ -111,3 +111,16 @@ def test_a_human_may_accept_a_known_exploited_vulnerability():
     """The control is that a person decides, not that it is impossible."""
     validate_acceptance(ttl_days=30, reason="Isolated, decommission scheduled.",
                         in_kev=True, approved_by_human=True)
+
+
+def test_no_cve_high_acceptance_needs_a_person():
+    with pytest.raises(ValueError, match="No CVE"):
+        validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=False,
+                            no_cve_severity="high")
+    with pytest.raises(ValueError, match="No CVE"):
+        validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=False,
+                            no_cve_severity="critical")
+    validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=False,
+                        no_cve_severity="medium")
+    validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=True,
+                        no_cve_severity="critical")
