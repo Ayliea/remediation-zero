@@ -29,6 +29,15 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
         sort_keys=True, default=str))
 
 
+def _same_finding(finding_id) -> str:
+    """The id every chase lookup is keyed on: stripped and upper-cased, as the
+    idempotency layer files it. Clocks, tickets and exceptions carry that form;
+    a finding's own `finding_id` field keeps its scanner's case (Greenbone ids
+    are lowercase), so matching on the raw field would never see it resolved.
+    """
+    return str(finding_id or "").strip().upper()
+
+
 def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[str, int]:
     """Run the chase agent over every SLA clock once, and report what it did.
 
@@ -58,34 +67,35 @@ def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[st
     # rescan write the ticket directly would have saved a read here and put a
     # second writer inside this agent's collection, which is the boundary the
     # whole design rests on.
-    findings = {f["finding_id"]: f for f in
+    findings = {_same_finding(f["finding_id"]): f for f in
                 (d.to_dict() for d in db.collection("findings").stream())}
     # An accepted risk is not chased. Nudging an owner who has been told to
     # stand down destroys the credibility of every other nudge.
     accepted = {
-        e["finding_id"]
+        _same_finding(e["finding_id"])
         for e in (d.to_dict() for d in db.collection("exceptions").stream())
         if e.get("status") == "active"
         and e.get("expires_sim_ts", 0) > stamp.sim_ts
     }
     sla_rows = [d.to_dict() for d in db.collection("sla_clocks").stream()]
-    slas = {sla["finding_id"]: sla for sla in sla_rows}
-    tickets = {t["finding_id"]: t for t in
+    slas = {_same_finding(sla["finding_id"]): sla for sla in sla_rows}
+    tickets = {_same_finding(t["finding_id"]): t for t in
                (d.to_dict() for d in db.collection("tickets").stream())}
 
     # Retry durable tracker work only while the event's premise is still true.
     # Newer authoritative state wins: an owner must never receive a stale
     # reminder after risk acceptance or remediation, and a delayed close must
     # not land after a later rescan has reopened the finding.
-    for finding_id, ticket in tickets.items():
+    for key, ticket in tickets.items():
+        finding_id = ticket["finding_id"]
         pending = ticket.get("delivery")
         if not isinstance(pending, dict) or pending.get("status") != "pending":
             continue
         event = pending.get("event")
-        resolved = findings.get(finding_id, {}).get("status") == "resolved"
+        resolved = findings.get(key, {}).get("status") == "resolved"
         acceptance_applies = (
-            finding_id in accepted
-            and slas.get(finding_id, {}).get("expires_check", True)
+            key in accepted
+            and slas.get(key, {}).get("expires_check", True)
         )
         cancel_reason = None
         if resolved and event != ChaseAction.CLOSE_TICKET.value:
@@ -112,10 +122,10 @@ def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[st
 
     for sla in sla_rows:
         finding_id = sla["finding_id"]
-        finding_resolved = (
-            findings.get(finding_id, {}).get("status") == "resolved"
-        )
-        if (not finding_resolved and finding_id in accepted
+        key = _same_finding(finding_id)
+        finding = findings.get(key, {})
+        finding_resolved = finding.get("status") == "resolved"
+        if (not finding_resolved and key in accepted
                 and sla.get("expires_check", True)):
             _log("skipped_accepted", cycle_id, finding_id,
                  reason="risk acceptance is active")
@@ -128,7 +138,7 @@ def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[st
             taken["skipped_not_chaseable"] = taken.get("skipped_not_chaseable", 0) + 1
             continue
 
-        ticket = tickets.get(finding_id, {})
+        ticket = tickets.get(key, {})
 
         state = ChaseState(
             finding_id=finding_id,
@@ -148,8 +158,8 @@ def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[st
             # status would pin a finding resolved forever: the ticket keeps
             # that status after it closes, so a regression could never
             # reopen it.
-            resolved=findings.get(finding_id, {}).get("status") == "resolved",
-            resolved_by_scan=findings.get(finding_id, {}).get("resolved_by_scan"),
+            resolved=finding_resolved,
+            resolved_by_scan=finding.get("resolved_by_scan"),
         )
 
         action = next_action(state, now_sim_ts=stamp.sim_ts)

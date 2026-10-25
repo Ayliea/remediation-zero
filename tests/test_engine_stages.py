@@ -126,6 +126,30 @@ def test_local_chase_records_no_delivery(ws):
     assert "github_issue" not in ticket
 
 
+def test_chase_closes_the_ticket_of_a_resolved_finding_whose_id_is_lowercase(ws):
+    # Greenbone finding ids keep the scanner's case in the finding's own field
+    # ("gb-...:8080/tcp"), while every row keyed through the idempotency layer
+    # (clocks, tickets, decisions) carries the upper-cased id. Chase must match
+    # them as one finding, or a fixed finding's ticket is never closed.
+    from engine.chase import run_chase
+    clock = SimClock(mode=ClockMode.SIM)
+    original = "gb-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:1.3.6.1.4.1.25623.1.0.117850:8080/tcp"
+    folded = original.upper()
+    docs = seed_reference(ws, clock)
+    docs.collection("findings").document(folded).set(
+        {"finding_id": original, "asset_id": "ast-001", "status": "open",
+         "cve_ids": ["CVE-2021-44228"]})
+    start_clock(ws, folded, clock)
+    assert run_chase(ports_for(ws, "chase", clock), cycle=1) == {"open_ticket": 1}
+
+    docs.collection("findings").document(folded).update(
+        {"status": "resolved", "resolved_by_scan": "33333333-3333-4333-8333-000000000002"})
+    assert run_chase(ports_for(ws, "chase", clock), cycle=2) == {"close_ticket": 1}
+    ticket = ws.docs_for("report").collection("tickets").document(folded).get().to_dict()
+    assert ticket["status"] == "resolved"
+    assert ticket["resolved_by_scan"] == "33333333-3333-4333-8333-000000000002"
+
+
 def test_chase_stage_never_imports_rescan():
     """Only scripts/rescan.py (and the local CLI) resolve findings; agents never do."""
     source = (ROOT / "engine" / "chase.py").read_text()
