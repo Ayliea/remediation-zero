@@ -873,9 +873,12 @@ def test_reader_refuses_other_content_types(ct):
     refused(browser_body(boundary="abc"), ct)
 
 
-def test_reader_refuses_a_comment_in_a_part_content_type():
+def test_reader_treats_parentheses_as_plain_bytes():
+    # Nothing interprets RFC 822 comments; a browser's "scan (1).xml" must upload.
+    body = browser_body().replace(b'filename="scan.xml"', b'filename="scan (1).xml"')
+    assert read(body)["report"] == b"<report/>"
     body = browser_body().replace(b"Content-Type: text/xml", b"Content-Type: (x) text/xml")
-    refused(body)
+    assert read(body)["report"] == b"<report/>"
 
 
 def test_reader_refuses_a_folded_header():

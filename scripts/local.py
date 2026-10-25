@@ -614,7 +614,7 @@ def _read_upload_form(content_type, body):
     found = {}
     for part in parts:
         head, split, content = part.partition(b'\r\n\r\n')
-        if not split or len(head) > UPLOAD_HEADER_LIMIT or b'\0' in head or b'(' in head:
+        if not split or len(head) > UPLOAD_HEADER_LIMIT or b'\0' in head:
             raise ValueError('header block')
         headers = {}
         for line in head.split(b'\r\n'):
