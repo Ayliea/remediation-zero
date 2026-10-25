@@ -43,6 +43,29 @@ os.environ.setdefault("REVIEWER_MODEL", "gemma-4-26b-a4b-it-maas")
 os.environ.setdefault("SIM_CLOCK_MODE", "real")
 
 
+class FakeEndpoints:
+    """Lets a fixture register exactly the socket its fake server bound; removed on teardown."""
+
+    def __init__(self, basetemp):
+        self._basetemp = basetemp
+        self.entries = []
+
+    def unix(self, path):
+        self.entries.append(_OFFLINE["register_unix"](path, self._basetemp))
+
+    def tcp(self, sock):
+        host, port = sock.getsockname()[:2]
+        self.entries.append(_OFFLINE["register_tcp"](host, port))
+
+
+@pytest.fixture
+def fake_endpoints(tmp_path_factory):
+    registry = FakeEndpoints(tmp_path_factory.getbasetemp())
+    yield registry
+    for entry in registry.entries:
+        _OFFLINE["deregister"](entry)
+
+
 @pytest.fixture
 def unconfigured_env(monkeypatch):
     """Strip configuration, for tests asserting that startup refuses."""

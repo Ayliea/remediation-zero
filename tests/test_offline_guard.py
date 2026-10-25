@@ -35,3 +35,86 @@ assert len(guard['violations']) == len(operations)
 """
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def _guard_script(body):
+    guard = Path(__file__).with_name("offline_guard.py")
+    return f"guard = __import__('runpy').run_path({str(guard)!r})\nimport os, socket, sys, tempfile\n" + body
+
+
+def _run(body):
+    result = subprocess.run([sys.executable, "-c", _guard_script(body)], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+
+
+def test_unregistered_loopback_port_is_refused():
+    _run("""
+srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen(1)
+port = srv.getsockname()[1]
+c = socket.socket()
+try:
+    c.connect(('127.0.0.1', port))
+except AssertionError:
+    pass
+else:
+    raise SystemExit('unregistered loopback port was reachable')
+try:
+    socket.getaddrinfo('localhost', port)
+except AssertionError:
+    pass
+else:
+    raise SystemExit('lookup for an unregistered port was allowed')
+assert len(guard['violations']) == 2
+""")
+
+
+def test_unix_path_outside_basetemp_is_refused(tmp_path):
+    _run(f"""
+base = {str(tmp_path / 'base')!r}
+os.makedirs(base)
+outside = tempfile.mkdtemp()
+path = os.path.join(outside, 's.sock')
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
+try:
+    guard['register_unix'](path, base)
+except ValueError:
+    pass
+else:
+    raise SystemExit('registered a socket outside the base temp dir')
+c = socket.socket(socket.AF_UNIX)
+try:
+    c.connect(path)
+except AssertionError:
+    pass
+else:
+    raise SystemExit('unregistered unix socket was reachable')
+try:
+    c.connect(b'\\0abstract')
+except AssertionError:
+    pass
+else:
+    raise SystemExit('abstract socket was reachable')
+""")
+
+
+def test_registered_fake_server_is_allowed(tmp_path):
+    _run(f"""
+base = {str(tmp_path)!r}
+path = os.path.join(base, 's.sock')
+srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(1)
+entry = guard['register_unix'](path, base)
+socket.socket(socket.AF_UNIX).connect(path)
+guard['deregister'](entry)
+try:
+    socket.socket(socket.AF_UNIX).connect(path)
+except AssertionError:
+    pass
+else:
+    raise SystemExit('still reachable after deregistration')
+tcp = socket.socket(); tcp.bind(('127.0.0.1', 0)); tcp.listen(1)
+host, port = tcp.getsockname()[:2]
+entry = guard['register_tcp'](host, port)
+socket.create_connection(('localhost', port)).close()
+guard['deregister'](entry)
+""")

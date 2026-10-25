@@ -115,12 +115,13 @@ class FakeGvmd:
 
 
 @pytest.fixture
-def unix_target(tmp_path_factory):
+def unix_target(tmp_path_factory, fake_endpoints):
     sock_dir = tmp_path_factory.mktemp("g")
     path = str(sock_dir / "gvmd.sock")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(path)
     listener.listen(4)
+    fake_endpoints.unix(path)
     servers = []
 
     def start(handler, timeout=5.0):
@@ -367,7 +368,7 @@ def test_target_must_name_its_endpoint():
 # --- TLS ---------------------------------------------------------------------------------
 
 @pytest.fixture
-def fake_gvmd_tls(tmp_path_factory):
+def fake_gvmd_tls(tmp_path_factory, fake_endpoints):
     if shutil.which("openssl") is None:
         pytest.skip("openssl is not installed")
     work = tmp_path_factory.mktemp("tls")
@@ -381,6 +382,7 @@ def fake_gvmd_tls(tmp_path_factory):
     listener.bind(("127.0.0.1", 0))
     listener.listen(4)
     port = listener.getsockname()[1]
+    fake_endpoints.tcp(listener)
     server = FakeGvmd(listener, default_handler(), wrap=lambda c: context.wrap_socket(c, server_side=True))
     yield GmpTarget(transport="tls", socket_path=None, host="localhost", port=port,
                     ca_file=cert, timeout=5.0), port, server
@@ -403,3 +405,100 @@ def test_tls_refuses_a_name_the_certificate_does_not_cover(fake_gvmd_tls):
                       ca_file=target.ca_file, timeout=5.0)
     with pytest.raises(GmpError):
         GmpClient(wrong, USER, PASSWORD).__enter__()
+
+
+# --- review fixes --------------------------------------------------------------------------
+
+def test_timeout_poisons_the_client(unix_target):
+    target, _ = unix_target(lambda tag, raw: [OK_AUTH] if tag == "authenticate" else None, timeout=0.4)
+    with GmpClient(target, USER, PASSWORD) as client:
+        with pytest.raises(GmpError):
+            client.report_xml(REPORT_1)
+        with pytest.raises(GmpError, match="not connected"):
+            client.report_xml(REPORT_2)
+        with pytest.raises(GmpError, match="not connected"):
+            client.list_tasks()
+
+
+def test_report_with_another_id_is_refused(unix_target):
+    resp = reports_response(report_entry(REPORT_1, TASK_A, "Done", "2026-01-01T10:00:00Z"))
+    target, _ = unix_target(default_handler({"get_reports": [resp]}))
+    with GmpClient(target, USER, PASSWORD) as client:
+        with pytest.raises(GmpError):
+            client.report_xml(REPORT_2)
+        with pytest.raises(GmpError, match="not connected"):
+            client.report_xml(REPORT_1)
+
+
+def test_report_response_with_two_reports_is_refused(unix_target):
+    resp = reports_response(report_entry(REPORT_1, TASK_A, "Done", "2026-01-01T10:00:00Z"),
+                            report_entry(REPORT_2, TASK_A, "Done", "2026-01-02T10:00:00Z"))
+    target, _ = unix_target(default_handler({"get_reports": [resp]}))
+    with GmpClient(target, USER, PASSWORD) as client:
+        with pytest.raises(GmpError):
+            client.report_xml(REPORT_1)
+
+
+def test_status_text_scrubs_a_long_password_and_one_with_a_control_character(unix_target):
+    for password in ("p" + "w" * 300, "pa&#10;ss-synthetic-1"):
+        shown = "bad " + password + " tail"
+        resp = [f'<authenticate_response status="400" status_text="{shown}"/>'.encode()]
+        target, _ = unix_target(default_handler({"authenticate": resp}))
+        with pytest.raises(GmpAuthError) as caught:
+            GmpClient(target, USER, ET.fromstring(f"<a>{password}</a>").text).__enter__()
+        message = str(caught.value)
+        plain = ET.fromstring(f"<a>{password}</a>").text
+        assert plain not in message and plain[:12] not in message
+        assert "[redacted]" in message
+
+
+def test_status_text_scrubs_the_username(unix_target):
+    resp = [f'<authenticate_response status="400" status_text="no user {USER}"/>'.encode()]
+    target, _ = unix_target(default_handler({"authenticate": resp}))
+    with pytest.raises(GmpAuthError) as caught:
+        GmpClient(target, USER, PASSWORD).__enter__()
+    assert USER not in str(caught.value)
+
+
+def test_a_bad_report_is_skipped_and_recorded_not_fatal(unix_target):
+    resp = reports_response(
+        report_entry(REPORT_1, TASK_A, "Done", "2026-01-01T10:00:00Z"),
+        report_entry(REPORT_2, TASK_A, "Done", "last tuesday &lt;script&gt;"),
+        report_entry(REPORT_3, TASK_A, "", "2026-01-03T10:00:00Z"),
+        report_entry("not-a-uuid-" + "z" * 40, TASK_A, "Done", "2026-01-04T10:00:00Z"))
+    target, _ = unix_target(default_handler({"get_reports": [resp]}))
+    with GmpClient(target, USER, PASSWORD) as client:
+        reports = client.finished_reports(TASK_A)
+        refused = client.refused_reports
+    assert [r["report_id"] for r in reports] == [REPORT_1]
+    assert refused == [(REPORT_2, "bad timestamp"), (REPORT_3, "bad status"), ("?", "bad report id")]
+    assert not any("tuesday" in text or "script" in text for pair in refused for text in pair)
+
+
+def test_non_uuid_tasks_are_counted_as_skipped(unix_target):
+    resp = [tasks_response((TASK_A, "ok"), ("nope", "bad"), ("../x", "worse"))]
+    target, server = unix_target(default_handler({"get_tasks": resp}))
+    with GmpClient(target, USER, PASSWORD) as client:
+        assert [t["task_id"] for t in client.list_tasks()] == [TASK_A]
+        assert client.skipped_tasks == 2
+    assert ET.fromstring(server.requests[-1]).get("filter") == "rows=-1"
+
+
+def test_connect_is_bounded_by_the_overall_deadline(fake_endpoints, tmp_path_factory):
+    """A TLS peer that accepts and never speaks must not hold the handshake past timeout x 4."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    fake_endpoints.tcp(listener)
+    held = []
+    thread = threading.Thread(target=lambda: held.append(listener.accept()[0]), daemon=True)
+    thread.start()
+    target = GmpTarget(transport="tls", socket_path=None, host="localhost",
+                       port=listener.getsockname()[1], ca_file=None, timeout=0.3)
+    started = time.monotonic()
+    with pytest.raises(GmpError):
+        GmpClient(target, USER, PASSWORD).__enter__()
+    assert time.monotonic() - started < 3
+    for conn in held:
+        conn.close()
+    listener.close()

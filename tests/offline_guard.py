@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 """Deny network, credential discovery and inference before test collection."""
+import os
 import sys
 import traceback
 
@@ -13,24 +14,49 @@ def forbidden(*args, **kwargs):
     raise AssertionError("Offline tests forbid network, credentials, and live inference")
 
 
-_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+# Endpoints a test's own fake server bound. Nothing else is reachable: not a real gvmd socket,
+# not docker.sock, not a dev server on a loopback port, not a local model endpoint.
+allowed_unix = set()   # os.path.realpath of a socket under pytest's base temp dir
+allowed_tcp = set()    # ("127.0.0.1", port) as returned by getsockname()
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1"}  # ::1 only so "localhost" may try IPv6 first, on the same port
+_LOOKUP_HOSTS = {"localhost", "127.0.0.1"}
+
+
+def register_unix(path, basetemp):
+    real = os.path.realpath(path)
+    base = os.path.realpath(str(basetemp))
+    if os.path.commonpath([real, base]) != base:
+        raise ValueError("a fake Unix socket must live under pytest's base temp dir")
+    allowed_unix.add(real)
+    return real
+
+
+def register_tcp(host, port):
+    if host != "127.0.0.1":
+        raise ValueError("a fake TCP server must be bound to 127.0.0.1")
+    allowed_tcp.add((host, port))
+    return (host, port)
+
+
+def deregister(entry):
+    allowed_unix.discard(entry)
+    allowed_tcp.discard(entry)
 
 
 def _local_only(event, args):
-    """True for a Unix-socket connect or a loopback connect/lookup, which never leave the machine.
-
-    Fakes that serve a protocol from a thread inside a test (the GMP client's fake gvmd) need
-    these. Anything else, and any call with unparseable arguments, stays forbidden.
-    """
+    """True only for a connect/lookup that a test's fake server registered."""
     try:
         if event == "socket.connect":
             address = args[1]
-            if isinstance(address, (str, bytes)):
-                return True
-            return isinstance(address, tuple) and address[0] in _LOOPBACK
+            if isinstance(address, str):
+                return os.path.realpath(address) in allowed_unix
+            if isinstance(address, tuple) and address[0] in _LOOPBACK_HOSTS:
+                return ("127.0.0.1", address[1]) in allowed_tcp
+            return False
         if event == "socket.getaddrinfo":
-            return args[0] in _LOOPBACK
-    except (IndexError, TypeError):
+            host, port = args[0], args[1]
+            return host in _LOOKUP_HOSTS and isinstance(port, int) and ("127.0.0.1", port) in allowed_tcp
+    except (IndexError, TypeError, ValueError):
         return False
     return False
 

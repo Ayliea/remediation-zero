@@ -24,6 +24,7 @@ here is a runtime deadline and is never persisted.
 """
 
 import re
+import select
 import socket
 import ssl
 import time
@@ -92,6 +93,9 @@ class GmpClient:
         self._username = username
         self._password = password
         self._sock: Optional[socket.socket] = None
+        # (report UUID or "?", fixed reason). Never server text.
+        self.refused_reports: list[tuple[str, str]] = []
+        self.skipped_tasks = 0
 
     def __repr__(self) -> str:
         return f"GmpClient(target={self._target!r})"
@@ -122,6 +126,8 @@ class GmpClient:
 
     def _connect(self) -> None:
         target = self._target
+        # One overall deadline for connect and handshake, as for every request.
+        deadline = time.monotonic() + target.timeout * _DEADLINE_FACTOR
         try:
             if target.transport == "unix":
                 if not target.socket_path:
@@ -140,12 +146,17 @@ class GmpClient:
                 context.check_hostname = True
                 context.verify_mode = ssl.CERT_REQUIRED
                 context.minimum_version = ssl.TLSVersion.TLSv1_2
-                raw = socket.create_connection((target.host, target.port), timeout=target.timeout)
+                raw = self._tcp_connect(target, deadline)
                 try:
-                    raw.settimeout(target.timeout)
-                    sock = context.wrap_socket(raw, server_hostname=target.host)
+                    sock = context.wrap_socket(raw, server_hostname=target.host,
+                                               do_handshake_on_connect=False)
                 except BaseException:
                     raw.close()
+                    raise
+                try:
+                    self._handshake(sock, deadline)
+                except BaseException:
+                    sock.close()
                     raise
             else:
                 raise GmpError("GMP transport must be 'unix' or 'tls'")
@@ -154,6 +165,39 @@ class GmpClient:
         except (OSError, ssl.SSLError, ValueError) as exc:
             raise GmpError(f"could not connect to gvmd ({type(exc).__name__})") from None
         self._sock = sock
+
+    @staticmethod
+    def _tcp_connect(target: GmpTarget, deadline: float) -> socket.socket:
+        last: Optional[BaseException] = None
+        for family, kind, proto, _, address in socket.getaddrinfo(
+                target.host, target.port, type=socket.SOCK_STREAM):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GmpError("connecting to gvmd took too long")
+            sock = socket.socket(family, kind, proto)
+            try:
+                sock.settimeout(min(target.timeout, remaining))
+                sock.connect(address)
+                return sock
+            except OSError as exc:
+                sock.close()
+                last = exc
+        raise GmpError(f"could not connect to gvmd ({type(last).__name__ if last else 'no address'})")
+
+    @staticmethod
+    def _handshake(sock: ssl.SSLSocket, deadline: float) -> None:
+        sock.setblocking(False)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GmpError("the TLS handshake with gvmd took too long")
+            try:
+                sock.do_handshake()
+                return
+            except ssl.SSLWantReadError:
+                select.select([sock], [], [], remaining)
+            except ssl.SSLWantWriteError:
+                select.select([], [sock], [], remaining)
 
     def _authenticate(self) -> None:
         request = ("<authenticate><credentials>"
@@ -213,12 +257,18 @@ class GmpClient:
             raise GmpError("not connected to gvmd")
         deadline = time.monotonic() + self._target.timeout * _DEADLINE_FACTOR
         try:
-            sock.settimeout(self._target.timeout)
-            sock.sendall(xml.encode("utf-8"))
-        except (OSError, ssl.SSLError) as exc:
-            raise GmpError(f"writing to gvmd failed ({type(exc).__name__})") from None
-        root, raw = self._read_response(deadline, max_bytes)
-        self._check_status(command, root)
+            try:
+                sock.settimeout(self._target.timeout)
+                sock.sendall(xml.encode("utf-8"))
+            except (OSError, ssl.SSLError) as exc:
+                raise GmpError(f"writing to gvmd failed ({type(exc).__name__})") from None
+            root, raw = self._read_response(deadline, max_bytes)
+            self._check_status(command, root)
+        except BaseException:
+            # Whatever went wrong, the stream may still carry this request's response. Never
+            # reuse it: a late reply must not be read as the answer to the next request.
+            self.close()
+            raise
         return root, raw
 
     def _check_status(self, command: str, root: ET.Element) -> None:
@@ -230,21 +280,23 @@ class GmpClient:
             raise error(f"{command} response carried no valid status")
         if status.startswith("2"):
             return
-        text = _clean(root.get("status_text"))
-        for secret in (self._password,):
+        text = root.get("status_text") or ""
+        for secret in (self._password, self._username):  # before cleaning and truncating
             if secret:
                 text = text.replace(secret, "[redacted]")
+        text = _clean(text)
         raise error(f"{command} failed with GMP status {status}: {text}")
 
     # -- read-only operations ----------------------------------------------------------
 
     def list_tasks(self) -> list[dict]:
-        root, _ = self._send("<get_tasks/>")
+        root, _ = self._send('<get_tasks filter="rows=-1"/>')
         tasks = []
         for task in root.findall("task"):
             task_id = task.get("id") or ""
             if not _UUID_RE.fullmatch(task_id):
-                continue  # an id we could not safely echo back is not offered for selection
+                self.skipped_tasks += 1  # an id we could not safely echo back is not offered
+                continue
             tasks.append({"task_id": task_id, "name": _clean(task.findtext("name"))[:_NAME_MAX]})
         return tasks
 
@@ -265,13 +317,24 @@ class GmpClient:
             report_id = outer.get("id") or inner.get("id") or ""
             task = inner.find("task")
             own_task = (task.get("id") if task is not None else None) or ""
-            if own_task != task_id or not _UUID_RE.fullmatch(report_id):
+            if own_task != task_id:
+                continue
+            if not _UUID_RE.fullmatch(report_id):
+                self.refused_reports.append(("?", "bad report id"))
+                continue
+            status = _clean(inner.findtext("scan_run_status")).strip()
+            if not status or len(status) > 40:
+                self.refused_reports.append((report_id, "bad status"))
                 continue
             stamp = (inner.findtext("timestamp") or outer.findtext("creation_time")
                      or inner.findtext("scan_end") or "").strip()
-            found.append((self._instant(stamp), {
-                "report_id": report_id, "task_id": own_task,
-                "status": _clean(inner.findtext("scan_run_status")).strip(), "timestamp": stamp}))
+            try:
+                instant = self._instant(stamp)
+            except GmpError:
+                self.refused_reports.append((report_id, "bad timestamp"))
+                continue
+            found.append((instant, {
+                "report_id": report_id, "task_id": own_task, "status": status, "timestamp": stamp}))
         found.sort(key=lambda pair: pair[0])
         return [entry for _, entry in found]
 
@@ -289,5 +352,9 @@ class GmpClient:
         _uuid(report_id, "report id")
         request = (f"<get_reports report_id={quoteattr(report_id)} details=\"1\" "
                    f"ignore_pagination=\"1\" filter={quoteattr(_REPORT_FILTER)}/>")
-        _, raw = self._send(request, max_bytes=MAX_REPORT_BYTES)
+        root, raw = self._send(request, max_bytes=MAX_REPORT_BYTES)
+        reports = root.findall("report")
+        if len(reports) != 1 or reports[0].get("id") != report_id:
+            self.close()  # the stream is out of step with our requests
+            raise GmpError("gvmd answered with a report other than the one requested")
         return raw
