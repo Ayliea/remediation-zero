@@ -302,3 +302,27 @@ def test_move_keeps_the_new_file_copy_after_an_interrupted_move(ws):
     assert _rows(ws.root / "references.sqlite3", "approvals") == []
     assert _rows(ws.root / "approvals.sqlite3", "approvals") == [
         ("RZ-1-c001", '{"approved_by": "new"}')]
+
+
+def test_scanner_state_is_writable_only_by_the_enrichment_refresh_stage(ws):
+    assert [s for s, writes in STAGE_WRITES.items() if "scanner_state" in writes] == [
+        "enrichment_refresh"]
+    assert ws.file_for("scanner_state").name == "scanner.sqlite3"
+    for stage in STAGE_WRITES:
+        store = ws.docs_for(stage)
+        try:
+            ref = store.collection("scanner_state").document("X-1")
+            if stage == "enrichment_refresh":
+                ref.set({"a": 1})
+            else:
+                with pytest.raises(PermissionError):
+                    ref.set({"a": 1})
+        finally:
+            store.close()
+
+
+def test_an_older_workspace_gains_the_scanner_file_on_open(ws):
+    ws.init()
+    ws.file_for("scanner_state").unlink()
+    ws.docs_for("dashboard").close()
+    assert ws.file_for("scanner_state").exists()

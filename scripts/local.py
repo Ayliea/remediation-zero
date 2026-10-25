@@ -5,7 +5,8 @@
 
 Standard library only. Every command takes --database DIR, the workspace
 root (one SQLite file per agent; see tools/local_layout.py). Only `cycle` and
-`check-models` call a model; `seed`, `rescan`, `exception` and `approve` work
+`check-models` call a model; `update-enrichment` is the one command that reaches the
+internet (CISA, EPSS, NVD); `seed`, `rescan`, `exception` and `approve` work
 with no model configured. API keys come only from the environment
 (RZ_<ROLE>_API_KEY, or RZ_MODEL_API_KEY for the proposer) and are never
 printed, logged or written to settings.
@@ -34,8 +35,8 @@ from tools import local_settings
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
 from tools.delivery import GitHubDelivery
-from tools import enrichment as enrichment_module
-from tools.enrichment import EnrichmentCache
+from tools.enrichment import EnrichmentCache, finding_cves
+from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
@@ -152,13 +153,15 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
         approved = assign_approved(triage)
         # Only pending findings (Ruling 29): re-triaging a decided one would
         # pay for the models again and restart its SLA clock. The cache is the
-        # repo's data/cache, read only and offline; absent, enrichment is empty.
-        enrichment = EnrichmentCache()
+        # workspace's enrichment folder (filled by update-enrichment), read only
+        # and offline; absent, enrichment is empty.
+        cache_dir = workspace_cache_dir(ws.root)
+        enrichment = EnrichmentCache(cache_dir)
         missing = [name for name, present in (('kev', enrichment.has_kev), ('epss', enrichment.has_epss),
                                               ('nvd', enrichment.has_nvd)) if not present]
         if missing:
             _log('enrichment_absent', f'cycle-{cycle:03d}', sources=missing)
-            print(f'warning: enrichment cache not found at {enrichment_module.DEFAULT_CACHE_DIR}: '
+            print(f'warning: enrichment cache not found at {cache_dir}: '
                   f'{", ".join(missing)} were not checked', file=sys.stderr, flush=True)
         # A finding that raises stops triage, not the lifecycle: chase, the
         # sweep and the report read only what is stored, so they still run,
@@ -189,6 +192,39 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
         raise triage_error
     return {'cycle': record['cycle_id'], 'outcomes': record['outcomes'], 'approved': approved,
             'chase_cycle': day, 'chase': chased, 'sweep': swept}
+
+
+def update_enrichment(ws, environ, *, cves=None, get=None):
+    """Refresh the workspace's enrichment cache; the one thing that reaches the internet.
+
+    `cves` None means every CVE on the workspace's findings. `get` None is the
+    real https fetcher; tests inject one. The NVD key comes only from
+    `NVD_API_KEY` in `environ` and is passed to the fetcher, never stored. The
+    status document `scanner_state/enrichment` is written through the
+    enrichment_refresh stage with the SimClock's stamps.
+    """
+    get = get or urllib_get
+    clock = SimClock.from_env(environ)
+    docs = ws.docs_for('enrichment_refresh')
+    try:
+        if cves is None:
+            found = set()
+            for snapshot in docs.collection('findings').stream():
+                found.update(finding_cves(snapshot.to_dict()))
+            cves = sorted(found)
+        result = refresh(cves, workspace_cache_dir(ws.root), get=get,
+                         nvd_api_key=environ.get('NVD_API_KEY') or None)
+        failed = [name for name in ('kev', 'epss') if result[name] != 'ok'] + list(result['nvd_failed'])
+        stamp = clock.now()
+        docs.collection('scanner_state').document('enrichment').set({
+            'last_run_real_ts': stamp.real_ts, 'last_run_sim_ts': stamp.sim_ts,
+            'fetched': (2 - sum(result[n] != 'ok' for n in ('kev', 'epss'))) + result['nvd_fetched'],
+            'failed': failed})
+        _log('enrichment_refreshed', kev=result['kev'], epss=result['epss'],
+             nvd_fetched=result['nvd_fetched'], nvd_failed=len(result['nvd_failed']))
+        return result
+    finally:
+        docs.close()
 
 
 def next_cycle(ws):
@@ -347,6 +383,7 @@ def _parser():
     serve = commands.add_parser('serve', help='Serve the dashboard and preferences on loopback')
     serve.add_argument('--demo', action='store_true', help='Show illustrative fixtures instead of saved records')
     serve.add_argument('--port', type=int, default=8081)
+    commands.add_parser('update-enrichment', help='Download CISA KEV, FIRST EPSS and NVD data into the workspace cache; reaches the internet')
     check = commands.add_parser('check-models', help='Explicitly send the bundled synthetic example to each configured model role')
     check.add_argument('--role', choices=ROLES, help='Check only this role')
     return parser
@@ -438,6 +475,12 @@ def main():
                 parser.exit(1, f'{exc}. Nothing was written.\n')
             finally:
                 ports.docs.close()
+        elif args.command == 'update-enrichment':
+            print('This reaches the internet: CISA, FIRST EPSS and NVD.', flush=True)
+            result = update_enrichment(ws, os.environ)
+            _print(result)
+            if result['kev'] != 'ok' or result['epss'] != 'ok' or result['nvd_failed']:
+                raise SystemExit(1)
         elif args.command == 'serve':
             docs = ws.docs_for('dashboard')  # reads only: no collection is writable
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'

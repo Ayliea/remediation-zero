@@ -712,11 +712,9 @@ def test_accept_without_kev_source_with_approval_proceeds(ws, tmp_path):
     assert docs(ws, "human_queue") == {}
 
 
-def test_cycle_warns_when_enrichment_cache_absent(ws, tmp_path, monkeypatch, caplog, capsys):
-    import tools.enrichment as enrichment
+def test_cycle_warns_when_enrichment_cache_absent(ws, caplog, capsys):
     from scripts.local import run_local_cycle
-    missing = tmp_path / "no-cache"
-    monkeypatch.setattr(enrichment, "DEFAULT_CACHE_DIR", missing)
+    missing = ws.root / "enrichment"
     caplog.set_level(logging.INFO)
     run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
     absent = events(caplog, "enrichment_absent")
@@ -727,7 +725,8 @@ def test_cycle_warns_when_enrichment_cache_absent(ws, tmp_path, monkeypatch, cap
 
 
 def test_cycle_does_not_warn_with_the_cache_present(ws, caplog):
-    from scripts.local import run_local_cycle
+    from scripts.local import run_local_cycle, update_enrichment
+    update_enrichment(ws, {}, get=_fake_sources([]))
     caplog.set_level(logging.INFO)
     run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
     assert events(caplog, "enrichment_absent") == []
@@ -1040,3 +1039,98 @@ def test_default_workspace_keeps_existing_settings_file(tmp_path):
     new = local_settings.settings_path(tmp_path / "remediation-zero")
     assert old == new == (tmp_path / "remediation-zero.settings.json").resolve()
     assert local_launcher.default_database(tmp_path) == tmp_path / "remediation-zero"
+
+
+# --- the enrichment cache and update-enrichment (Task 5) ----------------------
+
+CACHE_KEY = "synthetic-nvd-key-1b7c"
+
+
+def _fake_sources(calls):
+    import csv
+    import gzip
+    import io
+
+    from tools.enrichment_fetch import EPSS_URL, KEV_URL
+
+    def get(url, headers=None):
+        calls.append((url, headers))
+        if url == KEV_URL:
+            return json.dumps({"vulnerabilities": [{"cveID": "CVE-2021-44228"}]}).encode()
+        if url == EPSS_URL:
+            out = io.StringIO()
+            csv.writer(out).writerows([["cve", "epss", "percentile"],
+                                       ["CVE-2021-44228", "0.9", "0.9"]])
+            return gzip.compress(out.getvalue().encode())
+        return json.dumps({"vulnerabilities": [{"cve": {"id": url.split("=")[1]}}]}).encode()
+    return get
+
+
+def test_cycle_reads_the_workspace_cache(ws, capsys):
+    from scripts.local import run_local_cycle, update_enrichment
+    update_enrichment(ws, {}, get=_fake_sources([]))
+    capsys.readouterr()
+    run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+    assert "enrichment cache not found" not in capsys.readouterr().err
+    assert (ws.root / "enrichment" / "cisa_kev.json").is_file()
+
+
+def test_cycle_warning_names_the_workspace_cache_path(ws, capsys):
+    from scripts.local import run_local_cycle
+    run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+    err = capsys.readouterr().err
+    assert f"enrichment cache not found at {ws.root / 'enrichment'}" in err
+    assert "kev, epss, nvd were not checked" in err
+
+
+def test_update_enrichment_collects_every_workspace_cve_and_writes_status(ws):
+    from scripts.local import update_enrichment
+    seed = ws.docs_for("seed")
+    seed.collection("findings").document("RZ-0002").set({
+        "finding_id": "RZ-0002", "cve_ids": ["CVE-2020-0001", "CVE-2019-0708"], "status": "open"})
+    seed.collection("findings").document("RZ-0003").set({"finding_id": "RZ-0003", "cve_ids": []})
+    seed.close()
+    calls = []
+    result = update_enrichment(ws, {"NVD_API_KEY": CACHE_KEY}, get=_fake_sources(calls))
+    asked = sorted(u.split("=")[1] for u, _ in calls if "cveId" in u)
+    assert asked == ["CVE-2019-0708", "CVE-2020-0001", "CVE-2021-44228"]
+    assert result["nvd_fetched"] == 3 and result["kev"] == "ok"
+    status = docs(ws, "scanner_state")["enrichment"]
+    assert status["fetched"] == 5 and status["failed"] == []
+    assert {"last_run_real_ts", "last_run_sim_ts"} <= set(status)
+    assert CACHE_KEY not in json.dumps(status)
+    for path in ws.root.rglob("*"):
+        if path.is_file():
+            assert CACHE_KEY.encode() not in path.read_bytes()
+
+
+def test_update_enrichment_with_a_subset_fetches_only_those(ws):
+    from scripts.local import update_enrichment
+    calls = []
+    update_enrichment(ws, {}, cves=["CVE-2020-0001"], get=_fake_sources(calls))
+    assert [u.split("=")[1] for u, _ in calls if "cveId" in u] == ["CVE-2020-0001"]
+
+
+def test_update_enrichment_status_uses_the_simclock_not_wall_time(ws, monkeypatch):
+    from scripts import local
+    from tools.clock import Stamp
+
+    class Fixed:
+        def now(self):
+            return Stamp(real_ts=111.5, sim_ts=222.5)
+    monkeypatch.setattr(local.SimClock, "from_env", classmethod(lambda cls, env=None: Fixed()))
+    local.update_enrichment(ws, {}, cves=[], get=_fake_sources([]))
+    status = docs(ws, "scanner_state")["enrichment"]
+    assert (status["last_run_real_ts"], status["last_run_sim_ts"]) == (111.5, 222.5)
+
+
+def test_update_enrichment_says_it_reaches_the_internet(ws, capsys, monkeypatch):
+    from scripts import local
+    calls = []
+    monkeypatch.setattr(local, "urllib_get", _fake_sources(calls))
+    monkeypatch.setattr("sys.argv", ["local", "--database", str(ws.root), "update-enrichment"])
+    local.main()
+    out = capsys.readouterr().out
+    assert out.startswith("This reaches the internet: CISA, FIRST EPSS and NVD.")
+    assert "CVE-2021-44228" in " ".join(u for u, _ in calls)
+    assert json.loads(out.splitlines()[-1])["kev"] == "ok"

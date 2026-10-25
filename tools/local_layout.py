@@ -43,6 +43,8 @@ AGENT_FILES = {
     # Its own file, so the approve command reaches findings only read-only.
     # Workspaces made before this kept approvals in references; init moves them.
     "approvals": ("approvals",),
+    # Scanner bookkeeping (enrichment status now, per-task pull state later).
+    "scanner": ("scanner_state",),
 }
 SHARED = ("human_queue", "sla_clocks")
 # The triage cycle writes `assignments` because scripts/cycle.py runs the
@@ -55,6 +57,7 @@ STAGE_WRITES = {
     "rescan": {"findings", "scans"},
     "seed": {"findings", "assets", "owners"},
     "approve": {"approvals"},
+    "enrichment_refresh": {"scanner_state"},
     "exception_accept": {"exceptions"} | set(SHARED),
     # The served dashboard reads everything and writes nothing (Ruling 43).
     "dashboard": set(),

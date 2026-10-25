@@ -20,7 +20,7 @@ FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 's
          'tools/chase.py', 'tools/tickets.py', 'tools/telemetry.py', 'tools/exceptions.py', 'tools/exception_store.py',
          'tools/metrics.py', 'tools/reports.py', 'tools/rescan.py', 'tools/scan_store.py', 'tools/ingest.py',
          'tools/decisions.py', 'tools/assignments.py', 'tools/ownership.py', 'tools/cycles.py', 'tools/model_endpoint.py', 'tools/model_transport.py', 'tools/model_roles.py',
-         'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py',
+         'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py', 'tools/enrichment_fetch.py',
          'tools/models/__init__.py', 'tools/models/_common.py', 'tools/models/openai_chat.py',
          'tools/models/anthropic_messages.py', 'tools/models/gemini_api.py',
          'tools/local_settings.py', 'tools/model_check.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
