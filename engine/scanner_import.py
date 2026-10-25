@@ -486,11 +486,17 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                     lost_race = True  # an upload for this task committed first
                     break
                 if exc.reason == "scan_time_in_future":
-                    # Depends on the clock, not the report: not remembered, retried
-                    # next pull, and nothing else is imported in its place, since
-                    # importing a newer report would make this one "not newer".
-                    future = {"report_id": report_id, "reason": exc.reason}
-                    break
+                    # R22: only gvmd clock skew (its own listing time is also ahead
+                    # of the wall clock) is retried: not remembered, and nothing
+                    # else is imported in its place, since a newer report would make
+                    # this one "not newer". A future scan end on a report gvmd lists
+                    # in the present is inconsistent: refused and passed over, so it
+                    # cannot hold the task for the 14-day listing window.
+                    if listed_at is not None and listed_at > ports.clock.now().real_ts + _DAY:
+                        future = {"report_id": report_id, "reason": exc.reason}
+                        break
+                    refused_now.append({"report_id": report_id, "reason": "malformed"})
+                    continue
                 if exc.reason is None:
                     raise
                 refused_now.append({"report_id": report_id, "reason": exc.reason})
@@ -532,6 +538,7 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             _write_state(docs, task_id, {
                 "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
                 "last_result": "failed", "last_error_class": error_class,
+                "last_refusal": None,
                 "refused": _merge_refused(state.get("refused"), refused_now),
                 "last_refused_reports": notes["refused_reports"],
                 "last_refused_reasons": notes["refused_reasons"],

@@ -900,3 +900,80 @@ def test_successful_import_counts_newer_candidates_as_deferred(ws, ports):
     pull(ports, 3, source, chosen_task_ids=[TASK])
     pull(ports, 4, source, chosen_task_ids=[TASK])
     assert docs(ws, "scanner_state")[TASK]["deferred"] == 0
+
+
+
+# --- R22: a future scan end is only gvmd clock skew when gvmd's listing is future too ----
+
+
+def add_listed(source, n, listed_at, scan_end):
+    """Report n, listed by gvmd at `listed_at`, claiming to have finished at `scan_end`."""
+    source.listing.setdefault(TASK, []).append(
+        {"report_id": rid(n), "task_id": TASK, "status": "Done", "timestamp": listed_at})
+    source.scans[rid(n)] = dataclasses.replace(scan(n), scan_end=scan_end)
+
+
+def test_future_scan_end_with_present_listing_is_malformed_and_skipped(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    add_listed(source, 28, "2026-10-28T00:00:00Z", "2026-11-07T00:00:00Z")  # now, now + 10 days
+    add_listed(source, 29, "2026-10-28T00:30:00Z", "2026-10-28T00:45:00Z")
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["report_id"] == rid(29)
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["refused"] == [{"report_id": rid(28), "reason": "malformed"}]
+    assert state["last_refusal"] is None
+    assert set(docs(ws, "scans")) == {rid(1), rid(29)}
+
+
+def test_skewed_gvmd_clock_is_retried(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    add_listed(source, 30, "2026-10-31T00:00:00Z", "2026-10-31T00:00:00Z")  # both now + 3 days
+    for cycle in (2, 3):
+        result = pull(ports, cycle, source, chosen_task_ids=[TASK])
+        assert result["pulled"][0]["result"] == "refused"
+        state = docs(ws, "scanner_state")[TASK]
+        assert state["last_refusal"] == {"report_id": rid(30), "reason": "scan_time_in_future"}
+        assert state.get("refused", []) == []
+    assert source.fetched == [rid(1), rid(30), rid(30)]
+
+
+def test_last_refusal_is_cleared_by_a_failed_pull(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    add_listed(source, 30, "2026-10-31T00:00:00Z", "2026-10-31T00:00:00Z")
+    pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert docs(ws, "scanner_state")[TASK]["last_refusal"] is not None
+    source.fail[TASK] = GmpError("x")
+    pull(ports, 3, source, chosen_task_ids=[TASK])
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["last_result"] == "failed" and state["last_refusal"] is None
+
+
+def test_last_refusal_is_cleared_by_a_lost_race(ws, ports):
+    from engine.scanner_import import _write_state
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    source.add(3)
+    real_fetch = source.fetch
+
+    def fetch_after_an_upload(report_id):
+        other = ports_for(ws)
+        try:
+            import_upload(other, 2, xml_for(2), chosen_task_ids=[TASK])
+            # Make the stale refusal outlive the upload, so only the pull can clear it.
+            _write_state(other.docs, TASK, {"last_refusal": {
+                "report_id": rid(9), "reason": "scan_time_in_future"}})
+        finally:
+            other.docs.close()
+        return real_fetch(report_id)
+
+    source.fetch = fetch_after_an_upload
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["result"] == "nothing_new"
+    assert docs(ws, "scanner_state")[TASK]["last_refusal"] is None
