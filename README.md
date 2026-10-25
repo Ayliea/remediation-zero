@@ -56,7 +56,10 @@ manual check against a real gvmd are in the
 [Greenbone connection guide](docs/development/greenbone.md).
 
 Demo data is synthetic. A connected install keeps its owner's scan data on that
-machine and sends it nowhere except the model endpoints the owner configures.
+machine. It leaves only for destinations the owner sets up: the configured model
+endpoints receive finding details for triage, and a ticket tracker, if one is
+configured, receives ticket text. Updating enrichment downloads public CVE data
+and sends at most CVE identifiers.
 Never commit a real report or a workspace. It is still not a scanner: it reads
 results from scanners you already run. The original cloud
 evidence console below remains a separate application; these local Settings do
