@@ -48,6 +48,7 @@ from engine.scanner_source import (
     to_rescan_input,
 )
 from tools.docstore import AlreadyExists
+from tools.enrichment import finding_cves
 from tools.gmp import GmpReportRefused
 from tools.greenbone_report import REFUSAL_REASONS, ReportRefused, parse_report
 
@@ -326,6 +327,14 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             raise ImportRefused(f"report {scan.scan_id} was already imported")
 
         stamp = ports.clock.now()
+        # The findings this report is about to add, by the stored `finding_id`
+        # field (document ids are case-folded by the idempotency layer). Their
+        # CVEs are what the timer enriches; read here, in the write lock, from
+        # the same store the rescan reconciles against.
+        known = {(snap.to_dict() or {}).get("finding_id") for snap in docs.collection("findings").stream()}
+        new_cves = sorted({cve for finding in scan.findings
+                           if finding.get("finding_id") not in known
+                           for cve in finding_cves(finding)})
         _upsert_assets(docs, scan, stamp)
         summary = run_rescan(dataclasses.replace(ports, journal=journal), cycle,
                              to_rescan_input(scan), dry_run=False)
@@ -356,7 +365,8 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
         _write_state(docs, scan.task_id, fields)
     _log("report_imported", cycle, task_id=scan.task_id, scan_id=scan.scan_id,
          counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all)
-    return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all}
+    return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all,
+            "new_cves": new_cves}
 
 
 # --- pull -------------------------------------------------------------------------------
@@ -504,7 +514,7 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             return {"task_id": task_id, "result": "imported", "report_id": scan.scan_id,
                     "counts": result["counts"], "skipped": result["skipped"],
                     "uncovered_all": result["uncovered_all"], "refused": len(refused_now),
-                    "deferred": waiting}
+                    "deferred": waiting, "new_cves": result["new_cves"]}
         tried = {r["report_id"] for r in refused_now}
         if future is not None:
             tried.add(future["report_id"])
@@ -575,7 +585,8 @@ def pull(ports: Ports, cycle: int, source: Any, *, chosen_task_ids: Collection[s
         close = getattr(source, "close", None)
         if callable(close):
             close()
-    return {"cycle": _cycle_id(cycle), "pulled": pulled}
+    return {"cycle": _cycle_id(cycle), "pulled": pulled,
+            "new_cves": sorted({cve for outcome in pulled for cve in outcome.get("new_cves", ())})}
 
 
 # --- upload -----------------------------------------------------------------------------

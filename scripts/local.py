@@ -6,7 +6,8 @@
 Standard library only. Every command takes --database DIR, the workspace
 root (one SQLite file per agent; see tools/local_layout.py). Only `cycle` and
 `check-models` call a model; `update-enrichment` is the one command that reaches the
-internet (CISA, EPSS, NVD); `seed`, `rescan`, `exception` and `approve` work
+internet (CISA, EPSS, NVD); `greenbone` reads from your Greenbone server
+(credentials only from RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD); `seed`, `rescan`, `exception` and `approve` work
 with no model configured. API keys come only from the environment
 (RZ_<ROLE>_API_KEY, or RZ_MODEL_API_KEY for the proposer) and are never
 printed, logged or written to settings.
@@ -15,9 +16,11 @@ import argparse
 import json
 import logging
 import os
+import re
 import secrets
 import shlex
 import sys
+import unicodedata
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -27,6 +30,7 @@ from engine.chase import run_chase
 from engine.ports import NoDelivery, NoTelemetry, Ports
 from engine.report import run_report
 from engine.rescan import load_scan, run_rescan
+from engine.scanner_import import GreenboneSource, ImportRefused, import_upload, pull
 from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
@@ -39,6 +43,7 @@ from tools.enrichment import EnrichmentCache, finding_cves
 from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.gmp import GmpAuthError, GmpClient, GmpError, credentials_from_env
+from tools.greenbone_report import MAX_REPORT_BYTES, parse_report
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
@@ -64,6 +69,11 @@ NOT_A_WORKSPACE = ('{} is not a Remediation Zero workspace directory (a single-f
                    'nothing was changed.')
 
 logger = logging.getLogger('remediation_zero.local')
+
+_ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])')
+NO_TASKS = 'No tasks are chosen. Nothing was pulled. Choose tasks in Settings, or run: greenbone tasks'
+NOT_SET_UP = ('The Greenbone connection is not set up. Save a socket path (Unix) or host (TLS) in Settings. '
+              'No connection was attempted.')
 
 
 class NotAWorkspace(Exception):
@@ -279,6 +289,216 @@ def scanner_probe(settings, *, test=False):
     return {'state': 'ok', 'tasks': tasks, 'test': test}
 
 
+def terminal_safe(text, limit=80):
+    """Text from Greenbone or a report, safe to print: no escape sequences, no control or
+    format characters, at most `limit` characters."""
+    text = _ANSI.sub('', str(text))
+    kept = ''.join(c for c in text if unicodedata.category(c)[0] != 'C' and unicodedata.category(c) not in ('Zl', 'Zp'))
+    return kept.strip()[:limit]
+
+
+def gmp_client_factory(preferences, environ, *, timeout=30.0):
+    """A callable that returns an unopened GmpClient for the saved connection.
+
+    Raises GmpAuthError (naming the two variables, never a value) when the credentials are
+    not in `environ`, and ValueError when no connection is saved."""
+    username, password = credentials_from_env(environ)
+    target = local_settings.gmp_target(preferences, timeout=timeout)
+    return lambda: GmpClient(target, username, password)
+
+
+def probe_lines(probe):
+    """The three lines the Scanner page shows after a test, for the terminal."""
+    state = probe.get('state')
+    yes = lambda ok: 'yes' if ok else 'no'
+    count = f' ({len(probe.get("tasks") or [])})' if state == 'ok' else ''
+    return [f'Connected: {yes(state in {"ok", "auth"})}', f'Signed in: {yes(state == "ok")}',
+            f'Tasks listed: {yes(state == "ok")}{count}']
+
+
+def _credentials_error(environ):
+    """The missing-credentials message (variable names only), or None when both are set."""
+    try:
+        credentials_from_env(environ)
+    except GmpAuthError as exc:
+        return str(exc)
+    return None
+
+
+def greenbone_tasks(preferences, environ):
+    """Print `task_id  name` for each task the account can see. Returns the exit code."""
+    try:
+        factory = gmp_client_factory(preferences, environ)
+    except GmpAuthError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except ValueError:
+        print(NOT_SET_UP, file=sys.stderr)
+        return 1
+    try:
+        with factory() as client:
+            tasks = client.list_tasks()
+    except GmpAuthError:
+        print('Greenbone did not accept the credentials in RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD.',
+              file=sys.stderr)
+        return 1
+    except Exception as error:  # the class only: a message can carry server text
+        print(f'Could not list tasks ({type(error).__name__}).', file=sys.stderr)
+        return 1
+    for task in tasks:
+        print(f'{terminal_safe(task["task_id"])}  {terminal_safe(task["name"])}')
+    return 0
+
+
+def greenbone_test(preferences, environ):
+    """Connect, sign in, list tasks: the page's three lines. Returns the exit code."""
+    missing = _credentials_error(environ)
+    if missing:
+        print(missing, file=sys.stderr)
+        return 2
+    probe = scanner_probe(preferences, test=True)
+    if probe['state'] == 'unconfigured':
+        print(NOT_SET_UP, file=sys.stderr)
+        return 1
+    print('\n'.join(probe_lines(probe)))
+    if probe['state'] == 'error':
+        print(f'Could not reach Greenbone: {terminal_safe(probe.get("error", "Error"))}.', file=sys.stderr)
+    return 0 if probe['state'] == 'ok' else 1
+
+
+def greenbone_pull(ws, preferences, environ, cycle, *, client_factory=None, clock=None):
+    """Pull the chosen tasks through the import path; the result of `engine.scanner_import.pull`."""
+    scanner = preferences['scanner']
+    factory = client_factory or gmp_client_factory(preferences, environ)
+    source = GreenboneSource(factory, qod_floor=scanner['qod_floor'])
+    ports = _ports(ws.docs_for('scanner_import'), ws.journal(), clock or SimClock.from_env(environ))
+    try:
+        return pull(ports, cycle, source, chosen_task_ids=scanner['task_ids'])
+    finally:
+        ports.docs.close()
+
+
+def pull_line(outcome):
+    task, result = terminal_safe(outcome['task_id']), outcome['result']
+    if result == 'failed':
+        return f'{task} failed {terminal_safe(outcome.get("error_class", "Error"))}'
+    counts = outcome.get('counts') or {}
+    skipped = outcome.get('skipped')
+    skipped = sum(skipped.values()) if isinstance(skipped, dict) else outcome.get('skipped_reports', 0)
+    return (f'{task} {result} findings={counts.get("new", 0)} resolved={counts.get("resolved", 0)} '
+            f'skipped={skipped} refused={outcome.get("refused", 0)} deferred={outcome.get("deferred", 0)}')
+
+
+def greenbone_pull_command(ws, preferences, environ, cycle):
+    """`greenbone pull`: one line per task. 0 when every task imported or had nothing new."""
+    if not preferences['scanner']['task_ids']:
+        print(NO_TASKS)
+        return 0
+    try:
+        result = greenbone_pull(ws, preferences, environ, cycle)
+    except GmpAuthError as exc:  # only the missing-credentials check raises it here, before any connection
+        print(exc, file=sys.stderr)
+        return 2
+    except ImportRefused as exc:
+        print(f'Refused: {terminal_safe(exc, 200)} Nothing was written.', file=sys.stderr)
+        return 1
+    except ValueError:
+        print(NOT_SET_UP, file=sys.stderr)
+        return 1
+    for outcome in result['pulled']:
+        print(pull_line(outcome))
+    return 0 if all(o['result'] in {'imported', 'nothing_new'} for o in result['pulled']) else 1
+
+
+def _read_capped(path):
+    """The file's bytes, or None when it is larger than the parser's cap (never read in full)."""
+    if path.stat().st_size > MAX_REPORT_BYTES:
+        return None
+    with path.open('rb') as stream:
+        data = stream.read(MAX_REPORT_BYTES + 1)
+    return data if len(data) <= MAX_REPORT_BYTES else None
+
+
+def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, clock=None):
+    """`greenbone upload FILE`: one report through the same checks as a pulled one.
+
+    The report's own task decides. An unchosen task needs --add-task, and is saved to the
+    settings only after the report parses and the import succeeds."""
+    scanner = preferences['scanner']
+    try:
+        data = _read_capped(Path(path))
+    except OSError as error:
+        print(f'Could not read the file ({type(error).__name__}). Nothing was written.', file=sys.stderr)
+        return 1
+    if data is None:
+        print(f'The report is larger than {MAX_REPORT_BYTES} bytes. It was not read. Nothing was written.',
+              file=sys.stderr)
+        return 1
+    try:
+        report = parse_report(data)
+    except Exception as error:  # a refused or malformed document: the closed reason or the class
+        reason = getattr(error, 'reason', None) or type(error).__name__
+        print(f'The report was refused ({terminal_safe(reason)}). Nothing was written.', file=sys.stderr)
+        return 1
+    chosen = list(scanner['task_ids'])
+    if report.task_id not in chosen:
+        if not add_task:
+            print(f'Task {terminal_safe(report.task_id)} is not chosen for this install. '
+                  'Re-run with --add-task to add it.', file=sys.stderr)
+            return 1
+        if not local_settings.TASK_ID_RE.fullmatch(report.task_id or ''):
+            print('The report names a task id that is not a lowercase UUID. Nothing was written.', file=sys.stderr)
+            return 1
+    ports = _ports(ws.docs_for('scanner_import'), ws.journal(), clock or SimClock.from_env(environ))
+    try:
+        result = import_upload(ports, cycle, data, chosen_task_ids=chosen,
+                               qod_floor=scanner['qod_floor'], add_task=add_task)
+    except ImportRefused as exc:
+        reason = f' ({exc.reason})' if exc.reason else ''
+        print(f'Refused{reason}: {terminal_safe(exc, 200)} Nothing was written.', file=sys.stderr)
+        return 1
+    finally:
+        ports.docs.close()
+    if result['task_added']:
+        print(f'Adding task {terminal_safe(report.task_name) or "(unnamed)"} ({report.task_id}) to this install.')
+        settings_file = local_settings.settings_path(ws.root)
+        saved = local_settings.load(settings_file)
+        saved['scanner']['task_ids'].append(report.task_id)
+        local_settings.save(settings_file, saved)
+    _print({'cycle': result['cycle'], 'scan_id': result['scan_id'], 'task_id': result['task_id'],
+            'counts': result['counts'], 'newly_ingested': result['newly_ingested'],
+            'newly_resolved': result['newly_resolved'], 'task_added': result['task_added']})
+    return 0
+
+
+def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
+    """The timer's Greenbone step, before the cycle: pull, then enrich what the pull added.
+
+    Never raises: the cycle must still run. A failure is logged as its class only. With no
+    task chosen nothing is contacted and nothing is logged; with tasks chosen and no
+    credentials, `greenbone_credentials_missing` is logged once."""
+    environ = os.environ if environ is None else environ
+    cycle_id = f'cycle-{cycle:03d}'
+    try:
+        preferences = local_settings.load(local_settings.settings_path(ws.root))
+        scanner = preferences['scanner']
+        if not scanner['task_ids']:
+            return
+        if client_factory is None and _credentials_error(environ):
+            _log('greenbone_credentials_missing', cycle_id)
+            return
+        result = greenbone_pull(ws, preferences, environ, cycle, client_factory=client_factory, clock=clock)
+    except Exception as exc:  # noqa: BLE001 - class only; the cycle still runs
+        _log('greenbone_pull_failed', cycle_id, error=type(exc).__name__)
+        return
+    new_cves = result.get('new_cves') or []
+    if scanner['auto_enrichment'] and new_cves:
+        try:
+            update_enrichment(ws, environ, cves=new_cves, clock=clock)
+        except Exception as exc:  # noqa: BLE001 - class only; the cycle still runs
+            _log('greenbone_enrichment_failed', cycle_id, error=type(exc).__name__)
+
+
 MAX_CHOSEN_TASKS = 500
 
 
@@ -470,6 +690,17 @@ def _parser():
     serve = commands.add_parser('serve', help='Serve the dashboard and preferences on loopback')
     serve.add_argument('--demo', action='store_true', help='Show illustrative fixtures instead of saved records')
     serve.add_argument('--port', type=int, default=8081)
+    greenbone = commands.add_parser('greenbone', help='Read tasks and finished reports from Greenbone; never changes anything there')
+    gb_actions = greenbone.add_subparsers(dest='gb_action', required=True)
+    gb_actions.add_parser('tasks', help='List the tasks the account can see: task_id  name')
+    gb_actions.add_parser('test', help='Connect, sign in and list tasks, one line each')
+    gb_pull = gb_actions.add_parser('pull', help='Import the newest finished report of each chosen task')
+    gb_pull.add_argument('--cycle', type=_cycle, help='Default: the next cycle number')
+    gb_upload = gb_actions.add_parser('upload', help='Import one exported report file')
+    gb_upload.add_argument('file', metavar='FILE')
+    gb_upload.add_argument('--add-task', action='store_true',
+                           help="Also choose the report's task for this install, if the import succeeds")
+    gb_upload.add_argument('--cycle', type=_cycle, help='Default: the next cycle number')
     commands.add_parser('update-enrichment', help='Download CISA KEV, FIRST EPSS and NVD data into the workspace cache; reaches the internet')
     check = commands.add_parser('check-models', help='Explicitly send the bundled synthetic example to each configured model role')
     check.add_argument('--role', choices=ROLES, help='Check only this role')
@@ -491,6 +722,10 @@ def main():
         if args.command == 'check-models':
             # Reads settings only; writes nothing to the workspace.
             raise SystemExit(check_models(ModelRoles.from_settings(preferences, os.environ), args.role))
+        if args.command == 'greenbone' and args.gb_action in {'tasks', 'test'}:
+            # Reads settings and the environment only; writes nothing to the workspace.
+            run_greenbone = greenbone_tasks if args.gb_action == 'tasks' else greenbone_test
+            raise SystemExit(run_greenbone(preferences, os.environ))
         if args.command == 'cycle':
             roles = ModelRoles.from_settings(preferences, os.environ)
             if roles.proposer is None:
@@ -564,6 +799,14 @@ def main():
                 parser.exit(1, f'{exc}. Nothing was written.\n')
             finally:
                 ports.docs.close()
+        elif args.command == 'greenbone':
+            cycle = args.cycle if args.cycle is not None else next_cycle(ws)
+            if args.gb_action == 'pull':
+                code = greenbone_pull_command(ws, preferences, os.environ, cycle)
+            else:
+                code = greenbone_upload(ws, preferences, os.environ, args.file, cycle, add_task=args.add_task)
+            if code:
+                raise SystemExit(code)
         elif args.command == 'update-enrichment':
             print('This reaches the internet: CISA, FIRST EPSS and NVD.', flush=True)
             result = update_enrichment(ws, os.environ)

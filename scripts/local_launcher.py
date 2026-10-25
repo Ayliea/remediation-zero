@@ -4,7 +4,8 @@
 """Installed entry point; safe to restart without resetting stored records.
 
 With `cycle_interval_minutes` above 0 in the settings, one daemon thread here
-also runs the `cycle` command's function every interval. Each run opens its
+also runs the `cycle` command's function every interval, after pulling the
+chosen Greenbone tasks (`scanner_tick`). Each run opens its
 own workspace stores (SQLite connections are never shared across threads),
 takes the next cycle number from the `cycles` collection, and is skipped,
 not queued, while an earlier run in this process still holds the lock. A
@@ -37,12 +38,13 @@ def _log(event, **fields):
 class IntervalRunner:
     """Runs `run(workspace, cycle)` every `minutes`; overlap is skipped and logged."""
 
-    def __init__(self, database, minutes, *, run=None, wait=None):
+    def __init__(self, database, minutes, *, run=None, wait=None, pull=None):
         self.database = Path(database)
         self.minutes = minutes
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self._run = run
+        self._pull = pull
         self._wait = wait or self.stopping.wait  # returns True once stopping
 
     def tick(self):
@@ -51,9 +53,13 @@ class IntervalRunner:
             return
         cycle = None
         try:
-            from scripts.local import next_cycle, open_workspace, run_local_cycle
+            from scripts.local import next_cycle, open_workspace, run_local_cycle, scanner_tick
             workspace = open_workspace(self.database)
             cycle = next_cycle(workspace)
+            try:  # the Greenbone pull and its enrichment come first; nothing in them blocks the cycle
+                (self._pull or scanner_tick)(workspace, cycle)
+            except Exception as exc:  # noqa: BLE001 - logged by class only
+                _log('pull_failed', cycle_id=f'cycle-{cycle:03d}', error=type(exc).__name__)
             (self._run or run_local_cycle)(workspace, cycle)
             _log('interval_cycle_finished', cycle_id=f'cycle-{cycle:03d}')
         except Exception as exc:  # noqa: BLE001 - logged by class only; the runner keeps going

@@ -56,6 +56,11 @@ python3 -S -m scripts.local exception list
 python3 -S -m scripts.local approve FINDING --cycle N [--by NAME]
 python3 -S -m scripts.local serve [--demo] [--port PORT]
 python3 -S -m scripts.local check-models [--role ROLE]
+python3 -S -m scripts.local update-enrichment
+python3 -S -m scripts.local greenbone tasks
+python3 -S -m scripts.local greenbone test
+python3 -S -m scripts.local greenbone pull [--cycle N]
+python3 -S -m scripts.local greenbone upload FILE [--add-task] [--cycle N]
 ```
 
 Only `cycle` and `check-models` call a model, and a hosted endpoint may charge
@@ -85,6 +90,31 @@ before it creates or writes anything.
   `--demo` it shows illustrative fixtures instead of saved records. It binds
   only to loopback and has no user authentication, so do not reverse-proxy it
   onto a network.
+
+- **update-enrichment** downloads CISA KEV, FIRST EPSS and NVD data into the
+  workspace cache. It is the one command that reaches the internet. The
+  optional NVD key comes only from `NVD_API_KEY`.
+- **greenbone** reads from your Greenbone server and never changes anything
+  there. Credentials come only from `RZ_GREENBONE_USERNAME` and
+  `RZ_GREENBONE_PASSWORD`; they are never saved or printed. If either is
+  missing the command exits 2, names the variables and connects to nothing.
+  Failures print the error class only. Task names come from the server, so they
+  are stripped of control characters and cut to 80 characters.
+  - `tasks` prints `task_id  name` for each task the account can see.
+  - `test` prints the same three lines as the Settings page: connected,
+    signed in, tasks listed.
+  - `pull` imports at most one finished report for each chosen task and
+    prints one line per task: the result, then findings added, resolved,
+    skipped, refused and deferred. It exits 0 when every task imported or had
+    nothing new, and 1 otherwise. `--cycle` defaults to the next cycle number.
+    With no task chosen it connects to nothing.
+  - `upload FILE` imports an exported report by the same checks. The report's
+    own task decides: if that task is not chosen the command stops with
+    "Task <id> is not chosen for this install. Re-run with --add-task to add
+    it." and writes nothing. With `--add-task` the task is added to the
+    settings only after the report parses and the import succeeds. A refused
+    import prints its reason and leaves the settings unchanged. Files over
+    64 MiB are refused without being read.
 
 A `--database` that names a single database file from an earlier version is
 refused with "... is not a Remediation Zero workspace directory ...;
@@ -214,6 +244,14 @@ interval and calls your models. The launcher reads it at startup, so restart
 it after a change. It also runs in demo mode. A run is skipped, not queued, while the
 previous one is still going. A failed run is logged by class name, and the
 runner continues. The default is 0, off.
+
+Each run starts with the Greenbone pull, then runs the cycle. The pull reads the
+chosen tasks (as `greenbone pull` does). If "Fetch enrichment automatically
+after an import" is on and the pull added findings with new CVEs, it then
+fetches enrichment for those CVEs only. A failure in either step is logged by
+class name and the cycle still runs. With no task chosen nothing is contacted
+and nothing is logged. With tasks chosen but no credentials in the environment,
+`greenbone_credentials_missing` is logged once per run.
 
 ## Dashboard
 

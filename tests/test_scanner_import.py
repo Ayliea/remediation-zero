@@ -977,3 +977,27 @@ def test_last_refusal_is_cleared_by_a_lost_race(ws, ports):
     result = pull(ports, 2, source, chosen_task_ids=[TASK])
     assert result["pulled"][0]["result"] == "nothing_new"
     assert docs(ws, "scanner_state")[TASK]["last_refusal"] is None
+
+
+# --- new CVEs, for the timer's enrichment step (Task 9) ------------------------------------
+
+
+def test_pull_reports_the_cves_of_findings_it_added_and_none_on_a_repeat(ws, ports):
+    from tools.enrichment import finding_cves
+    source = FakeSource()
+    source.add(1)
+    first = pull(ports, 1, source, chosen_task_ids=[TASK])
+    stored = docs(ws, "findings")
+    expected = sorted({c for f in stored.values() for c in finding_cves(f)})
+    assert expected  # the fixture carries real CVE identifiers
+    assert first["new_cves"] == expected
+    assert first["pulled"][0]["new_cves"] == expected
+    source.add(2)
+    second = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert second["pulled"][0]["result"] == "imported"
+    assert second["new_cves"] == []  # the same findings again: nothing new
+
+
+def test_pull_with_no_import_has_no_new_cves(ws, ports):
+    source = FakeSource()
+    assert pull(ports, 1, source, chosen_task_ids=[TASK])["new_cves"] == []
