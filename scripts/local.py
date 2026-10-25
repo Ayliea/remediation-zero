@@ -665,7 +665,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                     raise ValueError()
                 if body.count(b'--' + delimiter) > MAX_UPLOAD_DELIMITERS:
                     raise ValueError()
-                if re.search(rb'(?i)content-type[ \t]*:[ \t]*multipart', body):
+                if re.search(rb'(?i)content-type\s*:\s*multipart', body):
                     raise ValueError()
                 message = BytesParser(policy=policy.HTTP).parsebytes(
                     b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)

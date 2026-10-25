@@ -809,3 +809,13 @@ def test_boundary_longer_than_70_refused(page, monkeypatch):
     assert request(body=body, headers={"Content-Type": f"multipart/form-data; boundary={long}"})[0] == 400
     assert request(body=body, headers={"Content-Type": 'multipart/form-data; boundary=""'})[0] == 400
     assert docs(gws, "scans") == {}
+
+
+def test_folded_nested_multipart_header_refused(page, monkeypatch):
+    request, token, gws = page
+    _no_parse(monkeypatch)
+    body = (b"--B\r\nContent-Disposition: form-data; name=\"report\"; filename=\"r.xml\"\r\n"
+            b"Content-Type:\r\n multipart/mixed; boundary=I\r\n\r\n"
+            b"--I\r\n\r\nx\r\n--I\r\n\r\ny\r\n--I--\r\n--B--\r\n")
+    assert request(body=body, headers={"Content-Type": "multipart/form-data; boundary=B"})[0] == 400
+    assert docs(gws, "scans") == {}
