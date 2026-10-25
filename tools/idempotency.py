@@ -104,6 +104,18 @@ def _normalize_text(value: str, *, field: str, case: str) -> str:
     return normalized.upper() if case == "upper" else normalized.lower()
 
 
+def fold_finding_id(value: str) -> str:
+    """A finding id as this layer files it: surrounding whitespace stripped, upper-cased.
+
+    Every write keyed through the layer (decisions, assignments, clocks,
+    tickets, exceptions, a finding's document id) carries this form, while a
+    finding's own `finding_id` field keeps its scanner's case. Look a finding
+    up, or match it across collections, by this. Raises ValueError for empty,
+    whitespace-only and non-string input, as key derivation does.
+    """
+    return _normalize_text(value, field="finding_id", case="upper")
+
+
 def _normalize_cycle(cycle: int, *, field: str = "cycle") -> int:
     """Cycle numbers count upward from zero.
 

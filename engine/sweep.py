@@ -20,6 +20,7 @@ from engine.ports import Ports
 from tools.enrichment import EnrichmentCache, enrich_finding, finding_cves
 from tools.docstore import FieldFilter
 from tools.exception_store import ExceptionWriter
+from tools.idempotency import fold_finding_id
 from tools.exceptions import Exception_, ExceptionAction, next_action
 
 logger = logging.getLogger("remediation_zero.exceptions")
@@ -113,6 +114,8 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
     `enrichment` defaults to the on-disk cache; KEV membership comes from it.
     """
     cycle_id = f"cycle-{cycle:03d}"
+    # Typed by a person, so in whatever case: findings are filed under the folded id.
+    finding_id = fold_finding_id(finding_id)
     finding = ports.docs.collection("findings").document(finding_id).get().to_dict()
     if not finding:
         raise NoSuchFinding(f"no such finding: {finding_id}")

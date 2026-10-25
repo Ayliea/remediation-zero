@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 from tools.docstore import as_docstore
 from tools.enrichment import EnrichmentCache, enrich_finding
+from tools.idempotency import fold_finding_id
 from tools.model_armor import ModelArmor, apply_verdict
 from tools.inference import render_finding
 
@@ -162,7 +163,7 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     """
     db = as_docstore(client if client is not None else _client())
 
-    snapshot = db.collection(FINDINGS).document(str(finding_id).strip()).get()
+    snapshot = db.collection(FINDINGS).document(fold_finding_id(finding_id)).get()
     if not snapshot.exists:
         raise FindingNotFound(
             f"No finding {finding_id!r}. The corpus is RZ-0001 to RZ-0400."

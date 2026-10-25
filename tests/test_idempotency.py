@@ -26,6 +26,7 @@ from tools.idempotency import (
     IdempotencyGuard,
     InMemoryIdempotencyStore,
     derive_key,
+    fold_finding_id,
     derive_record,
 )
 
@@ -334,3 +335,12 @@ def test_every_module_that_guards_a_side_effect_has_a_suite():
         "ticket or a nudge that never sent:\n"
         + "\n".join(f"  {name} -> tests/test_{Path(name).stem}.py" for name in missing)
     )
+
+
+def test_fold_finding_id_is_the_layers_own_folding():
+    greenbone = "gb-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:1.3.6.1.4.1.25623.1.0.117850:8080/tcp"
+    assert fold_finding_id(f"  {greenbone} ") == greenbone.upper()
+    assert derive_key(greenbone, "nudge", 3) == derive_key(fold_finding_id(greenbone), "nudge", 3)
+    for bad in ("", "   ", None, 7):
+        with pytest.raises(ValueError):
+            fold_finding_id(bad)

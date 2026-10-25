@@ -247,6 +247,24 @@ def test_accept_of_a_multi_cve_finding_is_kev_if_any_cve_is(ws):
                enrichment=cache)
 
 
+def test_accept_finds_a_greenbone_finding_typed_in_its_own_lowercase(ws):
+    from engine.sweep import accept
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    original = "gb-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:1.3.6.1.4.1.25623.1.0.105611:22/tcp"
+    ws.docs_for("seed").collection("findings").document(original.upper()).set(
+        {"finding_id": original, "asset_id": "ast-001", "status": "open", "cve_ids": []})
+    ws.docs_for("triage_cycle").collection("decisions").document(f"{original.upper()}-c001").set(
+        {"finding_id": original.upper(), "cycle": 1, "outcome": "ratified",
+         "proposed_severity": "medium"})
+    cache = type("C", (), {"has_kev": True, "enrich": lambda self, cve: pytest.fail("no CVE")})()
+    result = accept(ports_for(ws, "exception_accept", clock), original, 30, "own-1", "x", 10,
+                    enrichment=cache)
+    assert result == f"accepted:{original.upper()}"
+    doc = ws.docs_for("report").collection("exceptions").document(original.upper()).get().to_dict()
+    assert doc["finding_id"] == original.upper() and doc["status"] == "active"
+
+
 def test_accept_unknown_finding_raises_no_such_finding(ws):
     from engine.sweep import NoSuchFinding, accept
     clock = SimClock(mode=ClockMode.SIM)

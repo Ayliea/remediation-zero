@@ -18,6 +18,7 @@ import logging
 
 from engine.ports import Ports
 from tools.chase import ChaseAction, ChaseState, next_action, unchaseable_reason
+from tools.idempotency import fold_finding_id
 from tools.tickets import TicketWriter
 
 logger = logging.getLogger("remediation_zero.chase")
@@ -35,7 +36,7 @@ def _same_finding(finding_id) -> str:
     a finding's own `finding_id` field keeps its scanner's case (Greenbone ids
     are lowercase), so matching on the raw field would never see it resolved.
     """
-    return str(finding_id or "").strip().upper()
+    return fold_finding_id(finding_id)
 
 
 def run_chase(ports: Ports, cycle: int, *, advance_days: float = 0.0) -> dict[str, int]:
