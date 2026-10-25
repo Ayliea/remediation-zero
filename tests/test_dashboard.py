@@ -187,6 +187,19 @@ def test_skipped_counts_are_shown():
         assert number in page
 
 
+def test_reports_skipped_as_not_done_are_shown_with_their_status():
+    # The spec: Stopped and Interrupted reports are skipped "and shown as skipped with their status".
+    skipped = [{"report_id": f"33333333-3333-4333-8333-{n:012d}", "status": status}
+               for n, status in ((1, "Stopped"), (2, "Interrupted"), (3, "<b>Odd</b>"))]
+    page = scanner_page([pulled(last_result="nothing_new", skipped=skipped, skipped_not_listed=4)], [TASK])
+    assert "Reports skipped because they did not finish: 7. Newest first:" in page
+    assert "<li>Stopped: 33333333-3333-4333-8333-000000000001</li>" in page
+    assert "<li>Interrupted: 33333333-3333-4333-8333-000000000002</li>" in page
+    assert "<b>Odd</b>" not in page and "&lt;b&gt;Odd&lt;/b&gt;" in page
+    assert page.index("000000000003") < page.index("000000000002") < page.index("000000000001")
+    assert "Reports skipped" not in scanner_page([pulled(last_result="nothing_new", skipped=[])], [TASK])
+
+
 def test_refused_reports_are_listed_newest_first_at_most_five_in_plain_words():
     refused = [{"report_id": f"33333333-3333-4333-8333-{n:012d}", "reason": "too_large" if n == 1 else "not_newer"}
                for n in range(1, 8)]

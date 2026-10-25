@@ -228,6 +228,14 @@ def _task_card_body(state, task_id):
         body += ('<p>Skipped: ' + ", ".join(f'{text(skipped.get(key, 0))} {label}' for key, label in (
             ("log", "log-level"), ("below_qod", "below the quality floor"), ("rejected", "rejected"),
             ("not_finished", "not finished"))) + '.</p>')
+    # Reports gvmd lists as not Done (Stopped, Interrupted, ...): never imported, shown with their status.
+    not_done = [r for r in (state.get("skipped") or []) if isinstance(r, dict)]
+    if not_done:
+        total = len(not_done) + int(state.get("skipped_not_listed") or 0)
+        body += f'<p>Reports skipped because they did not finish: {text(total)}. Newest first:</p><ul>'
+        for item in list(reversed(not_done))[:5]:
+            body += f'<li>{text(item.get("status"))}: {text(item.get("report_id"))}</li>'
+        body += '</ul>'
     refused = [r for r in (state.get("refused") or []) if isinstance(r, dict)]
     if refused:
         body += f'<p>Recently refused reports: {text(len(refused))} (the last 20 are kept). Newest first:</p><ul>'
