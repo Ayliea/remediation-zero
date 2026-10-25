@@ -335,6 +335,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
         new_cves = sorted({cve for finding in scan.findings
                            if finding.get("finding_id") not in known
                            for cve in finding_cves(finding)})
+        scan_cves = sorted({cve for finding in scan.findings for cve in finding_cves(finding)})
         _upsert_assets(docs, scan, stamp)
         summary = run_rescan(dataclasses.replace(ports, journal=journal), cycle,
                              to_rescan_input(scan), dry_run=False)
@@ -366,7 +367,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
     _log("report_imported", cycle, task_id=scan.task_id, scan_id=scan.scan_id,
          counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all)
     return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all,
-            "new_cves": new_cves}
+            "new_cves": new_cves, "scan_cves": scan_cves}
 
 
 # --- pull -------------------------------------------------------------------------------
@@ -514,7 +515,8 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             return {"task_id": task_id, "result": "imported", "report_id": scan.scan_id,
                     "counts": result["counts"], "skipped": result["skipped"],
                     "uncovered_all": result["uncovered_all"], "refused": len(refused_now),
-                    "deferred": waiting, "new_cves": result["new_cves"]}
+                    "deferred": waiting, "new_cves": result["new_cves"],
+                    "scan_cves": result["scan_cves"]}
         tried = {r["report_id"] for r in refused_now}
         if future is not None:
             tried.add(future["report_id"])
@@ -565,7 +567,8 @@ def pull(ports: Ports, cycle: int, source: Any, *, chosen_task_ids: Collection[s
     chosen = list(dict.fromkeys(chosen_task_ids))
     if not chosen:
         _log("scanner_pull_skipped", cycle, reason="no tasks chosen")
-        return {"pulled": [], "reason": "no tasks chosen"}
+        return {"pulled": [], "reason": "no tasks chosen",
+                "new_cves": [], "scan_cves": []}
     _refuse_demo(ports.docs)  # before contacting the scanner or writing anything
     pulled = []
     try:
@@ -586,7 +589,8 @@ def pull(ports: Ports, cycle: int, source: Any, *, chosen_task_ids: Collection[s
         if callable(close):
             close()
     return {"cycle": _cycle_id(cycle), "pulled": pulled,
-            "new_cves": sorted({cve for outcome in pulled for cve in outcome.get("new_cves", ())})}
+            "new_cves": sorted({cve for o in pulled for cve in o.get("new_cves", ())}),
+            "scan_cves": sorted({cve for o in pulled for cve in o.get("scan_cves", ())})}
 
 
 # --- upload -----------------------------------------------------------------------------

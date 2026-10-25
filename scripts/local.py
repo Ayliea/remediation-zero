@@ -390,24 +390,27 @@ def pull_line(outcome):
 
 
 def greenbone_pull_command(ws, preferences, environ, cycle):
-    """`greenbone pull`: one line per task. 0 when every task imported or had nothing new."""
+    """`greenbone pull`: one line per task. 0 when every task imported, had nothing new, or had
+    already imported in this cycle (a frequent cron pull is not an error)."""
     if not preferences['scanner']['task_ids']:
         print(NO_TASKS)
         return 0
     try:
-        result = greenbone_pull(ws, preferences, environ, cycle)
-    except GmpAuthError as exc:  # only the missing-credentials check raises it here, before any connection
+        factory = gmp_client_factory(preferences, environ)
+    except GmpAuthError as exc:  # the missing-credentials check, before any connection
         print(exc, file=sys.stderr)
         return 2
+    except ValueError:  # no connection saved
+        print(NOT_SET_UP, file=sys.stderr)
+        return 1
+    try:
+        result = greenbone_pull(ws, preferences, environ, cycle, client_factory=factory)
     except ImportRefused as exc:
         print(f'Refused: {terminal_safe(exc, 200)} Nothing was written.', file=sys.stderr)
         return 1
-    except ValueError:
-        print(NOT_SET_UP, file=sys.stderr)
-        return 1
     for outcome in result['pulled']:
         print(pull_line(outcome))
-    return 0 if all(o['result'] in {'imported', 'nothing_new'} for o in result['pulled']) else 1
+    return 0 if all(o['result'] in {'imported', 'nothing_new', 'already_imported_this_cycle'} for o in result['pulled']) else 1
 
 
 def _read_capped(path):
@@ -449,6 +452,10 @@ def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, c
         if not local_settings.TASK_ID_RE.fullmatch(report.task_id or ''):
             print('The report names a task id that is not a lowercase UUID. Nothing was written.', file=sys.stderr)
             return 1
+        if len(chosen) >= MAX_CHOSEN_TASKS:  # before the import, so no findings are left without their task
+            print(f'At most {MAX_CHOSEN_TASKS} scan tasks can be chosen. Nothing was saved or imported.',
+                  file=sys.stderr)
+            return 1
     ports = _ports(ws.docs_for('scanner_import'), ws.journal(), clock or SimClock.from_env(environ))
     try:
         result = import_upload(ports, cycle, data, chosen_task_ids=chosen,
@@ -460,15 +467,29 @@ def greenbone_upload(ws, preferences, environ, path, cycle, *, add_task=False, c
     finally:
         ports.docs.close()
     if result['task_added']:
-        print(f'Adding task {terminal_safe(report.task_name) or "(unnamed)"} ({report.task_id}) to this install.')
         settings_file = local_settings.settings_path(ws.root)
-        saved = local_settings.load(settings_file)
-        saved['scanner']['task_ids'].append(report.task_id)
-        local_settings.save(settings_file, saved)
+        try:
+            saved = local_settings.load(settings_file)
+            saved['scanner']['task_ids'].append(report.task_id)
+            local_settings.save(settings_file, saved)
+        except (OSError, ValueError):
+            print(f'Imported, but task {report.task_id} was not saved; add it in Settings.', file=sys.stderr)
+            return 1
+        print(f'Adding task {terminal_safe(report.task_name) or "(unnamed)"} ({report.task_id}) to this install.')
     _print({'cycle': result['cycle'], 'scan_id': result['scan_id'], 'task_id': result['task_id'],
             'counts': result['counts'], 'newly_ingested': result['newly_ingested'],
             'newly_resolved': result['newly_resolved'], 'task_added': result['task_added']})
     return 0
+
+
+def _uncached_cves(ws, cves):
+    """The CVEs the workspace's NVD cache has no good entry for (a missing or errored one counts)."""
+    try:
+        cached = json.loads((workspace_cache_dir(ws.root) / 'nvd.json').read_text())
+    except (OSError, ValueError):
+        cached = {}
+    cached = cached if isinstance(cached, dict) else {}
+    return [c for c in cves if not (isinstance(cached.get(c), dict) and not cached[c].get('_error'))]
 
 
 def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
@@ -491,10 +512,12 @@ def scanner_tick(ws, cycle, environ=None, *, client_factory=None, clock=None):
     except Exception as exc:  # noqa: BLE001 - class only; the cycle still runs
         _log('greenbone_pull_failed', cycle_id, error=type(exc).__name__)
         return
-    new_cves = result.get('new_cves') or []
-    if scanner['auto_enrichment'] and new_cves:
+    # Every CVE in the imported reports that the NVD cache holds no good entry for: new findings
+    # and earlier failed fetches alike. From the pull's result, never from all findings.
+    wanted = _uncached_cves(ws, result.get('scan_cves') or [])
+    if scanner['auto_enrichment'] and wanted:
         try:
-            update_enrichment(ws, environ, cves=new_cves, clock=clock)
+            update_enrichment(ws, environ, cves=wanted, clock=clock)
         except Exception as exc:  # noqa: BLE001 - class only; the cycle still runs
             _log('greenbone_enrichment_failed', cycle_id, error=type(exc).__name__)
 

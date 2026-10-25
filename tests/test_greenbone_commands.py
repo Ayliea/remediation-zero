@@ -36,7 +36,10 @@ USER_VAR, PASS_VAR = "RZ_GREENBONE_USERNAME", "RZ_GREENBONE_PASSWORD"
 ANSI_NAME = "\x1b[31mRed\x1b[0m\x07 task " + "n" * 200
 
 
-def handler_for(*, auth=None):
+def handler_for(*, auth=None, current=None):
+    """`current` (a dict with report/stamp/body) lets a test change the report gvmd serves."""
+    current = current or {"report": REPORT, "stamp": "2026-10-20T01:00:00Z", "body": CLEAN_REPORT}
+
     def handler(tag, raw):
         if tag == "authenticate":
             return [auth] if auth else [OK_AUTH]
@@ -44,8 +47,8 @@ def handler_for(*, auth=None):
             return [tasks_response((TASK_A, "Weekly LAN"), (TASK_B, "DMZ"))]
         if tag == "get_reports":
             if b"report_id=" in raw:
-                return [CLEAN_REPORT]
-            return [reports_response(report_entry(REPORT, TASK_A, "Done", "2026-10-20T01:00:00Z"))]
+                return [current["body"]]
+            return [reports_response(report_entry(current["report"], TASK_A, "Done", current["stamp"]))]
         return [f'<{tag}_response status="404" status_text="Not found"/>'.encode()]
     return handler
 
@@ -211,8 +214,8 @@ def test_pull_prints_one_line_per_task_and_exits_by_result(gws, gvmd, monkeypatc
     assert lines[0].split()[:2] == [TASK_A, "imported"]
     assert re.search(r"findings=[1-9]\d* resolved=0 skipped=\d+ refused=0 deferred=0$", lines[0])
     assert lines[1].split()[:2] == [TASK_B, "nothing_new"]
-    # the same cycle again: the task already imported one, which is not reported as a success
-    assert run(monkeypatch, gws, "greenbone", "pull", "--cycle", "1") == 1
+    # the same cycle again: nothing is wrong, so a frequent cron pull exits 0
+    assert run(monkeypatch, gws, "greenbone", "pull", "--cycle", "1") == 0
     assert "already_imported_this_cycle" in capsys.readouterr().out
 
 
@@ -498,3 +501,83 @@ def test_help_lists_the_greenbone_commands():
     for name in ("tasks", "test", "pull", "upload"):
         assert name in result.stdout
     assert "greenbone" in _local("--help").stdout
+
+
+# --- fix round 1 -----------------------------------------------------------------------
+
+
+def test_a_failed_settings_save_after_the_import_says_so_and_exits_1(gws, monkeypatch, capsys):
+    from scripts import local
+    configure(gws, task_ids=())
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full zq")
+    monkeypatch.setattr(local.local_settings, "save", broken)
+    assert run(monkeypatch, gws, "greenbone", "upload", str(REPORT_FILE), "--add-task") == 1
+    captured = capsys.readouterr()
+    assert f"Imported, but task {TASK_A} was not saved; add it in Settings." in captured.err
+    assert "Adding task" not in captured.out and "Traceback" not in captured.err
+    assert "disk full zq" not in captured.err
+    assert REPORT in docs(gws, "scans")
+    assert task_ids(gws) == []
+
+
+def test_add_task_at_the_task_limit_is_refused_before_the_import(gws, monkeypatch, capsys):
+    from scripts.local import MAX_CHOSEN_TASKS
+    full = [f"{n:08x}-0000-4000-8000-000000000000" for n in range(MAX_CHOSEN_TASKS)]
+    configure(gws, task_ids=full)
+    assert run(monkeypatch, gws, "greenbone", "upload", str(REPORT_FILE), "--add-task") == 1
+    err = capsys.readouterr().err
+    assert f"At most {MAX_CHOSEN_TASKS} scan tasks can be chosen." in err
+    assert docs(gws, "scans") == {} and docs(gws, "findings") == {}
+    assert task_ids(gws) == full
+
+
+def test_an_unrelated_value_error_is_not_reported_as_not_set_up(gws, gvmd, monkeypatch, capsys):
+    from scripts import local
+    path, _ = gvmd()
+    configure(gws, path)
+    credentials(monkeypatch)
+
+    def broken(*args, **kwargs):
+        raise ValueError("something else")
+    monkeypatch.setattr(local, "pull", broken)
+    with pytest.raises(ValueError):
+        local.greenbone_pull_command(gws, local_settings.load(local_settings.settings_path(gws.root)),
+                                     local.os.environ, 1)
+    assert "not set up" not in capsys.readouterr().err
+
+
+def test_a_cve_whose_first_fetch_failed_is_retried_on_the_next_imported_report(gws, gvmd, monkeypatch):
+    from scripts import local
+    current = {"report": REPORT, "stamp": "2026-10-20T01:00:00Z", "body": CLEAN_REPORT}
+    path, _ = gvmd(handler_for(current=current))
+    configure(gws, path, auto_enrichment=True)
+    credentials(monkeypatch)
+    calls = spy_enrichment(monkeypatch)
+    base = local.urllib_get
+    broken = {"on": True}
+
+    def flaky(url, headers=None):
+        if broken["on"] and url.endswith("cveId=CVE-2023-4863"):
+            raise OSError("synthetic outage")
+        return base(url, headers)
+    monkeypatch.setattr(local, "urllib_get", flaky)
+
+    def record_cycle(workspace, number):
+        store = workspace.docs_for("triage_cycle")
+        store.collection("cycles").document(f"cycle-{number:03d}").set({"cycle_id": f"cycle-{number:03d}", "cycle": number})
+        store.close()
+    tick(gws, record_cycle)
+    nvd = json.loads((gws.root / "enrichment" / "nvd.json").read_text())
+    assert "CVE-2023-4863" not in nvd and "CVE-2021-44228" in nvd
+    # A newer report (no new findings) arrives; the failed CVE is asked for again, the cached ones are not.
+    broken["on"] = False
+    calls.clear()
+    current.update(report="33333333-3333-4333-8333-333333333333", body=CLEAN_REPORT.replace(
+        REPORT.encode(), b"33333333-3333-4333-8333-333333333333").replace(b"2026-10-20", b"2026-10-21"),
+        stamp="2026-10-21T01:00:00Z")
+    tick(gws, record_cycle)
+    asked = sorted(u.split("=")[1] for u, _ in calls if "cveId" in u)
+    assert asked == ["CVE-2023-4863"]
+    assert "CVE-2023-4863" in json.loads((gws.root / "enrichment" / "nvd.json").read_text())

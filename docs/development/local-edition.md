@@ -105,8 +105,8 @@ before it creates or writes anything.
     signed in, tasks listed.
   - `pull` imports at most one finished report for each chosen task and
     prints one line per task: the result, then findings added, resolved,
-    skipped, refused and deferred. It exits 0 when every task imported or had
-    nothing new, and 1 otherwise. `--cycle` defaults to the next cycle number.
+    skipped, refused and deferred. It exits 0 when every task imported, had
+    nothing new, or had already imported in this cycle, and 1 otherwise. `--cycle` defaults to the next cycle number.
     With no task chosen it connects to nothing.
   - `upload FILE` imports an exported report by the same checks. The report's
     own task decides: if that task is not chosen the command stops with
@@ -248,7 +248,8 @@ runner continues. The default is 0, off.
 Each run starts with the Greenbone pull, then runs the cycle. The pull reads the
 chosen tasks (as `greenbone pull` does). If "Fetch enrichment automatically
 after an import" is on and the pull added findings with new CVEs, it then
-fetches enrichment for those CVEs only. A failure in either step is logged by
+fetches enrichment for the CVEs in the imported report that the NVD cache does
+not hold yet (new findings and earlier failed fetches). A failure in either step is logged by
 class name and the cycle still runs. With no task chosen nothing is contacted
 and nothing is logged. With tasks chosen but no credentials in the environment,
 `greenbone_credentials_missing` is logged once per run.

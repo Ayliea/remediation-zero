@@ -298,7 +298,8 @@ def test_empty_choice_pulls_nothing(ws, ports):
     source = FakeSource()
     source.add(1)
     before = everything(ws)
-    assert pull(ports, 1, source, chosen_task_ids=[]) == {"pulled": [], "reason": "no tasks chosen"}
+    assert pull(ports, 1, source, chosen_task_ids=[]) == {
+        "pulled": [], "reason": "no tasks chosen", "new_cves": [], "scan_cves": []}
     assert source.listed == [] and source.fetched == []
     assert everything(ws) == before
 
@@ -996,6 +997,7 @@ def test_pull_reports_the_cves_of_findings_it_added_and_none_on_a_repeat(ws, por
     second = pull(ports, 2, source, chosen_task_ids=[TASK])
     assert second["pulled"][0]["result"] == "imported"
     assert second["new_cves"] == []  # the same findings again: nothing new
+    assert second["scan_cves"] == expected  # but the report's own CVEs are still listed
 
 
 def test_pull_with_no_import_has_no_new_cves(ws, ports):
