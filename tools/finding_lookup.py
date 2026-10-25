@@ -161,6 +161,8 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     Raises:
         FindingNotFound: if there is no such finding.
     """
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        raise FindingNotFound("No finding was named. The corpus is RZ-0001 to RZ-0400.")
     db = as_docstore(client if client is not None else _client())
 
     snapshot = db.collection(FINDINGS).document(fold_finding_id(finding_id)).get()

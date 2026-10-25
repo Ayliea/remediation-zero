@@ -150,6 +150,17 @@ def test_chase_closes_the_ticket_of_a_resolved_finding_whose_id_is_lowercase(ws)
     assert ticket["resolved_by_scan"] == "33333333-3333-4333-8333-000000000002"
 
 
+def test_a_finding_row_with_no_id_does_not_stop_chase(ws):
+    from engine.chase import _same_finding, run_chase
+    assert _same_finding(None) == "" and _same_finding("  ") == ""
+    assert _same_finding(" gb-x ") == "GB-X"
+    clock = SimClock(mode=ClockMode.SIM)
+    docs = seed_reference(ws, clock)
+    docs.collection("findings").document("BLANK").set({"finding_id": "", "status": "open"})
+    start_clock(ws, "RZ-0001", clock)
+    assert run_chase(ports_for(ws, "chase", clock), cycle=1) == {"open_ticket": 1}
+
+
 def test_chase_stage_never_imports_rescan():
     """Only scripts/rescan.py (and the local CLI) resolve findings; agents never do."""
     source = (ROOT / "engine" / "chase.py").read_text()
@@ -263,6 +274,16 @@ def test_accept_finds_a_greenbone_finding_typed_in_its_own_lowercase(ws):
     assert result == f"accepted:{original.upper()}"
     doc = ws.docs_for("report").collection("exceptions").document(original.upper()).get().to_dict()
     assert doc["finding_id"] == original.upper() and doc["status"] == "active"
+
+
+@pytest.mark.parametrize("blank", ["", "   ", None])
+def test_accept_of_a_blank_id_is_no_such_finding_not_a_refusal(ws, blank):
+    from engine.sweep import NoSuchFinding, accept
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    with pytest.raises(NoSuchFinding):
+        accept(ports_for(ws, "exception_accept", clock), blank, 30, "own-1", "x", 10)
+    assert list(ws.docs_for("report").collection("human_queue").stream()) == []
 
 
 def test_accept_unknown_finding_raises_no_such_finding(ws):

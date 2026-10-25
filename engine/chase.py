@@ -35,7 +35,11 @@ def _same_finding(finding_id) -> str:
     idempotency layer files it. Clocks, tickets and exceptions carry that form;
     a finding's own `finding_id` field keeps its scanner's case (Greenbone ids
     are lowercase), so matching on the raw field would never see it resolved.
+    A blank or missing id folds to "" as before, so one malformed row cannot
+    stop the chase run for every other finding.
     """
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        return ""
     return fold_finding_id(finding_id)
 
 

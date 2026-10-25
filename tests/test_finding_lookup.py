@@ -109,6 +109,12 @@ def test_a_missing_finding_raises_rather_than_returning_an_empty_shell():
         lookup_finding("RZ-9999", client=FakeClient(None, ASSET))
 
 
+@pytest.mark.parametrize("blank", ["", "  ", None])
+def test_a_blank_finding_id_is_not_found_not_a_crash(blank):
+    with pytest.raises(FindingNotFound):
+        lookup_finding(blank, client=FakeClient(FINDING, ASSET))
+
+
 def test_a_finding_id_in_lowercase_is_looked_up_under_the_folded_id():
     client = FakeClient(FINDING, ASSET)
     lookup_finding("  gb-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:1.3.6.1.4.1.25623.1.0.117850:8080/tcp ",

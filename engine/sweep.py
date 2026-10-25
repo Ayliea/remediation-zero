@@ -115,6 +115,9 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
     """
     cycle_id = f"cycle-{cycle:03d}"
     # Typed by a person, so in whatever case: findings are filed under the folded id.
+    # A blank id is no finding; ValueError is reserved for a routed refusal.
+    if not isinstance(finding_id, str) or not finding_id.strip():
+        raise NoSuchFinding("no such finding: (blank)")
     finding_id = fold_finding_id(finding_id)
     finding = ports.docs.collection("findings").document(finding_id).get().to_dict()
     if not finding:
