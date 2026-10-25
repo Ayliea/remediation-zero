@@ -12,7 +12,12 @@ failures that matter are false closure, partial writes and silent drops.
   rescan writes are keyed on (finding, action, cycle), so a second report in one
   cycle would have its resolve suppressed. A task with no imported report yet
   takes only its newest Done report as a baseline; older ones are counted, not
-  back-filled. After that, the oldest Done report newer than the last imported.
+  back-filled. After that, the oldest Done report whose gvmd timestamp is newer
+  than the last imported report's scan end. Every import, pulled or uploaded,
+  must be strictly newer by its own scan end than the task's last import.
+- A report the parser refuses, or one with no scan time or not newer, is
+  recorded in `scanner_state[task].refused` (report id and a closed reason, the
+  last 20) and the pull moves on to the next newer one. It changes nothing.
 - Everything one report writes (asset upserts, then `engine.rescan.run_rescan`
   exactly as it is, then the task's pull state), idempotency keys included,
   commits in one SQLite transaction or not at all. If anything fails after the
@@ -43,7 +48,7 @@ from engine.scanner_source import (
     to_rescan_input,
 )
 from tools.docstore import AlreadyExists
-from tools.greenbone_report import parse_report
+from tools.greenbone_report import REFUSAL_REASONS, ReportRefused, parse_report
 
 logger = logging.getLogger("remediation_zero.scanner_import")
 
@@ -51,6 +56,10 @@ STATE = "scanner_state"
 DONE = "Done"
 #: Most non-Done reports listed per task in the pull state; the rest are counted.
 MAX_SKIPPED_LISTED = 50
+#: Refused reports remembered per task (`scanner_state[task].refused`).
+MAX_REFUSED_KEPT = 20
+#: Why a pulled report was refused. Closed, so it can be stored; never server text.
+REFUSED_REASONS = frozenset(REFUSAL_REASONS) | {"no_scan_time", "not_newer"}
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _STATUS_RE = re.compile(r"[A-Za-z][A-Za-z ]{0,39}")
 _NAME_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()\-]")
@@ -62,7 +71,15 @@ _ASSET_REFRESHED = ("ip", "hostname", "os_cpe", "open_ports", "last_seen_scan")
 
 
 class ImportRefused(ValueError):
-    """A report was refused before anything was written."""
+    """A report was refused before anything was written.
+
+    `reason` is set (one of `REFUSED_REASONS`) when the refusal is about the
+    report itself rather than the request, so a pull can record it and move on.
+    """
+
+    def __init__(self, message: str, *, reason: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def _cycle_id(cycle: int) -> str:
@@ -199,10 +216,15 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
     """Import one normalised report, all of it or none of it.
 
     Refused (ImportRefused, nothing written) when the report's own task is not
-    chosen, its status is not Done, its ids are malformed, the workspace holds
-    seeded findings, the task already imported a report this cycle, or this
-    report was already imported. Returns the rescan summary plus `skipped` and
+    chosen, its status is not Done, its ids are malformed, it has no scan time,
+    the workspace holds seeded findings, the task already imported a report
+    this cycle, the report is not newer than the task's last imported one, or
+    it was already imported. Returns the rescan summary plus `skipped` and
     `uncovered_all`.
+
+    "Newer" is the report's own scan end (R19): reconciling an older report
+    after a newer one would read it as a rescan, resolving findings the newer
+    report still shows or reopening ones it saw fixed.
     """
     if ports.journal is None:
         raise ValueError("importing a report needs a journal")
@@ -225,6 +247,10 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             else "unrecognised"
         raise ImportRefused(f"report status is {status}, not Done; only finished scans "
                             "are imported")
+    scan_end = _instant(scan.scan_end)
+    if scan_end is None:
+        raise ImportRefused("report has no scan time; refusing to import",
+                            reason="no_scan_time")
 
     docs = ports.docs
     with transaction(journal=Path(journal_path), clock=ports.journal.clock) as journal:
@@ -236,6 +262,10 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
         if state.get("last_imported_cycle") == cycle:
             raise ImportRefused(f"task {scan.task_id} already imported a report in "
                                 f"{_cycle_id(cycle)}; one report per task per cycle")
+        last_end = _instant(state.get("last_imported_scan_end"))
+        if last_end is not None and scan_end <= last_end:
+            raise ImportRefused("report is not newer than the last imported report for "
+                                "this task", reason="not_newer")
         if docs.collection("scans").document(scan.scan_id).get().exists:
             raise ImportRefused(f"report {scan.scan_id} was already imported")
 
@@ -245,14 +275,13 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
                              to_rescan_input(scan), dry_run=False)
         uncovered_all = _uncovered_all(scan)
         notes = pull_notes or {}
-        _write_state(docs, scan.task_id, {
+        fields = {
             "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
             "last_result": "imported", "last_error_class": None,
             "last_imported_report_id": scan.scan_id,
-            "last_imported_report_timestamp": notes.get("timestamp"),
+            "last_imported_scan_end": scan.scan_end,
             "last_imported_cycle": cycle,
             "last_import_via": via,
-            "waiting_reason": None,
             "last_counts": summary["counts"],
             "last_skipped": dict(scan.skipped),
             "last_uncovered_all": uncovered_all,
@@ -262,7 +291,10 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "last_refused_reports": notes.get("refused_reports", 0),
             "last_refused_reasons": notes.get("refused_reasons", []),
             "last_skipped_tasks": notes.get("skipped_tasks", 0),
-        })
+        }
+        if "refused" in notes:
+            fields["refused"] = notes["refused"]
+        _write_state(docs, scan.task_id, fields)
     _log("report_imported", cycle, task_id=scan.task_id, scan_id=scan.scan_id,
          counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all)
     return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all}
@@ -272,7 +304,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
 
 
 def _instant(stamp: Any) -> Optional[float]:
-    """A report listing's ISO 8601 timestamp as epoch seconds; None if it does not parse.
+    """An ISO 8601 time as epoch seconds; None if it does not parse.
 
     Used only to order the scanner's own reports, never as a business time.
     """
@@ -287,41 +319,31 @@ def _instant(stamp: Any) -> Optional[float]:
     return parsed.timestamp()
 
 
-def _choose(reports: list[dict], state: dict, imported: Callable[[str], bool]) -> dict:
-    """Which report to import (at most one), and what was met on the way.
+def _choose(reports: list[dict], state: dict) -> dict:
+    """The Done reports to try, in order, and what was met on the way.
 
-    No import yet: the newest Done report only, the older Done ones counted as
-    not imported. Otherwise: the oldest Done report newer than the last
-    imported one. "Newer" is position in the scanner's oldest-first listing;
-    if the last imported report is no longer listed, its recorded timestamp
-    decides, and without one nothing can be ordered safely, so nothing is picked.
+    With a `last_imported_scan_end`: Done reports whose gvmd timestamp is
+    strictly newer, oldest first. Without one: the baseline, newest Done
+    first (older ones only as fallbacks if a newer one is refused), the rest
+    counted as not imported. At most one of them is imported.
     """
-    last = state.get("last_imported_report_id")
-    unordered = False
-    if not last:
-        newer = list(reports)
-        done = [r for r in newer if r.get("status") == DONE]
-        pick = done[-1] if done else None
-        baseline = max(len(done) - 1, 0)
+    since = _instant(state.get("last_imported_scan_end"))
+    listed = [r for r in reports if _UUID_RE.fullmatch(str(r.get("report_id") or ""))]
+    if since is None:
+        newer = listed
+        candidates = [r for r in reversed(newer) if r.get("status") == DONE]
+        baseline = max(len(candidates) - 1, 0)
     else:
-        ids = [r.get("report_id") for r in reports]
-        if last in ids:
-            newer = reports[ids.index(last) + 1:]
-        else:
-            since = _instant(state.get("last_imported_report_timestamp"))
-            if since is None:
-                newer, unordered = [], True
-            else:
-                newer = [r for r in reports
-                         if (_instant(r.get("timestamp")) or float("-inf")) > since]
-        pick = next((r for r in newer if r.get("status") == DONE
-                     and not imported(r.get("report_id"))), None)
+        timed = [(_instant(r.get("timestamp")), r) for r in listed]
+        newer = [r for t, r in sorted((p for p in timed if p[0] is not None),
+                                      key=lambda p: p[0]) if t > since]
+        candidates = [r for r in newer if r.get("status") == DONE]
         baseline = 0
     skipped = [{"report_id": r.get("report_id"),
                 "status": r.get("status") if _STATUS_RE.fullmatch(r.get("status") or "")
                 else "unrecognised"}
                for r in newer if r.get("status") != DONE]
-    return {"pick": pick, "baseline_not_imported": baseline, "unordered": unordered,
+    return {"candidates": candidates, "baseline_not_imported": baseline,
             "skipped": skipped[:MAX_SKIPPED_LISTED],
             "skipped_not_listed": max(len(skipped) - MAX_SKIPPED_LISTED, 0)}
 
@@ -334,6 +356,16 @@ def _source_notes(source: Any, task_id: str) -> dict:
             "skipped_tasks": int(found.get("skipped_tasks", 0) or 0)}
 
 
+def _merge_refused(old: Any, new: list[dict]) -> list[dict]:
+    """The task's refused reports, newest last, one entry per report, the last 20."""
+    kept = [r for r in (old if isinstance(old, list) else [])
+            if isinstance(r, dict) and r.get("reason") in REFUSED_REASONS
+            and _UUID_RE.fullmatch(str(r.get("report_id") or ""))]
+    fresh = {r["report_id"] for r in new}
+    merged = [r for r in kept if r["report_id"] not in fresh] + new
+    return merged[-MAX_REFUSED_KEPT:]
+
+
 def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                chosen: list[str]) -> dict:
     docs = ports.docs
@@ -342,37 +374,49 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
     if state.get("last_imported_cycle") == cycle:
         # Decided before contacting the scanner: nothing is listed or downloaded.
         return {"task_id": task_id, "result": "already_imported_this_cycle"}
+    refused_now: list[dict] = []
     try:
         reports = source.finished_reports(task_id)
-        choice = _choose(reports, state,
-                         lambda rid: docs.collection("scans").document(rid).get().exists)
+        choice = _choose(reports, state)
         notes = {**_source_notes(source, task_id),
                  **{k: choice[k] for k in ("skipped", "skipped_not_listed",
                                            "baseline_not_imported")}}
-        pick = choice["pick"]
-        if pick is None:
-            stamp = ports.clock.now()
-            _write_state(docs, task_id, {
-                "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
-                "last_result": "nothing_new", "last_error_class": None,
-                "waiting_reason": ("the last imported report is no longer listed and has no "
-                                   "timestamp, so newer reports cannot be ordered safely"
-                                   if choice["unordered"] else None),
-                "skipped": notes["skipped"], "skipped_not_listed": notes["skipped_not_listed"],
-                "last_refused_reports": notes["refused_reports"],
-                "last_refused_reasons": notes["refused_reasons"],
-                "last_skipped_tasks": notes["skipped_tasks"],
-            })
-            return {"task_id": task_id, "result": "nothing_new",
-                    "skipped_reports": len(notes["skipped"]) + notes["skipped_not_listed"]}
-        scan = source.fetch(pick["report_id"])
-        if scan.scan_id != pick["report_id"] or scan.task_id != task_id:
-            raise ImportRefused("the scanner returned a report other than the one listed")
-        result = import_scan(ports, cycle, scan, chosen_task_ids=chosen,
-                             pull_notes={**notes, "timestamp": pick.get("timestamp")})
-        return {"task_id": task_id, "result": "imported", "report_id": scan.scan_id,
-                "counts": result["counts"], "skipped": result["skipped"],
-                "uncovered_all": result["uncovered_all"]}
+        known = {r.get("report_id") for r in _merge_refused(state.get("refused"), [])}
+        for pick in choice["candidates"]:
+            report_id = pick["report_id"]
+            if report_id in known:
+                continue  # refused before: never downloaded again
+            try:
+                scan = source.fetch(report_id)
+            except ReportRefused as exc:
+                refused_now.append({"report_id": report_id, "reason": exc.reason})
+                continue
+            if scan.scan_id != report_id or scan.task_id != task_id:
+                raise ImportRefused("the scanner returned a report other than the one listed")
+            try:
+                result = import_scan(ports, cycle, scan, chosen_task_ids=chosen, pull_notes={
+                    **notes, "refused": _merge_refused(state.get("refused"), refused_now)})
+            except ImportRefused as exc:
+                if exc.reason is None:
+                    raise
+                refused_now.append({"report_id": report_id, "reason": exc.reason})
+                continue
+            return {"task_id": task_id, "result": "imported", "report_id": scan.scan_id,
+                    "counts": result["counts"], "skipped": result["skipped"],
+                    "uncovered_all": result["uncovered_all"], "refused": len(refused_now)}
+        outcome = "refused" if refused_now else "nothing_new"
+        stamp = ports.clock.now()
+        _write_state(docs, task_id, {
+            "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
+            "last_result": outcome, "last_error_class": None,
+            "refused": _merge_refused(state.get("refused"), refused_now),
+            "skipped": notes["skipped"], "skipped_not_listed": notes["skipped_not_listed"],
+            "last_refused_reports": notes["refused_reports"],
+            "last_refused_reasons": notes["refused_reasons"],
+            "last_skipped_tasks": notes["skipped_tasks"],
+        })
+        return {"task_id": task_id, "result": outcome, "refused": len(refused_now),
+                "skipped_reports": len(notes["skipped"]) + notes["skipped_not_listed"]}
     except Exception as exc:  # noqa: BLE001 - recorded by class; the next task still runs
         error_class = type(exc).__name__
         notes = _source_notes(source, task_id)
@@ -381,6 +425,7 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             _write_state(docs, task_id, {
                 "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
                 "last_result": "failed", "last_error_class": error_class,
+                "refused": _merge_refused(state.get("refused"), refused_now),
                 "last_refused_reports": notes["refused_reports"],
                 "last_refused_reasons": notes["refused_reasons"],
                 "last_skipped_tasks": notes["skipped_tasks"],
@@ -409,7 +454,8 @@ def pull(ports: Ports, cycle: int, source: Any, *, chosen_task_ids: Collection[s
                 "report_id": outcome.get("report_id"),
                 "counts": outcome.get("counts"),
                 "skipped": outcome.get("skipped"),
-                "skipped_reports": outcome.get("skipped_reports")})
+                "skipped_reports": outcome.get("skipped_reports"),
+                "refused": outcome.get("refused")})
     finally:
         close = getattr(source, "close", None)
         if callable(close):

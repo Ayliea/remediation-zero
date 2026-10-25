@@ -191,3 +191,37 @@ def test_result_with_scoped_ipv6_host_fails_closed():
     assert len(report.results) == 4
     bad = [r for r in report.rejected if "not an IP" in r[1]]
     assert len(bad) == 1 and bad[0][2] is None
+
+
+def test_scan_end_is_read_from_both_shapes_as_utc():
+    # GMP response: <scan_end> wins over <timestamp>. Export: <timestamp> with an offset.
+    assert parse_report(FIX("report_basic.xml")).scan_end == "2026-10-20T01:30:00Z"
+    assert parse_report(FIX("report_export.xml")).scan_end == "2026-10-20T01:30:00Z"
+
+
+def test_report_without_scan_time_has_none():
+    assert parse_report(FIX("report_no_scan_time.xml")).scan_end is None
+
+
+def test_scan_end_that_is_not_strict_iso_8601_is_none_never_guessed():
+    for bad in (b"2026-10-20 01:30:00Z", b"2026-10-20T01:30:00", b"yesterday",
+                b"2026-10-20T01:30:00ZZ", b"2026-13-40T01:30:00Z", b"+2026-10-20T01:30:00Z"):
+        report = _mutated(b"<scan_end>2026-10-20T01:30:00Z</scan_end>",
+                          b"<scan_end>" + bad + b"</scan_end>")
+        # An unusable scan_end does not fall back to a different element's value.
+        assert report.scan_end is None, bad
+
+
+def test_empty_scan_end_falls_back_to_timestamp():
+    report = _mutated(b"<scan_end>2026-10-20T01:30:00Z</scan_end>", b"")
+    assert report.scan_end == "2026-10-20T01:00:00Z"
+
+
+def test_refusals_carry_a_closed_reason():
+    cases = ((b"<report>" + b" " * 2048 + b"</report>", "too_large"),
+             (FIX("report_doctype.xml"), "unsafe_xml"),
+             (b"<report><unclosed></report>", "malformed"))
+    for data, reason in cases:
+        with pytest.raises(ReportRefused) as refused:
+            parse_report(data, max_bytes=1024 if reason == "too_large" else 64 * 1024 * 1024)
+        assert refused.value.reason == reason

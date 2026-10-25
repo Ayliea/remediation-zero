@@ -234,3 +234,8 @@ def test_built_ids_use_a_closed_alphabet():
     # and a clean report is untouched
     ok = normalise_greenbone(_report([_result("c", "80", "tcp", ip="192.0.2.31")], [other]))
     assert len(ok.findings) == 1 and ok.covered_asset_ids
+
+
+def test_scan_end_travels_with_the_normalised_scan():
+    assert normalise_greenbone(BASIC()).scan_end == "2026-10-20T01:30:00Z"
+    assert normalise_greenbone(parse_report(FIX("report_no_scan_time.xml"))).scan_end is None

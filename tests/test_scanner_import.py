@@ -22,7 +22,7 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from tools.clock import ClockMode, SimClock
 from tools.gmp import GmpError
-from tools.greenbone_report import ScannedHost, parse_report
+from tools.greenbone_report import ReportRefused, ScannedHost, parse_report
 from tools.guardrail import NoGuard
 from tools.local_layout import Workspace
 
@@ -48,12 +48,17 @@ def BASIC():
     return dataclasses.replace(parse_report(FIX("report_basic.xml")), rejected=())
 
 
+def scan_end_of(n):
+    """Report n finished on day n at 02:00 UTC; gvmd lists it at 01:00 that day."""
+    return f"2026-10-{n:02d}T02:00:00Z"
+
+
 def report(n, *, with_log4j=True, status="Done", task=TASK, hosts=None, **changes):
     base = BASIC()
     results = base.results if with_log4j else tuple(
         r for r in base.results if r.nvt_oid != LOG4J_OID)
     fields = dict(report_id=rid(n), scan_status=status, task_id=task, results=results,
-                  hosts=base.hosts if hosts is None else hosts)
+                  hosts=base.hosts if hosts is None else hosts, scan_end=scan_end_of(n))
     fields.update(changes)
     return dataclasses.replace(base, **fields)
 
@@ -122,6 +127,7 @@ class FakeSource:
         self.scans = {}
         self.fail = fail or {}         # task_id -> exception to raise from finished_reports
         self.listed, self.fetched = [], []
+        self.refuse = {}             # report_id -> exception raised by fetch
 
     def add(self, n, *, status="Done", task=TASK, **kw):
         self.listing.setdefault(task, []).append(
@@ -140,6 +146,8 @@ class FakeSource:
 
     def fetch(self, report_id):
         self.fetched.append(report_id)
+        if report_id in self.refuse:
+            raise self.refuse[report_id]
         return self.scans[report_id]
 
 
@@ -499,3 +507,111 @@ def test_pull_state_fields_are_replaced_not_merged(ws, ports):
     _write_state(ports.docs, TASK, {"last_counts": {"new": 0}})
     assert docs(ws, "scanner_state")[TASK] == {"task_id": TASK, "last_counts": {"new": 0},
                                                "kept": "yes"}
+
+
+
+# --- R19: report order comes from the scan's own end time ----------------------------
+
+
+def test_older_upload_is_refused_and_writes_nothing(ws, ports):
+    import_scan(ports, 1, scan(5), chosen_task_ids=[TASK])
+    assert docs(ws, "scanner_state")[TASK]["last_imported_scan_end"] == scan_end_of(5)
+    before = everything(ws)
+    older = parse_report(FIX("report_basic.xml"))      # finished 2026-10-20 01:30 UTC
+    assert older.scan_end < scan_end_of(25)
+    import_scan(ports, 2, scan(25), chosen_task_ids=[TASK])  # now the newest is the 25th
+    before = everything(ws)
+    with pytest.raises(ImportRefused) as refused:
+        import_upload(ports, 3, FIX("report_basic.xml"), chosen_task_ids=[TASK], qod_floor=70)
+    assert str(refused.value) == "report is not newer than the last imported report for this task"
+    assert everything(ws) == before
+    # The same scan time is not newer either.
+    same = dataclasses.replace(scan(26), scan_end=scan_end_of(25))
+    with pytest.raises(ImportRefused, match="not newer"):
+        import_scan(ports, 3, same, chosen_task_ids=[TASK])
+    assert everything(ws) == before
+
+
+def test_upload_without_scan_time_is_refused(ws, ports):
+    before = everything(ws)
+    with pytest.raises(ImportRefused) as refused:
+        import_upload(ports, 1, FIX("report_no_scan_time.xml"), chosen_task_ids=[TASK],
+                      qod_floor=70)
+    assert str(refused.value) == "report has no scan time; refusing to import"
+    assert everything(ws) == before
+
+
+def test_pull_picks_the_oldest_report_newer_than_last_import(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    source.add(2, status="Stopped")
+    source.add(3)
+    source.add(4)
+    pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(1), rid(3)]
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["last_imported_scan_end"] == scan_end_of(3)
+    assert state["skipped"] == [{"report_id": rid(2), "status": "Stopped"}]
+    assert "waiting_reason" not in state
+    pull(ports, 3, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(1), rid(3), rid(4)]
+
+
+def test_unreadable_report_is_recorded_and_skipped_in_the_same_pull(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    open_before = {k: v["status"] for k, v in docs(ws, "findings").items()}
+    source.add(2, with_log4j=False)
+    source.add(3)
+    source.add(4, with_log4j=False)
+    source.refuse[rid(2)] = ReportRefused("report contains a DOCTYPE, which is refused "
+                                          "<!DOCTYPE server text>", reason="unsafe_xml")
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    # The refused one is passed over; the next newer one is imported; only one per pull.
+    assert source.fetched == [rid(1), rid(2), rid(3)]
+    assert result["pulled"][0]["result"] == "imported"
+    assert set(docs(ws, "scans")) == {rid(1), rid(3)}
+    assert {k: v["status"] for k, v in docs(ws, "findings").items()} == open_before
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["refused"] == [{"report_id": rid(2), "reason": "unsafe_xml"}]
+    assert "server text" not in json.dumps(state)
+    # A report without a scan time is refused the same way, and never re-downloaded.
+    source.scans[rid(4)] = dataclasses.replace(source.scans[rid(4)], scan_end=None)
+    source.add(5)
+    pull(ports, 3, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(1), rid(2), rid(3), rid(4), rid(5)]
+    assert docs(ws, "scanner_state")[TASK]["refused"] == [
+        {"report_id": rid(2), "reason": "unsafe_xml"},
+        {"report_id": rid(4), "reason": "no_scan_time"}]
+    assert set(docs(ws, "scans")) == {rid(1), rid(3), rid(5)}
+
+
+def test_refused_list_keeps_the_last_twenty(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    for n in range(2, 27):
+        source.add(n)
+        source.refuse[rid(n)] = ReportRefused("x", reason="malformed")
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["result"] == "refused"
+    state = docs(ws, "scanner_state")[TASK]
+    assert state["last_result"] == "refused"
+    assert [r["report_id"] for r in state["refused"]] == [rid(n) for n in range(7, 27)]
+    assert set(docs(ws, "scans")) == {rid(1)}
+
+
+def test_upload_newer_than_last_pull_then_pull_continues_after_it(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    # Uploaded from elsewhere: gvmd never lists it.
+    uploaded = dataclasses.replace(report(2), report_id=rid(2))
+    import_scan(ports, 2, normalise_greenbone(uploaded), chosen_task_ids=[TASK], via="upload")
+    source.add(3)
+    pull(ports, 3, source, chosen_task_ids=[TASK])
+    assert source.fetched == [rid(1), rid(3)]
+    assert set(docs(ws, "scans")) == {rid(1), rid(2), rid(3)}
+    assert docs(ws, "scanner_state")[TASK]["last_imported_scan_end"] == scan_end_of(3)

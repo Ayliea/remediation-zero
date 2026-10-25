@@ -16,6 +16,9 @@ safe to use. A result with a value that does not parse is not guessed at: it is
 listed in `rejected` with a reason and, when readable, the host ip. QoD and log-level filtering are not done
 here; this module returns everything structurally valid.
 
+`scan_end` is the report's own record of when the scan finished; it orders
+reports and is never read as the current time.
+
 Standard library only. No clock is read here.
 """
 
@@ -24,13 +27,25 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional
 
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 
 
+#: Why a document was refused. A closed set, so it can be stored and shown.
+REFUSAL_REASONS = ("too_large", "unsafe_xml", "malformed")
+
+
 class ReportRefused(ValueError):
-    """The document was refused before or during parsing; nothing was read from it."""
+    """The document was refused before or during parsing; nothing was read from it.
+
+    `reason` is one of `REFUSAL_REASONS`; unlike the message, it is safe to persist.
+    """
+
+    def __init__(self, message: str, *, reason: str = "malformed") -> None:
+        super().__init__(message)
+        self.reason = reason if reason in REFUSAL_REASONS else "malformed"
 
 
 @dataclass(frozen=True)
@@ -69,19 +84,22 @@ class GreenboneReport:
     hosts: tuple[ScannedHost, ...]
     results: tuple[Result, ...]
     rejected: tuple[tuple[str, str, Optional[str]], ...]
+    #: When the scan finished, ISO 8601 UTC; None when the report gives no usable time.
+    scan_end: Optional[str] = None
 
 
 def refuse_unsafe_xml(data: bytes, *, max_bytes: int) -> None:
     """Raise ReportRefused unless `data` is small enough and free of DTD constructs."""
     if len(data) > max_bytes:
-        raise ReportRefused(f"report is larger than {max_bytes} bytes")
+        raise ReportRefused(f"report is larger than {max_bytes} bytes", reason="too_large")
     if b"\x00" in data:
-        raise ReportRefused("report is not ASCII-compatible XML")
+        raise ReportRefused("report is not ASCII-compatible XML", reason="unsafe_xml")
     lowered = data.lower()
     if b"<!doctype" in lowered:
-        raise ReportRefused("report contains a DOCTYPE, which is refused")
+        raise ReportRefused("report contains a DOCTYPE, which is refused", reason="unsafe_xml")
     if b"<!entity" in lowered:
-        raise ReportRefused("report contains an ENTITY declaration, which is refused")
+        raise ReportRefused("report contains an ENTITY declaration, which is refused",
+                            reason="unsafe_xml")
 
 
 # Everything below is copied from scanner XML into model-visible context, so it
@@ -93,6 +111,37 @@ _HOSTNAME_RE = re.compile(rf"{_LABEL}(\.{_LABEL})*\.?")
 _CPE_RE = re.compile(r"cpe:[A-Za-z0-9:._\-~%/+]{1,255}")
 _OPEN_PORT_RE = re.compile(r"[0-9]{1,5}/(tcp|udp)")
 _RESULT_PORT_RE = re.compile(r"[A-Za-z0-9._/-]{1,32}")
+
+
+# Strict: date, 'T', time to the second, optional fraction, and a zone. A time
+# without a zone is not guessed to be UTC.
+_ISO_8601_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?(Z|[+-][0-9]{2}:[0-9]{2})")
+
+
+def _utc_or_none(value: str) -> Optional[str]:
+    """`value` as ISO 8601 UTC (`...Z`), or None unless it is strictly ISO 8601."""
+    value = value.strip()
+    if not _ISO_8601_RE.fullmatch(value):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:  # e.g. month 13: well-shaped, not a time
+        return None
+    parsed = parsed.astimezone(timezone.utc)
+    pattern = "%Y-%m-%dT%H:%M:%S.%fZ" if parsed.microsecond else "%Y-%m-%dT%H:%M:%SZ"
+    return parsed.strftime(pattern)
+
+
+def _scan_end(inner: ET.Element) -> Optional[str]:
+    """`scan_end`, or `timestamp` when scan_end is absent or empty. Never guessed.
+
+    A scan_end that is present but unusable gives None, not the other element.
+    """
+    end = (inner.findtext("scan_end") or "").strip()
+    if end:
+        return _utc_or_none(end)
+    return _utc_or_none(inner.findtext("timestamp") or "")
 
 
 def _uuid_or_none(value: Optional[str]) -> Optional[str]:
@@ -253,4 +302,5 @@ def parse_report(data: bytes, *, max_bytes: int = MAX_REPORT_BYTES) -> Greenbone
         hosts=hosts,
         results=tuple(results),
         rejected=tuple(rejected),
+        scan_end=_scan_end(inner),
     )

@@ -46,6 +46,8 @@ class NormalisedScan:
     covered_asset_ids: tuple[str, ...]
     withheld_finding_ids: tuple[str, ...]
     skipped: dict[str, int]
+    #: The report's scan end (ISO 8601 UTC) or None; the importer orders reports by it.
+    scan_end: Optional[str] = None
 
 
 class ScannerSource(Protocol):
@@ -182,6 +184,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         covered_asset_ids=tuple(covered),
         withheld_finding_ids=tuple(withheld),
         skipped=skipped,
+        scan_end=report.scan_end,
     )
 
 
