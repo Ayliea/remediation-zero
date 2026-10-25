@@ -78,6 +78,11 @@ class Exception_:
         return self.accepted_sim_ts + self.ttl_days * DAY_SECONDS
 
 
+#: Severities a no-CVE finding may be accepted at without a person. An
+#: allowlist: anything else (unknown, empty, mis-typed) needs a person.
+NO_CVE_PERSON_FREE = frozenset({"info", "low", "medium"})
+
+
 def validate_acceptance(
     ttl_days: Optional[int],
     reason: str,
@@ -89,8 +94,9 @@ def validate_acceptance(
 
     `no_cve_severity` is the decided severity of a finding that has no CVE.
     Such a finding cannot be checked against KEV, so a high or critical one is
-    not accepted without a person; the caller fails closed by passing
-    "critical" when no severity is known.
+    not accepted without a person. Only info, low and medium (after strip and
+    lower) go without one; unknown values need a person, and the caller fails
+    closed by passing "critical" when no reviewed severity is known.
 
     Raises:
         ValueError: naming which rule was broken, so the refusal is
@@ -115,7 +121,8 @@ def validate_acceptance(
     if in_kev is None and not approved_by_human:
         # KEV membership unknown (no KEV source): fail closed, as for a KEV CVE.
         raise ValueError("KEV list not available: a person must approve this acceptance")
-    if no_cve_severity in {"high", "critical"} and not approved_by_human:
+    if no_cve_severity is not None and not approved_by_human and (
+            str(no_cve_severity).strip().lower() not in NO_CVE_PERSON_FREE):
         raise ValueError(
             "No CVE, so exploitation status cannot be checked: a person must "
             "approve accepting a high or critical finding"

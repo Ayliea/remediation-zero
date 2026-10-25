@@ -60,11 +60,17 @@ def inference_fingerprint(rendered, roles):
     for human review rather than replay under different models.
     """
     endpoints = {role: config.endpoint for role, config in roles.configured()}
-    return hashlib.sha256(json.dumps([
+    parts = [
         rendered, roles.provenance(), endpoints, roles.same_family_policy,
         _load("triage.md"), _load("reviewer.md"), MAX_INPUT_BYTES,
         MAX_OUTPUT_TOKENS, REQUEST_TIMEOUT_MS,
-    ], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    ]
+    if not rendered_is_legacy(rendered):
+        # Only a finding that gets the no-CVE guidance fingerprints it; a
+        # legacy finding's list is unchanged, so its fingerprint is too.
+        parts.append(_load("triage_no_cve.md"))
+    return hashlib.sha256(json.dumps(
+        parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _invoke(call, *, what, retry):
@@ -147,6 +153,38 @@ def _defang_fence(text: str) -> str:
     return text
 
 
+def is_legacy_finding(finding: Mapping[str, Any]) -> bool:
+    """True for a finding that renders (and is prompted) exactly as it always has.
+
+    The one predicate behind both the render shape and the triage instructions:
+    a single `cve_id` and none of the Greenbone fields. Anything else takes the
+    new render and also gets the no-CVE guidance.
+    """
+    return (bool(finding.get("cve_id")) and "cve_ids" not in finding
+            and "nvt_name" not in finding and "qod" not in finding)
+
+
+def rendered_is_legacy(rendered: str) -> bool:
+    """`is_legacy_finding`, read back from the rendered text.
+
+    The proposer and the fingerprint only see the rendered finding. The legacy
+    render is the only one whose second line is `cve_id: ...`; the new one
+    always has `cve_ids: ...` there, so the two predicates cannot disagree
+    (asserted in tests/test_inference.py).
+    """
+    lines = rendered.split("\n", 2)
+    return not (len(lines) > 1 and lines[1].startswith("cve_ids: "))
+
+
+def triage_instruction(rendered: str) -> str:
+    """The proposer's instructions: triage.md, plus the no-CVE guidance for a
+    finding that takes the new render. A legacy finding gets triage.md alone,
+    byte for byte, so the cloud's model input does not change."""
+    if rendered_is_legacy(rendered):
+        return _load("triage.md")
+    return _load("triage.md") + "\n" + _load("triage_no_cve.md")
+
+
 def _percent(qod: Any) -> str:
     return f"{qod}%" if isinstance(qod, (int, float)) and not isinstance(qod, bool) else "not known"
 
@@ -164,9 +202,7 @@ def render_finding(
     # A finding with a single cve_id and none of the Greenbone fields renders
     # byte-for-byte as it always has: any change here changes every inference
     # fingerprint in the cloud edition (see test_single_cve_cloud_render_is_unchanged).
-    legacy = (bool(finding.get("cve_id")) and "cve_ids" not in finding
-              and "nvt_name" not in finding and "qod" not in finding)
-    if legacy:
+    if is_legacy_finding(finding):
         head = [f"finding_id: {finding['finding_id']}", f"cve_id: {finding['cve_id']}"]
         asset_value = lambda key: asset.get(key)  # noqa: E731
     else:
@@ -258,7 +294,7 @@ def propose(
     prompt_text: str, adapter: ChatAdapter, *, finding_id: str, retry: bool = True
 ) -> Proposal:
     """Ask the triage model for a proposal."""
-    instruction = _load("triage.md")
+    instruction = triage_instruction(prompt_text)
     _check_input(instruction + prompt_text)
     text = _invoke(
         lambda: adapter.complete(instruction, prompt_text, json_output=True),

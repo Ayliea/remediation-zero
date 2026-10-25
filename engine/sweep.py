@@ -75,16 +75,34 @@ def run_sweep(ports: Ports, cycle: int) -> dict[str, int]:
     return actions
 
 
+_SEVERITIES = frozenset({"info", "low", "medium", "high", "critical"})
+_PERSON_APPROVABLE = frozenset({"unreviewed", "held_for_approval"})
+
+
 def _decided_severity(ports: Ports, finding_id: str) -> str:
-    """The severity of the finding's latest decision; "critical" when there is
-    none, so an unjudged no-CVE finding fails closed."""
-    rows = [d.to_dict() or {} for d in ports.docs.collection("decisions").where(
-        filter=FieldFilter("finding_id", "==", finding_id)).stream()]
-    rows = [r for r in rows if r.get("proposed_severity")]
-    if not rows:
+    """The severity of the finding's latest *reviewed* decision.
+
+    Only a ratified decision, or an unreviewed / held one a person approved,
+    counts; a proposal that was rejected, unavailable, unapproved or sent to
+    the human queue never does. No such decision, or a value outside the known
+    severities, is "critical", so the gate fails closed.
+    """
+    approvals = ports.docs.collection("approvals")
+    reviewed = []
+    for snap in ports.docs.collection("decisions").where(
+            filter=FieldFilter("finding_id", "==", finding_id)).stream():
+        row = snap.to_dict() or {}
+        outcome = row.get("outcome")
+        if outcome == "ratified" or (outcome in _PERSON_APPROVABLE
+                                     and approvals.document(snap.id).get().exists):
+            reviewed.append(row)
+    reviewed = [r for r in reviewed if r.get("proposed_severity") is not None]
+    if not reviewed:
         return "critical"
-    latest = max(rows, key=lambda r: (r.get("cycle") or 0, r.get("sim_ts") or 0))
-    return str(latest["proposed_severity"]).lower()
+    latest = max(reviewed, key=lambda r: (r.get("cycle") or 0, r.get("sim_ts") or 0))
+    value = latest["proposed_severity"]
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in _SEVERITIES else "critical"
 
 
 def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,

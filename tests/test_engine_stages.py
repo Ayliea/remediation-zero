@@ -183,7 +183,8 @@ def _no_cve_finding(ws, severity):
         {"finding_id": "RZ-0007", "asset_id": "ast-001", "status": "open", "cve_ids": []})
     if severity is not None:
         ws.docs_for("triage_cycle").collection("decisions").document("RZ-0007-c001").set(
-            {"finding_id": "RZ-0007", "cycle": 1, "proposed_severity": severity})
+            {"finding_id": "RZ-0007", "cycle": 1, "outcome": "ratified",
+             "proposed_severity": severity})
 
 
 @pytest.mark.parametrize("severity, refused", [("high", True), ("critical", True),
@@ -515,3 +516,57 @@ def test_greenbone_scan_with_string_withheld_list_is_refused(ws):
         run_rescan(ports_for(ws, "rescan", clock, roles=ForbiddenModels()), 12, scan,
                    dry_run=False)
     assert dump(ws) == before
+
+
+def _decide(ws, outcome, severity, cycle=1, approved=False):
+    ws.docs_for("triage_cycle").collection("decisions").document(f"RZ-0007-c{cycle:03d}").set(
+        {"finding_id": "RZ-0007", "cycle": cycle, "outcome": outcome,
+         "proposed_severity": severity, "sim_ts": cycle})
+    if approved:
+        ws.docs_for("approve").collection("approvals").document(f"RZ-0007-c{cycle:03d}").set(
+            {"finding_id": "RZ-0007", "cycle": cycle, "approved_by": "own-1"})
+
+
+def _try_accept(ws, clock):
+    from engine.sweep import accept
+    cache = type("C", (), {"has_kev": True})()
+    return accept(ports_for(ws, "exception_accept", clock), "RZ-0007", 30, "own-1", "x", 10,
+                  enrichment=cache)
+
+
+def test_unratified_low_proposal_does_not_unlock_acceptance(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "ratified", "high", cycle=1)
+    _decide(ws, "unavailable", "low", cycle=2)  # latest, but never reviewed
+    with pytest.raises(ValueError, match="No CVE"):
+        _try_accept(ws, clock)
+
+
+def test_ratified_low_decision_unlocks_acceptance(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "ratified", " Low ")
+    assert _try_accept(ws, clock) == "accepted:RZ-0007"
+
+
+def test_person_approved_low_decision_unlocks_acceptance(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "held_for_approval", "low", approved=True)
+    assert _try_accept(ws, clock) == "accepted:RZ-0007"
+
+
+def test_unapproved_held_decision_and_odd_values_fail_closed(ws):
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    _decide(ws, "held_for_approval", "low", approved=False)
+    with pytest.raises(ValueError, match="No CVE"):
+        _try_accept(ws, clock)
+    _decide(ws, "ratified", "severe", cycle=2)
+    with pytest.raises(ValueError, match="No CVE"):
+        _try_accept(ws, clock)

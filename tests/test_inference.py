@@ -175,3 +175,50 @@ def test_multi_cve_render_lists_every_cve():
 
 def test_enrichment_is_applicable_by_default():
     assert Enrichment(cve_id="CVE-2024-1").applicable is True
+
+
+# --- the no-CVE guidance is a separate prompt, only for the new render (R9) --------
+
+# Computed from the code at 934d5ba (before this task), for GOLDEN with these roles.
+GOLDEN_FINGERPRINT_934D5BA = "c7ee6e5c28a4c990e3076c2d19af6d2fba36c0feaf45c17dd97615fd2cef0fc5"
+NO_CVE_FINDING = {"finding_id": "F", "cve_ids": [], "nvt_name": "Default Credentials", "qod": 95}
+
+
+def _roles():
+    from tools.model_roles import ModelRoles, RoleConfig
+    url = "http://127.0.0.1:11434/v1/chat/completions"
+    return ModelRoles(proposer=RoleConfig("proposer", "openai_chat", url, "p", "gemini"),
+                      reviewer=RoleConfig("reviewer", "openai_chat", url, "r", "llama"))
+
+
+def test_single_cve_fingerprint_is_unchanged():
+    assert inference.inference_fingerprint(GOLDEN, _roles()) == GOLDEN_FINGERPRINT_934D5BA
+
+
+def test_no_cve_finding_gets_the_no_cve_guidance():
+    rendered = inference.render_finding(NO_CVE_FINDING, {}, Enrichment(cve_id="", applicable=False))
+    adapter = FakeAdapter(PAYLOAD)
+    inference.propose(rendered, adapter, finding_id="F")
+    system = adapter.calls[0][0]
+    assert inference._load("triage_no_cve.md") in system
+    assert "Findings with no CVE" in system and system.startswith(inference._load("triage.md"))
+    assert (inference.inference_fingerprint(rendered, _roles())
+            != inference.inference_fingerprint(GOLDEN, _roles()))
+    assert "Findings with no CVE" not in inference._load("triage.md")
+
+
+def test_single_cve_finding_does_not_get_the_no_cve_guidance():
+    adapter = FakeAdapter(PAYLOAD)
+    inference.propose(GOLDEN, adapter, finding_id="RZ-0001")
+    assert adapter.calls[0][0] == inference._load("triage.md")
+    assert "Findings with no CVE" not in adapter.calls[0][0]
+
+
+def test_prompt_choice_and_render_choice_always_agree():
+    cases = [GOLDEN_FINDING, NO_CVE_FINDING,
+             {"finding_id": "F", "cve_id": "CVE-1", "nvt_name": "x"},
+             {"finding_id": "F", "cve_ids": ["CVE-1"], "cve_id": "CVE-1", "qod": 80},
+             {"finding_id": "F", "cve_id": "CVE-1", "qod": 80}, {"finding_id": "F"}]
+    for finding in cases:
+        rendered = inference.render_finding(finding, {}, Enrichment(cve_id=""))
+        assert inference.rendered_is_legacy(rendered) is inference.is_legacy_finding(finding)

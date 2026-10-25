@@ -124,3 +124,27 @@ def test_no_cve_high_acceptance_needs_a_person():
                         no_cve_severity="medium")
     validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=True,
                         no_cve_severity="critical")
+
+
+def _no_cve(severity, person=False):
+    validate_acceptance(ttl_days=30, reason="r", in_kev=False, approved_by_human=person,
+                        no_cve_severity=severity)
+
+
+def test_no_cve_mixed_case_high_needs_a_person():
+    for value in ("High", " CRITICAL ", "HIGH"):
+        with pytest.raises(ValueError, match="No CVE"):
+            _no_cve(value)
+        _no_cve(value, person=True)
+
+
+def test_no_cve_unknown_severity_needs_a_person():
+    for value in ("severe", "", "   ", 5, ["low"]):
+        with pytest.raises(ValueError, match="No CVE"):
+            _no_cve(value)
+
+
+def test_no_cve_medium_any_case_needs_no_person():
+    for value in ("Medium", " LOW ", "info", "medium"):
+        _no_cve(value)
+    _no_cve(None)  # a finding with a CVE: the gate does not apply
