@@ -8,7 +8,7 @@ engine already consumes: a scan id, the assets the scan actually examined, and
 the findings it reported. Coverage is the load-bearing part. A host counts as
 covered only if the scanner finished it, because absence of a finding on a host
 the scanner never completed proves nothing. A result on an unfinished host is
-therefore dropped (counted as rejected), since reconcile refuses a finding on an
+therefore dropped (counted as not_finished), since reconcile refuses a finding on an
 asset outside the covered set.
 
 Log-level results (severity 0) and results below the QoD floor are skipped and
@@ -18,6 +18,7 @@ stamps them through SimClock.
 Standard library only. No clock is read here.
 """
 
+import ipaddress
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
@@ -62,6 +63,15 @@ def finding_key(asset_id: str, nvt_oid: str, port: str) -> str:
     return f"{asset_id}:{nvt_oid}:{port}"
 
 
+def _norm_ip(text: str) -> str:
+    """Canonical text for an address, so two spellings of one host compare equal."""
+    text = text.strip()
+    try:
+        return ipaddress.ip_address(text).compressed
+    except ValueError:
+        return text
+
+
 def _port_spec(result: Result) -> str:
     return f"{result.port}/{result.protocol}" if result.protocol else result.port
 
@@ -104,13 +114,14 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
     scan_id = report.report_id
     assets, by_ip = [], {}
     for host in report.hosts:
-        asset_id, origin = asset_key(SOURCE, host.asset_id, host.ip)
-        by_ip[host.ip] = (asset_id, host.finished)
+        ip = _norm_ip(host.ip)
+        asset_id, origin = asset_key(SOURCE, host.asset_id, ip)
+        by_ip[ip] = (asset_id, host.finished)
         assets.append({
             "asset_id": asset_id,
             "source": SOURCE,
             "asset_key_origin": origin,
-            "ip": host.ip,
+            "ip": ip,
             "hostname": host.hostname,
             "os_cpe": host.os_cpe,
             "open_ports": list(host.open_ports),
@@ -118,8 +129,10 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
             "last_seen_scan": scan_id,
         })
 
-    unattributed = any(ip is None for _, _, ip in report.rejected)
-    uncovered = {by_ip[ip][0] for _, _, ip in report.rejected if ip in by_ip}
+    rejected_ips = [None if ip is None else _norm_ip(ip) for _, _, ip in report.rejected]
+    # A rejection that cannot be tied to a known host may hide a still-present finding anywhere.
+    unattributed = any(ip is None or ip not in by_ip for ip in rejected_ips)
+    uncovered = {by_ip[ip][0] for ip in rejected_ips if ip in by_ip}
     covered = [] if unattributed else [
         aid for aid, finished in by_ip.values() if finished and aid not in uncovered
     ]
@@ -130,7 +143,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
     findings: dict[str, dict] = {}
     withheld: dict[str, None] = {}
     for result in report.results:
-        asset_id, finished = by_ip.get(result.ip, (None, False))
+        asset_id, finished = by_ip.get(_norm_ip(result.ip), (None, False))
         is_log = result.severity <= 0
         if is_log or result.qod < qod_floor:
             skipped["log" if is_log else "below_qod"] += 1

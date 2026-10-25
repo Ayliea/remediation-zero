@@ -187,3 +187,29 @@ def test_duplicate_finding_ids_collapse_to_the_higher_severity():
 def test_skipped_has_all_four_keys():
     scan = normalise_greenbone(parse_report(FIX("report_basic.xml")))
     assert set(scan.skipped) == {"log", "below_qod", "rejected", "not_finished"}
+
+
+def _v6_host(ip="2001:db8::1"):
+    return ScannedHost(ip=ip, asset_id=None, hostname=None, os_cpe=None,
+                       open_ports=(), finished=True)
+
+
+def test_rejection_with_noncanonical_ipv6_uncovers_its_host():
+    other = _v6_host("2001:db8::2")
+    scan = normalise_greenbone(_report(
+        [_result("a", "80", "tcp", ip="2001:db8::2")], [_v6_host(), other],
+        rejected=[("x", "bad", "2001:0db8:0:0::1")]))
+    assert scan.covered_asset_ids == ("gb-ip-2001:db8::2",)
+    assert [f["asset_id"] for f in scan.findings] == ["gb-ip-2001:db8::2"]
+
+
+def test_rejection_for_unknown_host_uncovers_everything():
+    scan = normalise_greenbone(_report(
+        [_result("a", "80", "tcp")], [_host()], rejected=[("x", "bad", "192.0.2.99")]))
+    assert scan.covered_asset_ids == () and scan.findings == ()
+
+
+def test_result_ip_with_whitespace_matches_its_host():
+    scan = normalise_greenbone(_report([_result("a", "80", "tcp", ip=" 192.0.2.30 ")], [_host()]))
+    assert [f["asset_id"] for f in scan.findings] == ["gb-ip-192.0.2.30"]
+    assert scan.skipped["not_finished"] == 0
