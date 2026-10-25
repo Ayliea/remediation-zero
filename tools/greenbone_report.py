@@ -274,7 +274,9 @@ def parse_report(data: bytes, *, max_bytes: int = MAX_REPORT_BYTES) -> Greenbone
     refuse_unsafe_xml(data, max_bytes=max_bytes)
     try:
         return _parse(data)
-    except ReportRefused:
+    except (ReportRefused, MemoryError):
+        # Running out of memory says nothing about the report: let the pull fail
+        # and retry, rather than record a good report as refused.
         raise
     except Exception:  # noqa: BLE001 - any surprise while validating untrusted input
         # Nothing from the document is guessed at or echoed: refuse it whole.

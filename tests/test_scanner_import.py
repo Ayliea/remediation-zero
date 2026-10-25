@@ -724,20 +724,27 @@ def test_year_9999_scan_time_is_refused_as_missing(ws, ports):
     assert everything(ws) == before
 
 
-def test_report_whose_scan_time_disagrees_with_gvmd_is_refused_and_the_next_imports(ws, ports):
+@pytest.mark.parametrize("scan_end, imported", [
+    ("2026-10-05T01:00:00Z", True),    # a 3-day scan: listing (start) + 3 days
+    ("2026-09-30T01:00:00Z", False),   # listing - 2 days: before the scan was created
+    ("2026-10-17T01:00:00Z", False),   # listing + 15 days: longer than any plausible scan
+])
+def test_scan_end_must_be_plausible_against_gvmds_listing_time(ws, ports, scan_end, imported):
     source = FakeSource()
     source.add(1)
     pull(ports, 1, source, chosen_task_ids=[TASK])
-    source.add(2)
+    source.add(2)      # gvmd lists report 2 at 2026-10-02T01:00:00Z
     source.add(3)
-    # gvmd lists report 2 on day 2; the report itself claims it finished on day 5.
-    source.scans[rid(2)] = dataclasses.replace(source.scans[rid(2)],
-                                               scan_end="2026-10-05T02:00:00Z")
+    source.scans[rid(2)] = dataclasses.replace(source.scans[rid(2)], scan_end=scan_end)
     result = pull(ports, 2, source, chosen_task_ids=[TASK])
-    assert result["pulled"][0]["report_id"] == rid(3)
     state = docs(ws, "scanner_state")[TASK]
-    assert state["refused"] == [{"report_id": rid(2), "reason": "malformed"}]
-    assert set(docs(ws, "scans")) == {rid(1), rid(3)}
+    if imported:
+        assert result["pulled"][0]["report_id"] == rid(2)
+        assert state.get("refused", []) == []
+    else:
+        assert result["pulled"][0]["report_id"] == rid(3)
+        assert state["refused"] == [{"report_id": rid(2), "reason": "malformed"}]
+        assert set(docs(ws, "scans")) == {rid(1), rid(3)}
 
 
 def test_baseline_not_imported_counts_only_untouched_done_reports(ws, ports):
@@ -818,4 +825,78 @@ def test_at_most_five_downloads_per_task_per_pull(ws, ports):
     assert docs(ws, "scanner_state")[TASK]["deferred"] == 2
     pull(ports, 2, source, chosen_task_ids=[TASK])
     assert source.fetched == [rid(n) for n in range(1, 9)]
+    assert docs(ws, "scanner_state")[TASK]["deferred"] == 0
+
+
+
+# --- R20 amended ------------------------------------------------------------------------
+
+
+def test_scan_time_in_future_is_retried_not_remembered(ws):
+    wall = [NOW]
+    clocked = Ports(docs=ws.docs_for("scanner_import"), journal=ws.journal(),
+                    clock=SimClock(ClockMode.REAL, source=lambda: wall[0]), roles=None,
+                    guard=NoGuard(), delivery=NoDelivery(), memory=None,
+                    telemetry=NoTelemetry())
+    try:
+        source = FakeSource()
+        source.add(1)
+        pull(clocked, 1, source, chosen_task_ids=[TASK])
+        source.add(29)     # finished 2026-10-29T02:00:00Z
+        source.add(30)     # newer still
+        wall[0] = NOW - 86400.0        # the wall clock is two days behind report 29's end
+        for cycle in (2, 3):
+            result = pull(clocked, cycle, source, chosen_task_ids=[TASK])
+            assert result["pulled"][0]["result"] == "refused"
+            state = docs(ws, "scanner_state")[TASK]
+            assert state["last_result"] == "refused"
+            assert state["last_refusal"] == {"report_id": rid(29),
+                                             "reason": "scan_time_in_future"}
+            assert state.get("refused", []) == []          # not remembered: clock-dependent
+            assert set(docs(ws, "scans")) == {rid(1)}      # and nothing newer in its place
+        assert source.fetched == [rid(1), rid(29), rid(29)]
+        wall[0] = NOW + 3 * 3600.0     # 10-28T03:00Z: past scan_end - 1 day
+        result = pull(clocked, 4, source, chosen_task_ids=[TASK])
+        assert result["pulled"][0]["report_id"] == rid(29)
+        state = docs(ws, "scanner_state")[TASK]
+        assert state["last_result"] == "imported" and state["last_refusal"] is None
+    finally:
+        clocked.docs.close()
+
+
+def test_memory_error_while_parsing_fails_the_pull_and_is_retried(ws, ports, monkeypatch):
+    import tools.greenbone_report as module
+    listing, clients = [listed(1)], []
+
+    def factory():
+        clients.append(ScriptedClient(listing, set()))
+        return clients[-1]
+
+    real_host = module._host
+
+    def exhausted(node):
+        raise MemoryError()
+
+    monkeypatch.setattr(module, "_host", exhausted)
+    result = pull(ports, 1, GreenboneSource(factory), chosen_task_ids=[TASK])
+    assert result["pulled"][0] == {"task_id": TASK, "result": "failed",
+                                   "error_class": "MemoryError"}
+    assert docs(ws, "scanner_state")[TASK].get("refused", []) == []
+    monkeypatch.setattr(module, "_host", real_host)
+    result = pull(ports, 2, GreenboneSource(factory), chosen_task_ids=[TASK])
+    assert result["pulled"][0]["result"] == "imported"
+
+
+def test_successful_import_counts_newer_candidates_as_deferred(ws, ports):
+    source = FakeSource()
+    source.add(1)
+    pull(ports, 1, source, chosen_task_ids=[TASK])
+    for n in (2, 3, 4):
+        source.add(n)
+    result = pull(ports, 2, source, chosen_task_ids=[TASK])
+    assert result["pulled"][0]["report_id"] == rid(2)
+    assert result["pulled"][0]["deferred"] == 2
+    assert docs(ws, "scanner_state")[TASK]["deferred"] == 2
+    pull(ports, 3, source, chosen_task_ids=[TASK])
+    pull(ports, 4, source, chosen_task_ids=[TASK])
     assert docs(ws, "scanner_state")[TASK]["deferred"] == 0

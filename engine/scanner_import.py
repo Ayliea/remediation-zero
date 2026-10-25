@@ -60,16 +60,21 @@ MAX_SKIPPED_LISTED = 50
 #: Refused reports remembered per task (`scanner_state[task].refused`).
 MAX_REFUSED_KEPT = 20
 #: Why a pulled report was refused. Closed, so it can be stored; never server text.
-REFUSED_REASONS = frozenset(REFUSAL_REASONS) | {"no_scan_time", "not_newer",
-                                                  "scan_time_in_future"}
-#: Every closed reason an ImportRefused may carry. `already_imported_this_cycle`
-#: is a lost race, not a fault in the report, so it is never stored as a refusal.
-IMPORT_REFUSED_REASONS = REFUSED_REASONS | {"already_imported_this_cycle"}
+REFUSED_REASONS = frozenset(REFUSAL_REASONS) | {"no_scan_time", "not_newer"}
+#: Every closed reason an ImportRefused may carry. Neither extra one is stored in
+#: `refused`: `already_imported_this_cycle` is a lost race, and
+#: `scan_time_in_future` depends on the clock, so that report is retried (as
+#: `last_refusal`) rather than remembered.
+IMPORT_REFUSED_REASONS = REFUSED_REASONS | {"already_imported_this_cycle",
+                                            "scan_time_in_future"}
 #: Most report downloads per task per pull; the rest wait and are counted as `deferred`.
 MAX_DOWNLOADS_PER_PULL = 5
-#: How far a scan time may run ahead of the workspace clock (skew), and how far
-#: gvmd's listing time and the report's own scan end may disagree. Seconds.
+#: How far a scan time may run ahead of the workspace clock (skew). Seconds.
 _DAY = 86400.0
+#: gvmd lists a report at its creation, roughly the scan start. Its own scan end
+#: may not be more than a day before that, nor more than 14 days after (R20, amended).
+_SCAN_END_BEFORE_LISTING = _DAY
+_SCAN_END_AFTER_LISTING = 14 * _DAY
 #: Nothing scanned before this is plausible: 2000-01-01T00:00:00Z.
 _EARLIEST_SCAN = 946684800.0
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -333,6 +338,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "last_imported_scan_end": scan.scan_end,
             "last_imported_cycle": cycle,
             "last_import_via": via,
+            "last_refusal": None,
             "last_counts": summary["counts"],
             "last_skipped": dict(scan.skipped),
             "last_uncovered_all": uncovered_all,
@@ -437,7 +443,7 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                  **{k: choice[k] for k in ("skipped", "skipped_not_listed")}}
         known = {r.get("report_id") for r in _merge_refused(state.get("refused"), [])}
         untried = [r for r in choice["candidates"] if r["report_id"] not in known]
-        downloads, lost_race = 0, False
+        downloads, lost_race, future = 0, False, None
 
         def baseline_not_imported(imported: int) -> int:
             # Listed Done reports neither imported nor refused (only for a baseline).
@@ -462,19 +468,28 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             if scan.scan_id != report_id or scan.task_id != task_id:
                 raise ImportRefused("the scanner returned a report other than the one listed")
             listed_at, ended_at = _instant(pick.get("timestamp")), _instant(scan.scan_end)
-            if listed_at is not None and ended_at is not None \
-                    and abs(ended_at - listed_at) > _DAY:
-                # The report's own time disagrees with gvmd's: neither can be trusted.
+            if listed_at is not None and ended_at is not None and not (
+                    listed_at - _SCAN_END_BEFORE_LISTING <= ended_at
+                    <= listed_at + _SCAN_END_AFTER_LISTING):
+                # The report's own time is implausible against gvmd's: trust neither.
                 refused_now.append({"report_id": report_id, "reason": "malformed"})
                 continue
+            # Newer candidates still waiting after this one (a baseline has none).
+            waiting = 0 if choice["baseline"] else len(untried) - index - 1
             try:
                 result = import_scan(ports, cycle, scan, chosen_task_ids=chosen, pull_notes={
                     **notes, "baseline_not_imported": baseline_not_imported(1),
-                    "deferred": 0,
+                    "deferred": waiting,
                     "refused": _merge_refused(state.get("refused"), refused_now)})
             except ImportRefused as exc:
                 if exc.reason == "already_imported_this_cycle":
                     lost_race = True  # an upload for this task committed first
+                    break
+                if exc.reason == "scan_time_in_future":
+                    # Depends on the clock, not the report: not remembered, retried
+                    # next pull, and nothing else is imported in its place, since
+                    # importing a newer report would make this one "not newer".
+                    future = {"report_id": report_id, "reason": exc.reason}
                     break
                 if exc.reason is None:
                     raise
@@ -483,14 +498,18 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
             return {"task_id": task_id, "result": "imported", "report_id": scan.scan_id,
                     "counts": result["counts"], "skipped": result["skipped"],
                     "uncovered_all": result["uncovered_all"], "refused": len(refused_now),
-                    "deferred": 0}
+                    "deferred": waiting}
         tried = {r["report_id"] for r in refused_now}
+        if future is not None:
+            tried.add(future["report_id"])
         deferred = 0 if lost_race else sum(1 for r in untried if r["report_id"] not in tried)
-        outcome = "refused" if refused_now and not lost_race else "nothing_new"
+        outcome = ("refused" if (refused_now or future is not None) and not lost_race
+                   else "nothing_new")
         stamp = ports.clock.now()
         fields = {
             "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
             "last_result": outcome, "last_error_class": None,
+            "last_refusal": future,
             "refused": _merge_refused(state.get("refused"), refused_now),
             "deferred": deferred,
             "last_refused_reports": notes["refused_reports"],

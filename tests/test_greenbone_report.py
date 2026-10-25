@@ -245,3 +245,15 @@ def test_unexpected_error_during_validation_is_a_malformed_refusal(monkeypatch):
         parse_report(FIX("report_basic.xml"))
     assert refused.value.reason == "malformed"
     assert "unexpected" not in str(refused.value)
+
+
+
+def test_memory_error_is_not_turned_into_a_refusal(monkeypatch):
+    import tools.greenbone_report as module
+
+    def exhausted(node):
+        raise MemoryError()
+
+    monkeypatch.setattr(module, "_host", exhausted)
+    with pytest.raises(MemoryError):
+        parse_report(FIX("report_basic.xml"))
