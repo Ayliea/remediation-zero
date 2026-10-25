@@ -27,7 +27,7 @@ from engine.chase import run_chase
 from engine.ports import NoDelivery, NoTelemetry, Ports
 from engine.report import run_report
 from engine.rescan import load_scan, run_rescan
-from engine.seed import seed
+from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
@@ -518,6 +518,8 @@ def main():
             docs = ws.docs_for('seed')
             try:
                 _print(seed(_ports(docs, None, clock), corpus))
+            except SeedRefused as exc:
+                parser.exit(1, f'{exc}\n')
             except FileNotFoundError:
                 parser.exit(1, f'No corpus found in {corpus}. Nothing was loaded.\n')
             finally:

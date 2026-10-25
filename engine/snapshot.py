@@ -4,7 +4,7 @@
 """Everything the local dashboard needs, in one pass over the neutral store.
 
 The same keys and the same collection limits as the cloud console's
-`ui.app.snapshot()`, plus `failed_runs`. Read only: nothing here writes.
+`ui.app.snapshot()`, plus `failed_runs` and `scanner_state`. Read only: nothing here writes.
 
 Two local additions ride on existing keys rather than new ones:
 - each decision row shown carries `person_approval` when a person approved
@@ -42,6 +42,10 @@ def snapshot(docs: DocStore) -> dict:
     scans = rows("scans", limit=20, newest_by="real_ts")
     reports = rows("reports", limit=10, newest_by="real_ts")
     failed_runs = rows("failed_runs", newest_by="real_ts")
+    try:
+        scanner_state = rows("scanner_state")  # per-task pull state and enrichment status
+    except KeyError:
+        scanner_state = []  # a store without the scanner file
 
     approvals = docs.collection("approvals")
     for row in decisions:
@@ -88,4 +92,5 @@ def snapshot(docs: DocStore) -> dict:
         "counts": counts,
         "sim_now": sim_now,
         "failed_runs": failed_runs,
+        "scanner_state": scanner_state,
     }

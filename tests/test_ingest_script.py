@@ -49,6 +49,17 @@ class FakeCollection:
     def document(self, doc_id):
         return (self.name, doc_id)
 
+    # The seed stage's demo/real check: one filtered query. The fake holds no
+    # Greenbone findings, so it matches nothing.
+    def where(self, *, filter):
+        return self
+
+    def limit(self, n):
+        return self
+
+    def stream(self):
+        return iter(())
+
 
 class FakeClient:
     def __init__(self):

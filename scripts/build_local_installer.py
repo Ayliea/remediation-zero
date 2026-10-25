@@ -15,6 +15,7 @@ FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 's
          'tools/clock.py', 'tools/idempotency.py', 'tools/adjudication.py',
          'tools/inference_journal.py', 'tools/sqlite_store.py', 'tools/docstore.py', 'tools/sqlite_docstore.py', 'tools/local_layout.py', 'tools/local_memory.py', 'tools/fleet_memory.py', 'engine/__init__.py', 'engine/ports.py', 'engine/triage_cycle.py',
          'engine/chase.py', 'engine/sweep.py', 'engine/report.py', 'engine/rescan.py', 'engine/seed.py',
+         'engine/scanner_source.py', 'engine/scanner_import.py',
          'engine/approve.py', 'engine/snapshot.py', 'worker/__init__.py', 'worker/envelope.py',
          'tools/delivery.py', 'tools/github_tickets.py',
          'tools/chase.py', 'tools/tickets.py', 'tools/telemetry.py', 'tools/exceptions.py', 'tools/exception_store.py',
