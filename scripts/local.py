@@ -655,20 +655,18 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                     raise ValueError()
                 # Before any parsing (the token is inside the body, so this runs for forged requests too):
                 # a fixed number of parts, none of them a nested multipart.
-                match = re.search(r'boundary=(?:"([^"]{1,200})"|([^\s;"]{1,200}))', content_type, re.I)
+                # The checks are supersets of what the stdlib parser accepts (it also takes LF-only and
+                # CR-only line endings), so they match anywhere in the raw bytes: no line anchoring.
+                match = re.search(r'boundary=(?:"([^"]*)"|([^\s;"]*))', content_type, re.I)
                 if match is None:
                     raise ValueError()
-                delimiter = (match.group(1) or match.group(2)).encode('ascii')
-                chunks = body.split(b'\r\n--' + delimiter)
-                if body.startswith(b'--' + delimiter):
-                    chunks[0] = chunks[0][2 + len(delimiter):]
-                else:
-                    chunks = chunks[1:]  # preamble
-                if len(chunks) > MAX_UPLOAD_DELIMITERS:
+                delimiter = (match.group(1) if match.group(1) is not None else match.group(2)).encode('ascii')
+                if not 0 < len(delimiter) <= 70:  # RFC 2046
                     raise ValueError()
-                for chunk in chunks:
-                    if b'multipart/' in chunk.split(b'\r\n\r\n', 1)[0].lower():
-                        raise ValueError()
+                if body.count(b'--' + delimiter) > MAX_UPLOAD_DELIMITERS:
+                    raise ValueError()
+                if re.search(rb'(?i)content-type[ \t]*:[ \t]*multipart', body):
+                    raise ValueError()
                 message = BytesParser(policy=policy.HTTP).parsebytes(
                     b'Content-Type: ' + content_type.encode('ascii') + b'\r\nMIME-Version: 1.0\r\n\r\n' + body)
                 if not message.is_multipart() or message.defects:

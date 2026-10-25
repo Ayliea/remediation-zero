@@ -765,3 +765,47 @@ def test_page_upload_of_an_older_report_in_a_later_cycle_is_refused_as_not_newer
     older = CLEAN_REPORT.replace(REPORT.encode(), b"44444444-4444-4444-8444-444444444444")
     status, _, sent, _ = post_report(request, token, older)
     assert status == 303 and sent["Location"] == "/?view=infrastructure&upload=refused_not_newer"
+
+
+def _no_parse(monkeypatch):
+    from scripts import local
+    monkeypatch.setattr(local, "BytesParser", lambda *a, **k: pytest.fail("the body was parsed"))
+
+
+def _crafted(token, eol, count):
+    part = f'--{BOUNDARY}{eol}Content-Disposition: form-data; name="x"{eol}{eol}y{eol}'
+    head = f'--{BOUNDARY}{eol}Content-Disposition: form-data; name="token"{eol}{eol}{token}{eol}'
+    return (head + part * count + f"--{BOUNDARY}--{eol}").encode()
+
+
+def test_many_lf_only_parts_refused_before_parsing(page, monkeypatch):
+    request, token, gws = page
+    _no_parse(monkeypatch)
+    assert request(body=_crafted(token, "\n", 20000))[0] == 400
+
+
+def test_many_cr_only_parts_refused_before_parsing(page, monkeypatch):
+    request, token, gws = page
+    _no_parse(monkeypatch)
+    assert request(body=_crafted(token, "\r", 20000))[0] == 400
+
+
+def test_nested_part_behind_lf_delimiter_refused(page, monkeypatch):
+    request, token, gws = page
+    _no_parse(monkeypatch)
+    body = (f'--{BOUNDARY}\nContent-Disposition: form-data; name="token"\n\n{token}\n'
+            f'--{BOUNDARY}\nContent-Disposition: form-data; name="report"; filename="r.xml"\n'
+            'Content-Type: multipart/mixed; boundary=inner\n\n--inner\n\nx\n--inner--\n'
+            f'--{BOUNDARY}--\n').encode()
+    assert request(body=body)[0] == 400
+    assert docs(gws, "scans") == {}
+
+
+def test_boundary_longer_than_70_refused(page, monkeypatch):
+    request, token, gws = page
+    _no_parse(monkeypatch)
+    long = "b" * 71
+    body = multipart([("token", token)], [("report", "r.xml", CLEAN_REPORT)], boundary=long)
+    assert request(body=body, headers={"Content-Type": f"multipart/form-data; boundary={long}"})[0] == 400
+    assert request(body=body, headers={"Content-Type": 'multipart/form-data; boundary=""'})[0] == 400
+    assert docs(gws, "scans") == {}
