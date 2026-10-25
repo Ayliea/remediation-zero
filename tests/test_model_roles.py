@@ -79,19 +79,19 @@ def test_suggest_family(model, family):
 
 def test_fingerprint_changes_with_policy_family_endpoint_model():
     base = roles()
-    value = inference_fingerprint('x', base)
-    assert value == inference_fingerprint('x', roles())
-    assert inference_fingerprint('x', replace(base, same_family_policy='proceed')) != value
-    assert inference_fingerprint('x', replace(base, reviewer=replace(base.reviewer, family='gpt'))) != value
+    value = inference_fingerprint('x', base, legacy=True)
+    assert value == inference_fingerprint('x', roles(), legacy=True)
+    assert inference_fingerprint('x', replace(base, same_family_policy='proceed'), legacy=True) != value
+    assert inference_fingerprint('x', replace(base, reviewer=replace(base.reviewer, family='gpt')), legacy=True) != value
     assert inference_fingerprint('x', replace(
-        base, reviewer=replace(base.reviewer, endpoint='http://127.0.0.1:9/v1'))) != value
-    assert inference_fingerprint('x', replace(base, reviewer=replace(base.reviewer, model='r2'))) != value
+        base, reviewer=replace(base.reviewer, endpoint='http://127.0.0.1:9/v1')), legacy=True) != value
+    assert inference_fingerprint('x', replace(base, reviewer=replace(base.reviewer, model='r2')), legacy=True) != value
 
 
 def test_changed_roles_mid_cycle_requires_human_review(tmp_path):
     store = SQLiteStore(tmp_path / 'db.sqlite3')
-    InferenceJournal(store, 'A', 1, context=inference_fingerprint('x', roles()))._ensure_context()
-    changed = InferenceJournal(store, 'A', 1, context=inference_fingerprint('x', roles('gemini', 'gpt')))
+    InferenceJournal(store, 'A', 1, context=inference_fingerprint('x', roles(), legacy=True))._ensure_context()
+    changed = InferenceJournal(store, 'A', 1, context=inference_fingerprint('x', roles('gemini', 'gpt'), legacy=True))
     with pytest.raises(ValueError, match='changed within this cycle'):
         changed._ensure_context()
 

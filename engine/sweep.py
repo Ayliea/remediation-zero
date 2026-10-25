@@ -82,7 +82,7 @@ _PERSON_APPROVABLE = frozenset({"unreviewed", "held_for_approval"})
 def _decided_severity(ports: Ports, finding_id: str) -> str:
     """The severity of the finding's NEWEST decision, if that one was reviewed.
 
-    Newest by (cycle, sim_ts), of any outcome: a later unreviewed, rejected or
+    Newest by (cycle, sim_ts, document id: ties are broken deterministically), of any outcome: a later unreviewed, rejected or
     unavailable proposal supersedes an older ratified one, and an older
     decision is never consulted. Reviewed means ratified, or unreviewed / held
     with a person's approval. Not reviewed, no proposed severity, or a value
@@ -92,7 +92,7 @@ def _decided_severity(ports: Ports, finding_id: str) -> str:
         "decisions").where(filter=FieldFilter("finding_id", "==", finding_id)).stream()]
     if not rows:
         return "critical"
-    doc_id, newest = max(rows, key=lambda r: (r[1].get("cycle") or 0, r[1].get("sim_ts") or 0))
+    doc_id, newest = max(rows, key=lambda r: (r[1].get("cycle") or 0, r[1].get("sim_ts") or 0, r[0]))
     outcome = newest.get("outcome")
     reviewed = outcome == "ratified" or (
         outcome in _PERSON_APPROVABLE

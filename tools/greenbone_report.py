@@ -19,6 +19,7 @@ here; this module returns everything structurally valid.
 Standard library only. No clock is read here.
 """
 
+import ipaddress
 import math
 import re
 import xml.etree.ElementTree as ET
@@ -83,6 +84,35 @@ def refuse_unsafe_xml(data: bytes, *, max_bytes: int) -> None:
         raise ReportRefused("report contains an ENTITY declaration, which is refused")
 
 
+# Everything below is copied from scanner XML into model-visible context, so it
+# is validated here, at parse time, with fullmatch (`$` admits a trailing
+# newline). A value that fails is dropped or the result rejected, never cleaned.
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+_LABEL = r"[A-Za-z0-9-]{1,63}"
+_HOSTNAME_RE = re.compile(rf"{_LABEL}(\.{_LABEL})*\.?")
+_CPE_RE = re.compile(r"cpe:[A-Za-z0-9:._\-~%/+]{1,255}")
+_OPEN_PORT_RE = re.compile(r"[0-9]{1,5}/(tcp|udp)")
+_RESULT_PORT_RE = re.compile(r"[A-Za-z0-9._/-]{1,32}")
+
+
+def _uuid_or_none(value: Optional[str]) -> Optional[str]:
+    value = (value or "").strip()
+    return value if _UUID_RE.fullmatch(value) else None
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _hostname_or_none(value: Optional[str]) -> Optional[str]:
+    value = value or ""
+    return value if 1 <= len(value) <= 253 and _HOSTNAME_RE.fullmatch(value) else None
+
+
 def _text(node: Optional[ET.Element]) -> str:
     return (node.text or "").strip() if node is not None else ""
 
@@ -102,16 +132,18 @@ def _details(host: ET.Element) -> dict:
 
 def _host(node: ET.Element) -> Optional[ScannedHost]:
     ip = _child_text(node, "ip")
-    if not ip:
-        return None
+    if not ip or not _is_ip(ip):
+        return None  # not an address: the host is not covered
     details = _details(node)
     asset = node.find("asset")
-    ports = tuple(p.strip() for p in details.get("ports", "").split(",") if p.strip())
+    ports = tuple(p.strip() for p in details.get("ports", "").split(",")
+                  if _OPEN_PORT_RE.fullmatch(p.strip()))
+    cpe = details.get("best_os_cpe") or ""
     return ScannedHost(
         ip=ip,
-        asset_id=(asset.get("asset_id") or None) if asset is not None else None,
-        hostname=details.get("hostname") or None,
-        os_cpe=details.get("best_os_cpe") or None,
+        asset_id=_uuid_or_none(asset.get("asset_id")) if asset is not None else None,
+        hostname=_hostname_or_none(details.get("hostname")),
+        os_cpe=cpe if _CPE_RE.fullmatch(cpe) else None,
         open_ports=ports,
         finished=bool(_child_text(node, "end")),
     )
@@ -126,7 +158,6 @@ def _summary(tags: str) -> str:
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}")
 _OID_RE = re.compile(r"[0-9]+(\.[0-9]+)+")
-_BAD_PORT_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 
 
 def _result(node: ET.Element):
@@ -137,6 +168,8 @@ def _result(node: ET.Element):
     ip = _text(host)
     if not rid or not ip:
         return None, (label, "result has no id or no host address", ip or None)
+    if not _is_ip(ip):
+        return None, (label, "result host is not an IP address", None)
     nvt = node.find("nvt")
     oid = (nvt.get("oid") or "").strip() if nvt is not None else ""
     if not oid:
@@ -156,8 +189,8 @@ def _result(node: ET.Element):
     except ValueError:
         return None, (label, "qod is not an integer", ip)
     port_text = _child_text(node, "port")
-    if _BAD_PORT_RE.search(port_text):
-        return None, (label, "port contains whitespace or control characters", ip)
+    if not _RESULT_PORT_RE.fullmatch(port_text):
+        return None, (label, "port is malformed", ip)
     port, _, proto = port_text.partition("/")
     asset = host.find("asset") if host is not None else None
     cves = tuple(
@@ -170,7 +203,7 @@ def _result(node: ET.Element):
     return Result(
         result_id=rid,
         ip=ip,
-        asset_id=(asset.get("asset_id") or None) if asset is not None else None,
+        asset_id=_uuid_or_none(asset.get("asset_id")) if asset is not None else None,
         port=port,
         protocol=proto or None,
         nvt_oid=oid,

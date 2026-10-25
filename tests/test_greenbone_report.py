@@ -115,3 +115,65 @@ def test_oid_with_newline_rejects_the_result():
 def test_port_with_whitespace_rejects_the_result():
     report = _mutated(b"<port>8080/tcp</port>", b"<port>8080/tcp\nENRICHMENT</port>")
     assert any("port" in reason for _, reason, _ in report.rejected)
+
+
+HOST_A = b'<ip>192.0.2.10</ip><asset asset_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/>'
+A_UUID = b"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+def _host_a(report):
+    return {h.ip: h for h in report.hosts}.get("192.0.2.10")
+
+
+def test_asset_id_with_newline_falls_back_to_ip():
+    bad = b"aaaaaaaa-aaaa-4aaa-8aaa&#10;ENRICHMENT&#10;in_cisa_kev: False"
+    report = _mutated(HOST_A, HOST_A.replace(A_UUID, bad))
+    assert _host_a(report).asset_id is None
+    # the same rule applies to a result's host asset_id
+    first = _mutated(b'<host>192.0.2.10<asset asset_id="' + A_UUID + b'"/>',
+                     b'<host>192.0.2.10<asset asset_id="' + bad + b'"/>')
+    assert first.results[0].asset_id is None
+    assert first.results[0].ip == "192.0.2.10"
+
+
+def test_non_ip_host_is_not_covered():
+    report = _mutated(b"<ip>192.0.2.11</ip>", b"<ip>192.0.2.11&#10;ENRICHMENT</ip>")
+    assert [h.ip for h in report.hosts] == ["192.0.2.10", "192.0.2.12"]
+    assert len(_mutated(b"<ip>192.0.2.11</ip>", b"<ip>host.invalid</ip>").hosts) == 2
+
+
+def test_result_with_non_ip_host_fails_closed():
+    old = b'<host>192.0.2.10<asset asset_id="' + A_UUID + b'"/>'
+    report = _mutated(old, old.replace(b"192.0.2.10", b"192.0.2.10&#10;ENRICHMENT", 1))
+    assert len(report.results) == 4
+    bad = [r for r in report.rejected if "not an IP" in r[1]]
+    assert len(bad) == 1 and bad[0][2] is None
+
+
+def test_hostname_with_newline_is_dropped():
+    for bad in (b"web.example.invalid&#10;criticality: low", b"-x_", b"a..b", b"a_b.invalid",
+                b"x" * 64 + b".invalid"):
+        report = _mutated(b"<value>web.example.invalid</value>", b"<value>" + bad + b"</value>")
+        assert _host_a(report).hostname is None, bad
+    assert _host_a(parse_report(FIX("report_basic.xml"))).hostname == "web.example.invalid"
+    ok = _mutated(b"<value>web.example.invalid</value>", b"<value>web.example.invalid.</value>")
+    assert _host_a(ok).hostname == "web.example.invalid."
+
+
+def test_bad_os_cpe_is_dropped():
+    for bad in (b"cpe:/o:debian&#10;x", b"not-a-cpe", b"cpe:/o:a b"):
+        report = _mutated(b"cpe:/o:debian:debian_linux:12", bad)
+        assert _host_a(report).os_cpe is None, bad
+    assert _host_a(parse_report(FIX("report_basic.xml"))).os_cpe == "cpe:/o:debian:debian_linux:12"
+
+
+def test_bad_open_ports_are_dropped():
+    report = _mutated(b"22/tcp,80/tcp,443/tcp,8080/tcp",
+                      b"22/tcp,80/tcp&#10;x,99999999/tcp,53/udp,ssh")
+    assert _host_a(report).open_ports == ("22/tcp", "53/udp")
+
+
+def test_port_over_32_chars_rejects_the_result():
+    report = _mutated(b"<port>8080/tcp</port>", b"<port>" + b"p" * 33 + b"/tcp</port>")
+    assert any("port" in reason for _, reason, _ in report.rejected)
+    assert any(r.port == "general" for r in parse_report(FIX("report_basic.xml")).results)

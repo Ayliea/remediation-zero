@@ -45,7 +45,7 @@ def _finding_text():
 def _run(role, adapter):
     """Return None when the role is ok, else a short failure name."""
     if role == 'proposer':
-        propose(_finding_text(), adapter, finding_id='DEMO-WEB-01', retry=False)
+        propose(_finding_text(), adapter, finding_id='DEMO-WEB-01', retry=False, legacy=True)
         return None
     if role == 'reviewer':
         recorder = _Recorder(adapter)

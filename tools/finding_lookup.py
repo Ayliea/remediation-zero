@@ -179,6 +179,9 @@ def lookup_finding(finding_id: str, client: Any = None) -> str:
     finding = dict(finding)
     finding["scanner_comment"] = _screen_comment(
         finding.get("scanner_comment") or "")
+    if finding.get("nvt_name"):
+        # Also scanner-supplied text, rendered into the model's context.
+        finding["nvt_name"] = _screen_comment(finding["nvt_name"])
 
     enrichment = enrich_finding(_enrichment_cache(), finding)
     enrichment = replace(

@@ -30,7 +30,8 @@ from tools.vertex_models import VertexAdapter, vertex_client as _client  # noqa:
 def propose(prompt_text, model, client, *, finding_id, retry=True):
     """Ask Gemini for a triage proposal."""
     return _inference.propose(
-        prompt_text, VertexAdapter(client, model), finding_id=finding_id, retry=retry)
+        prompt_text, VertexAdapter(client, model), finding_id=finding_id, retry=retry,
+        legacy=True)
 
 
 def review(prompt_text, model, client, *, retry=True):

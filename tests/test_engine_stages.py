@@ -590,3 +590,17 @@ def test_newest_reviewed_decision_without_a_severity_fails_closed(ws):
     _decide(ws, "ratified", None, cycle=2)
     with pytest.raises(ValueError, match="No CVE"):
         _try_accept(ws, clock)
+
+
+def test_decided_severity_tie_breaks_by_id(ws):
+    from engine.sweep import _decided_severity
+    clock = SimClock(mode=ClockMode.SIM)
+    seed_reference(ws, clock)
+    _no_cve_finding(ws, None)
+    docs = ws.docs_for("triage_cycle").collection("decisions")
+    docs.document("RZ-0007-c001-a").set({"finding_id": "RZ-0007", "cycle": 1, "sim_ts": 1,
+                                         "outcome": "ratified", "proposed_severity": "low"})
+    docs.document("RZ-0007-c001-b").set({"finding_id": "RZ-0007", "cycle": 1, "sim_ts": 1,
+                                         "outcome": "unavailable", "proposed_severity": "low"})
+    # the greater id ("-b", never reviewed) wins the tie, so the gate fails closed
+    assert _decided_severity(ports_for(ws, "exception_accept", clock), "RZ-0007") == "critical"

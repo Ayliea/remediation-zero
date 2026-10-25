@@ -52,7 +52,7 @@ def _check_input(text):
         raise ValueError("model input exceeds byte limit")
 
 
-def inference_fingerprint(rendered, roles, *, legacy=True):
+def inference_fingerprint(rendered, roles, *, legacy):
     """Hash of everything that decides what a cycle's model calls mean.
 
     `legacy` is `is_legacy_finding(finding)`, computed once by the caller and
@@ -179,6 +179,15 @@ def triage_instruction(legacy: bool) -> str:
 NVT_NAME_LIMIT = 200
 
 
+_CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029]")
+
+
+def _flat(value: Any) -> Any:
+    """A header value with C0/C1 controls and U+2028/9 replaced by a space, so
+    a value can never start a line of its own in the trusted header."""
+    return _CONTROL_RE.sub(" ", value) if isinstance(value, str) else value
+
+
 def _clean_name(value: Any) -> str:
     """Untrusted one-line text: whitespace runs (newlines too) collapse to one
     space, and the result is capped."""
@@ -208,11 +217,11 @@ def render_finding(
         asset_value = lambda key: asset.get(key)  # noqa: E731
     else:
         cves = finding_cves(finding)
-        head = [f"finding_id: {finding['finding_id']}",
-                f"cve_ids: {', '.join(cves) if cves else 'none (no CVE)'}",
+        head = [f"finding_id: {_flat(finding['finding_id'])}",
+                f"cve_ids: {_flat(', '.join(cves)) if cves else 'none (no CVE)'}",
                 f"qod: {_percent(finding.get('qod'))}"]
-        asset_value = lambda key: ("not known" if asset.get(key) is None  # noqa: E731
-                                   else asset.get(key))
+        asset_value = lambda key: _flat("not known" if asset.get(key) is None  # noqa: E731
+                                        else asset.get(key))
     applicable = getattr(enrichment, "applicable", True)
     na = "not applicable (no CVE)"
     lines = head + [
@@ -245,6 +254,10 @@ def render_finding(
             "in_cisa_kev", "kev_due_date", "kev_known_ransomware_use", "epss_score",
             "epss_percentile", "cvss_base", "cvss_severity", "nvd_description",
             "sources_available")]
+    if not is_legacy_finding(finding):
+        # Defence in depth: no header value, whatever its source, may carry a
+        # line break (or any control character) that starts a forged line.
+        lines = [_flat(line) for line in lines]
     untrusted = finding.get("scanner_comment") or "(empty)"
     if not is_legacy_finding(finding):
         # The test name came out of scanner XML: untrusted, so it sits inside
@@ -297,7 +310,7 @@ def extract_json_object(text: str) -> dict:
 
 def propose(
     prompt_text: str, adapter: ChatAdapter, *, finding_id: str, retry: bool = True,
-    legacy: bool = True,
+    legacy: bool,
 ) -> Proposal:
     """Ask the triage model for a proposal. `legacy` is `is_legacy_finding`."""
     instruction = triage_instruction(legacy)
