@@ -44,7 +44,9 @@ _OVERLAP = 16  # longer than "<!doctype", the longest construct refuse_unsafe_xm
 _DEADLINE_FACTOR = 4
 _STATUS_TEXT_MAX = 200
 _NAME_MAX = 200
-_REPORT_FILTER = "apply_overrides=0 min_qod=0 levels=hmlgf rows=-1"
+# Every level, critical (`c`, gvmd 24+) included. The importer also checks the count
+# gvmd sent against the report's own result_count, so a level this list misses is seen.
+_REPORT_FILTER = "apply_overrides=0 min_qod=0 levels=chmlgf rows=-1"
 
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _STATUS_RE = re.compile(r"[0-9]{3}")

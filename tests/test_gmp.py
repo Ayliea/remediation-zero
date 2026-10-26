@@ -377,7 +377,7 @@ def test_report_xml_returns_the_raw_response_with_the_exact_request(unix_target)
     assert data == resp
     request = ET.fromstring(server.requests[-1])
     assert request.attrib == {"report_id": REPORT_1, "details": "1", "ignore_pagination": "1",
-                              "filter": "apply_overrides=0 min_qod=0 levels=hmlgf rows=-1"}
+                              "filter": "apply_overrides=0 min_qod=0 levels=chmlgf rows=-1"}
 
 
 @pytest.mark.parametrize("bad", ["", "not-a-uuid", REPORT_1 + "\n", REPORT_1 + '" x="y',

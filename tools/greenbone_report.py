@@ -76,6 +76,14 @@ class Result:
 
 
 @dataclass(frozen=True)
+class UnfinishedCheck:
+    """A check gvmd lists under `<errors>` (e.g. "NVT timed out"): it did not finish, so
+    its absence from the results proves nothing. `ip` or `nvt_oid` is None when unreadable."""
+    ip: Optional[str]
+    nvt_oid: Optional[str]
+
+
+@dataclass(frozen=True)
 class GreenboneReport:
     report_id: str
     task_id: str
@@ -86,6 +94,10 @@ class GreenboneReport:
     rejected: tuple[tuple[str, str, Optional[str]], ...]
     #: When the scan finished, ISO 8601 UTC; None when the report gives no usable time.
     scan_end: Optional[str] = None
+    #: Checks that did not finish, from `<errors>`.
+    unfinished_checks: tuple[UnfinishedCheck, ...] = ()
+    #: The report's own result total (`result_count/full`); None when it gives none.
+    results_expected: Optional[int] = None
 
 
 def refuse_unsafe_xml(data: bytes, *, max_bytes: int) -> None:
@@ -110,6 +122,7 @@ _LABEL = r"[A-Za-z0-9-]{1,63}"
 _HOSTNAME_RE = re.compile(rf"{_LABEL}(\.{_LABEL})*\.?")
 _CPE_RE = re.compile(r"cpe:[A-Za-z0-9:._\-~%/+]{1,255}")
 _OPEN_PORT_RE = re.compile(r"[0-9]{1,5}/(tcp|udp)")
+_BARE_PORT_RE = re.compile(r"[0-9]{1,5}")
 _RESULT_PORT_RE = re.compile(r"[A-Za-z0-9._/-]{1,32}")
 
 
@@ -191,17 +204,45 @@ def _host(node: ET.Element) -> Optional[ScannedHost]:
         return None  # not an address: the host is not covered
     details = _details(node)
     asset = node.find("asset")
-    ports = tuple(p.strip() for p in details.get("ports", "").split(",")
-                  if _OPEN_PORT_RE.fullmatch(p.strip()))
     cpe = details.get("best_os_cpe") or ""
     return ScannedHost(
         ip=ip,
         asset_id=_uuid_or_none(asset.get("asset_id")) if asset is not None else None,
         hostname=_hostname_or_none(details.get("hostname")),
         os_cpe=cpe if _CPE_RE.fullmatch(cpe) else None,
-        open_ports=ports,
+        open_ports=_open_ports(details),
         finished=bool(_child_text(node, "end")),
     )
+
+
+def _open_ports(details: dict) -> tuple[str, ...]:
+    """`N/proto` entries from `ports`, then gvmd's bare numbers from `tcp_ports` and
+    `udp_ports` (real gvmd's `ports` is bare tcp numbers too, which carry no protocol)."""
+    found = [p.strip() for p in details.get("ports", "").split(",")
+             if _OPEN_PORT_RE.fullmatch(p.strip())]
+    for proto in ("tcp", "udp"):
+        found += [f"{int(p)}/{proto}" for p in (p.strip() for p in details.get(f"{proto}_ports", "").split(","))
+                  if _BARE_PORT_RE.fullmatch(p) and 1 <= int(p) <= 65535]
+    return tuple(dict.fromkeys(found))
+
+
+def _unfinished(node: ET.Element) -> UnfinishedCheck:
+    ip = _text(node.find("host"))
+    oid = ((node.find("nvt").get("oid") or "") if node.find("nvt") is not None else "").strip()
+    return UnfinishedCheck(ip=ip if ip and _is_ip(ip) else None,
+                           nvt_oid=oid if _OID_RE.fullmatch(oid) else None)
+
+
+def _results_expected(inner: ET.Element) -> Optional[int]:
+    """`result_count/full`, or None when the report has no result_count. A value that is
+    present but not a count refuses the report: it is the check on what gvmd left out."""
+    count = inner.find("result_count")
+    if count is None:
+        return None
+    full = _child_text(count, "full")
+    if not re.fullmatch(r"[0-9]{1,9}", full):
+        raise ReportRefused("report result count is not a number")
+    return int(full)
 
 
 def _summary(tags: str) -> str:
@@ -323,4 +364,6 @@ def _parse(data: bytes) -> GreenboneReport:
         results=tuple(results),
         rejected=tuple(rejected),
         scan_end=_scan_end(inner),
+        unfinished_checks=tuple(_unfinished(n) for n in inner.findall("errors/error")),
+        results_expected=_results_expected(inner),
     )

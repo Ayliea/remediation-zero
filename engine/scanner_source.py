@@ -51,6 +51,12 @@ class NormalisedScan:
     scan_end: Optional[str] = None
     #: Hosts whose results were skipped as `host_uncovered` (another result on them was rejected).
     host_uncovered_hosts: int = 0
+    #: (asset_id, nvt_oid) of checks that did not finish; a finding from one is not resolved.
+    unfinished_checks: tuple[tuple[str, str], ...] = ()
+    #: How many checks the report lists as not finished.
+    unfinished_check_count: int = 0
+    #: Results the report counts but gvmd did not send; any at all and the report closes nothing.
+    results_not_returned: int = 0
 
 
 class ScannerSource(Protocol):
@@ -142,8 +148,25 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         })
 
     rejected_ips = [None if ip is None else _norm_ip(ip) for _, _, ip in report.rejected]
+    # A check that did not finish proves nothing about its own finding on its host; on a
+    # host it cannot be tied to, about that finding on every host. With no readable check
+    # it could be any finding, so it is a rejection that names no host.
+    unfinished: dict[tuple[str, str], None] = {}
+    unreadable_checks = 0
+    for check in report.unfinished_checks:
+        if check.nvt_oid is None:
+            unreadable_checks += 1
+            continue
+        ip = None if check.ip is None else _norm_ip(check.ip)
+        for asset_id in ([by_ip[ip][0]] if ip in by_ip else [aid for aid, _ in by_ip.values()]):
+            unfinished[(asset_id, check.nvt_oid)] = None
+    # Fewer results than the report's own total: a level the filter missed, or a cut
+    # response. A hidden result could be a still-present critical finding anywhere.
+    got = len(report.results) + len(report.rejected)
+    not_returned = max(0, report.results_expected - got) if report.results_expected is not None else 0
     # A rejection that cannot be tied to a known host may hide a still-present finding anywhere.
-    unattributed = any(ip is None or ip not in by_ip for ip in rejected_ips)
+    unattributed = (any(ip is None or ip not in by_ip for ip in rejected_ips)
+                    or unreadable_checks > 0 or not_returned > 0)
     uncovered = {by_ip[ip][0] for ip in rejected_ips if ip in by_ip}
     covered = [] if unattributed else [
         aid for aid, finished in by_ip.values() if finished and aid not in uncovered
@@ -151,8 +174,8 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
     covered = list(dict.fromkeys(covered))
     covered_set = set(covered)
 
-    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected), "not_finished": 0,
-               "host_uncovered": 0}
+    skipped = {"log": 0, "below_qod": 0, "rejected": len(report.rejected) + unreadable_checks,
+               "not_finished": 0, "host_uncovered": 0}
     hidden_hosts: set[str] = set()
     findings: dict[str, dict] = {}
     withheld: dict[str, None] = {}
@@ -183,7 +206,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         # this report may resolve, keep or open a finding. Fail closed.
         skipped["rejected"] += len(bad_assets) + len(bad_findings)
         assets = [a for a in assets if _ASSET_ID_RE.fullmatch(a["asset_id"])]
-        findings, withheld, covered = {}, {}, []
+        findings, withheld, covered, unfinished = {}, {}, [], {}
     return NormalisedScan(
         scan_id=scan_id,
         source=SOURCE,
@@ -196,6 +219,9 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         skipped=skipped,
         scan_end=report.scan_end,
         host_uncovered_hosts=len(hidden_hosts),
+        unfinished_checks=tuple(unfinished),
+        unfinished_check_count=len(report.unfinished_checks),
+        results_not_returned=not_returned,
     )
 
 
@@ -205,6 +231,7 @@ def to_rescan_input(scan: NormalisedScan) -> dict:
         "covered_asset_ids": list(scan.covered_asset_ids),
         "findings": list(scan.findings),
         "withheld_finding_ids": list(scan.withheld_finding_ids),
+        "unfinished_checks": [list(pair) for pair in scan.unfinished_checks],
         "task_id": scan.task_id,
         "source": scan.source,
         "report_status": scan.report_status,

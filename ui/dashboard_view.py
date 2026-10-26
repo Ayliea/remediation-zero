@@ -251,6 +251,14 @@ def _task_card_body(state, task_id):
             on = f' on {text(hosts)} hosts' if hosts else ''
             body += (f'<p>{text(hidden)} results{on} were not imported because another result '
                      'on that host could not be read.</p>')
+        missing = int(state.get("last_results_not_returned") or 0)
+        if missing:
+            body += (f'<p>{text(missing)} results counted in the report are missing from it, '
+                     'so this report closed nothing.</p>')
+        unfinished = int(state.get("last_unfinished_checks") or 0)
+        if unfinished:
+            body += (f'<p>{text(unfinished)} checks did not finish (Greenbone lists them as errors). '
+                     'Findings from those checks on those hosts stay open; this report does not resolve them.</p>')
     # Reports gvmd lists as not Done (Stopped, Interrupted, ...): never imported, shown with their status.
     not_done = [r for r in (state.get("skipped") or []) if isinstance(r, dict)]
     if not_done:

@@ -436,6 +436,12 @@ def pull_line(outcome):
         on = f' on {int(hosts)} hosts' if hosts else ''
         line += (f'; {int(hidden)} results{on} were not imported because another result on that host '
                  'could not be read')
+    missing = outcome.get('results_not_returned') or 0
+    if missing:
+        line += f'; {int(missing)} results counted in the report are missing from it, so it closed nothing'
+    unfinished = outcome.get('unfinished_checks') or 0
+    if unfinished:
+        line += f'; {int(unfinished)} checks did not finish; findings from them on those hosts stay open'
     return line + _listing_words(outcome)
 
 

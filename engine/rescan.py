@@ -87,9 +87,21 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
                 and all(isinstance(item, str) for item in withheld)):
             raise ValueError("greenbone scan withheld_finding_ids must be a "
                              "list of strings; refusing to reconcile")
+    unfinished = scan.get("unfinished_checks", [])
+    if not (isinstance(unfinished, (list, tuple)) and all(
+            isinstance(pair, (list, tuple)) and len(pair) == 2
+            and all(isinstance(part, str) for part in pair) for pair in unfinished)):
+        raise ValueError("scan unfinished_checks must be a list of [asset_id, nvt_oid]; "
+                         "refusing to reconcile")
     cycle_id = f"cycle-{cycle:03d}"
 
     previous = [doc.to_dict() for doc in ports.docs.collection("findings").stream()]
+    # A check that did not finish did not re-test its findings on that host: each is
+    # withheld, so its absence leaves it open (unverifiable) rather than resolved.
+    unchecked = {tuple(pair) for pair in unfinished}
+    withheld_ids = list(scan.get("withheld_finding_ids", ())) + [
+        record["finding_id"] for record in previous
+        if (record.get("asset_id"), record.get("nvt_oid")) in unchecked and record.get("finding_id")]
     _log("rescan_started", cycle_id, "-", scan_id=scan["scan_id"],
          previous_findings=len(previous), reported=len(scan["findings"]),
          covered_assets=len(scan["covered_asset_ids"]), dry_run=dry_run)
@@ -100,7 +112,7 @@ def run_rescan(ports: Ports, cycle: int, scan: dict, dry_run: bool) -> dict:
         covered_asset_ids=scan["covered_asset_ids"],
         scan_id=scan["scan_id"],
         task_id=scan.get("task_id"),
-        withheld_finding_ids=scan.get("withheld_finding_ids", ()),
+        withheld_finding_ids=list(dict.fromkeys(withheld_ids)),
     )
 
     counts = reconciliation.counts

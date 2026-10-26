@@ -103,6 +103,11 @@ python3 -S -m scripts.local --database DIR greenbone upload report.xml
 python3 -S -m scripts.local --database DIR greenbone upload report.xml --add-task  # also choose its task
 ```
 
+Export the report with every result showing. Greenbone exports through the
+report page's current filter, often `rows=100 min_qod=70`; a report with
+results cut out still imports its findings, but closes nothing, and its card
+says how many results are missing.
+
 The dashboard's upload form does the same. It accepts the form a browser
 sends; any other client should use `greenbone upload`. Uploads need no
 credentials and make no connection.
@@ -135,7 +140,14 @@ credentials and make no connection.
   quality-of-detection floor (default 70) are skipped and counted on the
   card. Results with no CVE are imported and triaged; their KEV, EPSS and
   NVD fields read "not applicable (no CVE)". Accepting the risk on a high
-  or critical no-CVE finding needs a person's approval.
+  or critical no-CVE finding needs a person's approval. Every result level
+  is requested, critical included. If the report counts more results than
+  it contains, the report closes nothing and the card says how many are
+  missing.
+- **Checks that did not finish.** gvmd lists a check that timed out or
+  failed under the report's errors. Its count is shown on the card and in
+  the pull line, and an open finding from that check on that host stays
+  open: the check did not re-test it, so its absence is not a fix.
 - **Hosts.** A host counts as covered only if the report says its scan
   finished. If one result on a finished host cannot be read, the host is not
   covered and its other results are not imported either; they are counted
@@ -213,7 +225,9 @@ this repository.
     `tools/greenbone_report.py`, with a synthetic fixture.
 
 Assumptions to confirm (inspect real responses locally, for example with
-`gvm-cli`, and keep them out of the repository):
+`gvm-cli`, and keep them out of the repository). Checked against gvmd 26.42
+on 2026-10-26; every item below held except the zone-less listing
+timestamp, which that gvmd never sent and so was not exercised:
 
 - Every response root is `<COMMAND_response status="NNN" status_text="...">`.
 - A failed sign-in answers `authenticate_response` with status 400; there is
@@ -236,9 +250,15 @@ Assumptions to confirm (inspect real responses locally, for example with
   the inner report; `scan_end` is present on a Done report.
 - Hosts: `host/ip`, `host/asset@asset_id`, `host/end` (empty while the host
   is unfinished), and `host/detail` name/value pairs `hostname`,
-  `best_os_cpe` and `ports`. The `ports` value is assumed to be a
-  comma-separated list such as `22/tcp,80/tcp`; real gvmd may instead list
-  open ports as `<ports><port>` elements, which are not read.
+  `best_os_cpe`, `ports`, `tcp_ports` and `udp_ports`. gvmd 26 gives the
+  port details as bare numbers (`135,445`); `tcp_ports` and `udp_ports` say
+  the protocol. `N/proto` entries in `ports` are read too.
+- The inner report carries `result_count/full`, the total of results the
+  filter could return, and `errors/error` for checks that did not finish
+  (`host` text, `nvt@oid`, `description` such as "NVT timed out after 320
+  seconds", `severity` -3). Errors are not counted in `result_count`.
+- The level filter letters are `c` (critical, gvmd 24 and later), `h`, `m`,
+  `l`, `g` (log) and `f` (false positive); GSA itself filters with `chml`.
 - Results: `result@id`, `host` text with child `asset@asset_id` (and
   `hostname`), `port` as `N/proto` or `general/proto`, `nvt@oid`,
   `nvt/name`, `nvt/tags` (pipe-separated `key=value`, with `summary=`),

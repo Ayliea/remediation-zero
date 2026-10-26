@@ -276,7 +276,8 @@ def _write_state(docs, task_id: str, fields: dict) -> None:
 
 def _uncovered_all(scan: NormalisedScan) -> bool:
     """Coverage emptied by fail-closed normalisation: the report could not be trusted."""
-    return not scan.covered_asset_ids and scan.skipped.get("rejected", 0) > 0
+    return not scan.covered_asset_ids and (scan.skipped.get("rejected", 0) > 0
+                                           or scan.results_not_returned > 0)
 
 
 def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
@@ -374,6 +375,8 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "last_counts": summary["counts"],
             "last_skipped": dict(scan.skipped),
             "last_host_uncovered_hosts": scan.host_uncovered_hosts,
+            "last_unfinished_checks": scan.unfinished_check_count,
+            "last_results_not_returned": scan.results_not_returned,
             "last_uncovered_all": uncovered_all,
             "skipped": notes.get("skipped", []),
             "skipped_not_listed": notes.get("skipped_not_listed", 0),
@@ -388,9 +391,12 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             fields["deferred"] = notes["deferred"]
         _write_state(docs, scan.task_id, fields)
     _log("report_imported", cycle, task_id=scan.task_id, scan_id=scan.scan_id,
-         counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all)
+         counts=summary["counts"], skipped=dict(scan.skipped), uncovered_all=uncovered_all,
+         unfinished_checks=scan.unfinished_check_count, results_not_returned=scan.results_not_returned)
     return {**summary, "skipped": dict(scan.skipped), "uncovered_all": uncovered_all,
             "host_uncovered_hosts": scan.host_uncovered_hosts,
+            "unfinished_checks": scan.unfinished_check_count,
+            "results_not_returned": scan.results_not_returned,
             "new_cves": new_cves, "scan_cves": scan_cves}
 
 
@@ -553,6 +559,8 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                     "deferred": waiting, "new_cves": result["new_cves"],
                     "scan_cves": result["scan_cves"],
                     "host_uncovered_hosts": result["host_uncovered_hosts"],
+                    "unfinished_checks": result["unfinished_checks"],
+                    "results_not_returned": result["results_not_returned"],
                     "listing_refused": notes["refused_reports"],
                     "skipped_tasks": notes["skipped_tasks"]}
         tried = {r["report_id"] for r in refused_now}
