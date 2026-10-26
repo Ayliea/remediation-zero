@@ -109,6 +109,32 @@ def test_event_detail_refuses_secret_keys(store, key):
     assert store.events() == []
 
 
+def test_hash_like_keys_are_refused_except_the_reviewed_email_hmac(store, monkeypatch):
+    import tools.account_store as mod
+    assert "email_sha256" not in mod.ALLOWED_DETAIL_KEYS
+    # the denylist is a backstop even for keys someone adds to the allowlist
+    monkeypatch.setattr(mod, "ALLOWED_DETAIL_KEYS", mod.ALLOWED_DETAIL_KEYS | {
+        "password_sha", "email_sha256", "token_hmac", "user_hmac"})
+    for key in ("password_sha", "email_sha256", "token_hmac", "user_hmac"):
+        with pytest.raises(ValueError):
+            store.insert_event("sign_in_failed", None, None, "dashboard", None, {key: "x"},
+                               real_ts=1.0, sim_ts=1.0)
+    store.insert_event("sign_in_failed", None, None, "dashboard", None,
+                       {"email_hmac": "ab" * 32}, real_ts=1.0, sim_ts=1.0)
+    assert len(store.events()) == 1
+
+
+def test_email_key_is_created_once_and_random(store, tmp_path):
+    with store.transaction() as cur:
+        first = store.email_key(cur)
+    with store.transaction() as cur:
+        assert store.email_key(cur) == first
+    assert len(first) == 32
+    other = AccountStore(tmp_path / "other.sqlite3")
+    with other.transaction() as cur:
+        assert other.email_key(cur) != first
+
+
 def test_event_detail_allows_known_keys_and_lists_newest_first(store):
     store.insert_event("role_changed", "a1", "a2", "web", "127.0.0.1",
                        {"from": "tech", "to": "owner"}, real_ts=1.0, sim_ts=2.0)

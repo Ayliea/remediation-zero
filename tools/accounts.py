@@ -28,10 +28,15 @@ reusing its row.
 Sign-in has one failure path. An unknown email, an invited or removed
 account, a locked account, a wrong password and a wrong code all return None,
 write one `sign_in_failed` event of the same shape, and run exactly one scrypt
-(`passwords.verify(pw, None)` when there is no hash to check against). For an
-email with no account the event names nobody and carries only
-`email_sha256`, the SHA-256 of the email as typed (stripped, lowercased).
-Every guess at a known, active account is reserved against the lockout before
+(`passwords.verify(pw, None)` when there is no hash to check against), and
+each commits the same number of write transactions: a path that reserves no
+attempt (unknown, invited, removed, malformed, locked) commits a pad write
+first (`AccountStore.pad_write`), so the lockout reservation's fsync is not a
+timing tell. For a well-formed email with no account the event names nobody
+and carries only `email_hmac`, HMAC-SHA256 of the normalised email under the
+workspace's random key (`AccountStore.email_key`); malformed input records
+`{"reason": "malformed"}`. The structured log line for a failure carries no
+email-derived value at all. Every guess at a known, active account is reserved against the lockout before
 it is verified (`_reserve_attempt`, shared with reset links and re-confirm),
 so parallel guesses cannot exceed LOCK_AFTER and all three share one counter.
 
@@ -44,6 +49,7 @@ Standard library only.
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import math
@@ -545,20 +551,28 @@ class Accounts:
         """Email, password and a TOTP code (or one unspent recovery code in its
         place). Returns a new raw session token, or None for every failure
         alike; see the module docstring for the single failure path."""
-        typed = email.strip().lower() if isinstance(email, str) else ""
         pw = password if isinstance(password, str) else ""
         now = self._now()
         try:
-            row = self.store.account_by_email(normalise_email(email))
+            typed: Optional[str] = normalise_email(email)
         except ValueError:
-            row = None
+            typed = None
+        row = self.store.account_by_email(typed) if typed is not None else None
         account_id = row["id"] if row is not None else None
         usable = (row is not None and row["status"] == "active"
                   and row["password_hash"] is not None)
         if not usable or not self._reserve_attempt(account_id, now, _VIA, source,
                                                    method="sign_in"):
+            # No attempt was written: commit a pad write instead, so this path
+            # costs what a reservation costs. The same transaction reads the
+            # email key, which only an unknown, well-formed email needs.
+            with self.store.transaction() as cur:
+                key = self.store.email_key(cur)
+                self.store.pad_write(cur)
             passwords.verify(pw, None)           # the same one scrypt
-            return self._sign_in_failed(account_id, typed, source)
+            if row is not None or typed is None:
+                key = None
+            return self._sign_in_failed(account_id, typed, source, key)
         pw_ok = passwords.verify(pw, row["password_hash"])
         secret = row["totp_secret"]
         step = (totp.match(secret, code, now, row["last_totp_step"])
@@ -599,16 +613,24 @@ class Accounts:
         _log("sign_in", account_id, account_id, _VIA, detail)
         return token
 
-    def _sign_in_failed(self, account_id: Optional[str], typed: str,
-                        source: Optional[str]) -> None:
-        """The one failure record: names the account when one exists, else only
-        the SHA-256 of the email as typed."""
-        detail = (None if account_id is not None else
-                  {"email_sha256": hashlib.sha256(typed.encode("utf-8")).hexdigest()})
+    def _sign_in_failed(self, account_id: Optional[str], typed: Optional[str],
+                        source: Optional[str], key: Optional[bytes] = None) -> None:
+        """The one failure record. It names the account when one exists; for a
+        well-formed unknown email (`key` given) it carries only the keyed
+        `email_hmac`; for malformed input only `reason: malformed`. The log
+        line never carries the HMAC or anything else derived from the email."""
+        detail: Optional[dict[str, Any]] = None
+        log_detail: Optional[dict[str, Any]] = None
+        if account_id is None:
+            if typed is None:
+                detail = log_detail = {"reason": "malformed"}
+            elif key is not None:
+                detail = {"email_hmac": hmac.new(key, typed.encode("utf-8"),
+                                                 hashlib.sha256).hexdigest()}
         stamp = self.clock.now()
         self.store.insert_event("sign_in_failed", None, account_id, _VIA, source, detail,
                                 real_ts=stamp.real_ts, sim_ts=stamp.sim_ts)
-        _log("sign_in_failed", None, account_id, _VIA, detail)
+        _log("sign_in_failed", None, account_id, _VIA, log_detail)
         return None
 
     def session(self, token: Optional[str]) -> Optional[Session]:

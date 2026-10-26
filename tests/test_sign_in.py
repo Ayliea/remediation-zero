@@ -2,8 +2,11 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 """Sign-in: password + TOTP, lockout, sessions, re-confirm and the rate limiter."""
+import contextlib
 import hashlib
+import hmac
 import json
+import logging
 import sqlite3
 
 import pytest
@@ -176,11 +179,100 @@ def test_unknown_email_takes_the_same_path(accounts, store, now, owner, monkeypa
     unknown = failed[0]
     assert unknown["subject_id"] is None
     assert json.loads(unknown["detail"]) == {
-        "email_sha256": hashlib.sha256(b"nobody@client.example").hexdigest()}
+        "email_hmac": hmac.new(email_key(store), b"nobody@client.example",
+                               hashlib.sha256).hexdigest()}
+    assert json.loads(failed[1]["detail"]) == {"reason": "malformed"}
     assert {k for k in unknown} == {k for k in failed[2]}
     assert failed[2]["subject_id"] == account_id and failed[2]["detail"] is None
     assert failed[-1]["subject_id"] == account_id and failed[-1]["detail"] is None
     no_secrets_in_events(store, "nobody@client.example", OWNER)
+
+
+def email_key(store):
+    with sqlite3.connect(store.path) as c:
+        return bytes.fromhex(c.execute("SELECT value FROM meta WHERE key = "
+                                       "'email_hmac_key'").fetchone()[0])
+
+
+def db_dump(store):
+    with sqlite3.connect(store.path) as c:
+        return "\n".join(c.iterdump())
+
+
+def test_malformed_email_input_records_no_hash(accounts, store, now, owner, caplog):
+    caplog.set_level(logging.INFO, logger="remediation_zero.accounts")
+    typed = "violet tangerine harbour"            # a password typed into the email field
+    assert accounts.sign_in(typed, PW_OWNER, "000000", SRC) is None
+    failed = events(store, "sign_in_failed")
+    assert len(failed) == 1
+    assert failed[0]["subject_id"] is None
+    assert json.loads(failed[0]["detail"]) == {"reason": "malformed"}
+    key = email_key(store)
+    blob = db_dump(store) + caplog.text
+    for derived in (typed, typed.strip().lower(),
+                    hashlib.sha256(typed.encode()).hexdigest(),
+                    hmac.new(key, typed.encode(), hashlib.sha256).hexdigest()):
+        assert derived not in blob
+
+
+def test_unknown_email_hmac_is_keyed_and_never_logged(accounts, store, now, owner, caplog,
+                                                     tmp_path, clock):
+    caplog.set_level(logging.INFO, logger="remediation_zero.accounts")
+    typed = "nobody@client.example"
+    assert accounts.sign_in(typed, PW_OWNER, "000000", SRC) is None
+    key = email_key(store)
+    assert len(key) == 32
+    mac = hmac.new(key, typed.encode(), hashlib.sha256).hexdigest()
+    assert json.loads(events(store, "sign_in_failed")[0]["detail"]) == {"email_hmac": mac}
+    assert hashlib.sha256(typed.encode()).hexdigest() not in db_dump(store) + caplog.text
+    assert mac not in caplog.text and typed not in caplog.text
+    assert "sign_in_failed" in caplog.text
+    event_blob = json.dumps(events(store), default=str)
+    assert key.hex() not in event_blob and key.hex() not in caplog.text
+    # the same key is used next time; another workspace has its own
+    accounts.sign_in(typed, PW_OWNER, "000000", SRC)
+    assert json.loads(events(store, "sign_in_failed")[1]["detail"]) == {"email_hmac": mac}
+    other = Accounts(AccountStore(tmp_path / "other.sqlite3"), clock, now=now)
+    other.sign_in(typed, PW_OWNER, "000000", SRC)
+    assert json.loads(events(other.store, "sign_in_failed")[0]["detail"])["email_hmac"] != mac
+
+
+def test_unknown_and_known_failures_do_the_same_writes(accounts, store, now, owner,
+                                                      monkeypatch):
+    owner_id, secret, _ = owner
+    tech_id, _, _ = join(accounts, now, owner_id, TECH, "tech")
+    accounts.invite(owner_id, "pending@client.example", "tech")
+    accounts.remove(owner_id, tech_id)
+    writes = []
+    original = store.transaction
+
+    @contextlib.contextmanager
+    def counted():
+        with original() as cur:
+            yield cur
+            if cur.connection.total_changes:
+                writes.append(1)
+
+    monkeypatch.setattr(store, "transaction", counted)
+
+    def count(email, password=PW_OWNER):
+        writes.clear()
+        now.tick()
+        assert accounts.sign_in(email, password, wrong_code(secret, now), SRC) is None
+        return len(writes)
+
+    paths = {
+        "unknown": count("nobody@client.example"),
+        "malformed": count("not an email"),
+        "invited": count("pending@client.example"),
+        "removed": count(TECH),
+        "wrong password": count(OWNER, "not the password at all"),
+        "wrong code": count(OWNER),
+    }
+    for _ in range(3):
+        count(OWNER)                                  # the fifth guess locks
+    paths["locked"] = count(OWNER)
+    assert set(paths.values()) == {2}, paths
 
 
 def test_invited_and_removed_accounts_cannot_sign_in(accounts, store, now, owner,

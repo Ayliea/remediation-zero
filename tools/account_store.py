@@ -15,6 +15,7 @@ code can be spent once even when two requests race. Standard library only.
 """
 
 import json
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -71,15 +72,33 @@ _SCHEMA = (
         detail TEXT,
         real_ts REAL,
         sim_ts REAL)""",
+    # Values private to this file: the per-workspace HMAC key for unknown
+    # sign-in emails (`email_hmac_key`, 32 random bytes as hex) and the
+    # timing pad's filler row (`write_pad`, see `pad_write`).
+    """CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT)""",
 )
 
+_EMAIL_KEY = "email_hmac_key"
+_PAD_KEY = "write_pad"
+
 # Keys an event's `detail` may carry. Anything else is refused, and a key that
-# contains one of the words in _SECRET_WORDS is refused even if added here.
+# contains one of the words in _SECRET_WORDS is refused even if added here,
+# unless it is also named in _REVIEWED_KEYS.
 ALLOWED_DETAIL_KEYS = frozenset({
     "from", "to", "role", "kind", "reason", "email", "count", "outcome",
-    "locked_until", "invite_kind", "mfa", "method", "email_sha256",
+    "locked_until", "invite_kind", "mfa", "method", "email_hmac",
 })
-_SECRET_WORDS = ("password", "code", "token", "secret", "totp", "session", "csrf", "hash")
+_SECRET_WORDS = ("password", "code", "token", "secret", "totp", "session", "csrf", "hash",
+                 "sha", "hmac")
+# Allowlisted keys that contain a secret word, each reviewed by name; the
+# denylist still refuses every other such key. `email_hmac` is HMAC-SHA256 of
+# a typed, well-formed email under the workspace key in `meta`: owners can see
+# repeated guesses at one address without the address, and without the
+# offline dictionary attack an unsalted hash allows. Adding a name here is a
+# deliberate security decision.
+_REVIEWED_KEYS = frozenset({"email_hmac"})
 
 
 class AccountStore:
@@ -147,7 +166,8 @@ class AccountStore:
         """
         for key in (detail or {}):
             low = str(key).lower()
-            if key not in ALLOWED_DETAIL_KEYS or any(w in low for w in _SECRET_WORDS):
+            if key not in ALLOWED_DETAIL_KEYS or (
+                    key not in _REVIEWED_KEYS and any(w in low for w in _SECRET_WORDS)):
                 raise ValueError(f"event detail key not allowed: {key!r}")
         text = json.dumps(detail, sort_keys=True) if detail else None
         args = (event, actor_id, subject_id, via, source, text, real_ts, sim_ts)
@@ -187,6 +207,26 @@ class AccountStore:
             return None
         return cur.execute("SELECT * FROM invites WHERE token_hash = ?",
                            (token_hash,)).fetchone()
+
+    @staticmethod
+    def email_key(cur: sqlite3.Cursor) -> bytes:
+        """The workspace's 32-byte email HMAC key, created on first need inside
+        the caller's transaction. Never logged, never put in an event or error."""
+        cur.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",
+                    (_EMAIL_KEY, secrets.token_bytes(32).hex()))
+        return bytes.fromhex(cur.execute("SELECT value FROM meta WHERE key = ?",
+                                         (_EMAIL_KEY,)).fetchone()[0])
+
+    @staticmethod
+    def pad_write(cur: sqlite3.Cursor) -> None:
+        """Change one row so the transaction commits a real write (journal and
+        fsync), as a lockout reservation does: sign-in failure paths stay alike
+        in cost. The value must differ each time; SQLite skips the disk write
+        for an update that leaves the page unchanged. It is random filler,
+        meaningful to nothing."""
+        cur.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) "
+                    "DO UPDATE SET value = excluded.value",
+                    (_PAD_KEY, secrets.token_hex(8)))
 
     def spend_recovery_code(self, account_id: str, code_hash: str,
                             cur: Optional[sqlite3.Cursor] = None) -> bool:
