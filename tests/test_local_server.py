@@ -189,3 +189,125 @@ def test_the_launcher_only_calls_a_saved_workspace_synthetic_when_it_is(tmp_path
         stdout=io.StringIO('Local dashboard: http://127.0.0.1:8081\n'), wait=lambda **kw: 0, poll=lambda: 0))
     local_launcher.main()
     assert ('Synthetic' in capsys.readouterr().out) is says_synthetic
+
+
+# -- reaching the dashboard through an HTTPS proxy (--public-url) ------------------------
+
+PUBLIC = 'https://dashboard.example.test:8443'
+
+
+@pytest.mark.parametrize('url, origin', [
+    ('https://dashboard.example.test:8443', 'https://dashboard.example.test:8443'),
+    ('https://Dashboard.Example.TEST:8443/', 'https://dashboard.example.test:8443'),
+    ('https://dashboard.example.test:443', 'https://dashboard.example.test'),  # browsers omit :443
+    ('https://dashboard.example.test', 'https://dashboard.example.test'),
+])
+def test_a_public_url_is_reduced_to_its_origin(url, origin):
+    assert local.public_origin(url) == origin
+
+
+@pytest.mark.parametrize('url', [
+    'http://dashboard.example.test:8443',          # the proxy must supply HTTPS
+    'https://dashboard.example.test:8443/rz',      # no path: every page is served from /
+    'https://dashboard.example.test/?a=1',
+    'https://dashboard.example.test/#x',
+    'https://user@dashboard.example.test',
+    'https://:8443', 'https://', 'dashboard.example.test',
+    'https://dashboard.example.test:0', 'https://dashboard.example.test:70000',
+    'https://dashboard.example.test:port', 'https://dash board.example.test',
+])
+def test_a_public_url_that_is_not_a_plain_https_origin_is_refused(url):
+    with pytest.raises(ValueError):
+        local.public_origin(url)
+
+
+@pytest.fixture
+def proxied(tmp_path, fake_endpoints):
+    config_path = tmp_path / 'db.settings.json'
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, config_path, public_origin=PUBLIC)
+    httpd = local.DashboardServer(('127.0.0.1', 0), cls)
+    fake_endpoints.tcp(httpd.socket)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield httpd
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def request(port, method, path, host, origin=None, body=''):
+    """A request as the proxy forwards it: the browser's Host and Origin, passed through."""
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+    headers = {'Host': host, 'Sec-Fetch-Site': 'same-origin',
+               'Content-Type': 'application/x-www-form-urlencoded'}
+    if origin:
+        headers['Origin'] = origin
+    conn.request(method, path, body=body or None, headers=headers)
+    response = conn.getresponse()
+    text = response.read().decode()
+    conn.close()
+    return response, text
+
+
+def scanner_save(token):
+    return urlencode(dict(token=token, section='scanner', transport='unix', socket_path='/run/gvmd/gvmd.sock',
+                          host='', port='9390', ca_file='', task_ids='', qod_floor='70'))
+
+
+def test_the_configured_public_name_is_served_and_others_are_refused(proxied):
+    port = proxied.server_port
+    assert request(port, 'GET', '/', 'dashboard.example.test:8443')[0].status == 200
+    assert request(port, 'GET', '/', f'127.0.0.1:{port}')[0].status == 200       # loopback still works
+    for host in ('evil.example.test:8443', 'dashboard.example.test', 'dashboard.example.test:9999'):
+        assert request(port, 'GET', '/', host)[0].status == 403
+
+
+def test_a_save_through_the_proxy_needs_the_exact_https_origin(proxied):
+    port = proxied.server_port
+    page, body = request(port, 'GET', '/?view=settings&section=scanner', 'dashboard.example.test:8443')
+    token = re.search(r'name="token" value="([^"]+)"', body).group(1)
+    host = 'dashboard.example.test:8443'
+    for wrong in ('http://dashboard.example.test:8443', f'http://127.0.0.1:{port}', 'null',
+                  'https://evil.example.test:8443'):
+        assert request(port, 'POST', '/settings', host, wrong, scanner_save(token))[0].status == 403
+    origin = browser_form_origin(page.getheader('Referrer-Policy', ''), PUBLIC)
+    assert request(port, 'POST', '/settings', host, origin, scanner_save(token))[0].status == 303
+
+
+def test_a_loopback_save_still_needs_the_loopback_origin(proxied):
+    port = proxied.server_port
+    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}')
+    token = re.search(r'name="token" value="([^"]+)"', body).group(1)
+    assert request(port, 'POST', '/settings', f'127.0.0.1:{port}', PUBLIC, scanner_save(token))[0].status == 403
+    assert request(port, 'POST', '/settings', f'127.0.0.1:{port}', f'http://127.0.0.1:{port}',
+                   scanner_save(token))[0].status == 303
+
+
+def test_without_a_public_url_a_proxied_name_is_refused(server):
+    httpd, _ = server
+    assert request(httpd.server_port, 'GET', '/', 'dashboard.example.test:8443')[0].status == 403
+
+
+def test_the_launcher_passes_the_public_url_on_and_warns(tmp_path, monkeypatch, capsys):
+    database = tmp_path / 'db'
+    local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, open_browser=False))
+    monkeypatch.setattr('sys.argv', ['start', '--saved', '--database', str(database), '--public-url', PUBLIC])
+    calls = []
+    def start(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(stdout=io.StringIO('Local dashboard: http://127.0.0.1:8081\n'),
+                               wait=lambda **kw: 0, poll=lambda: 0)
+    monkeypatch.setattr(local_launcher.subprocess, 'Popen', start)
+    local_launcher.main()
+    command = calls[-1]
+    assert command[command.index('--public-url') + 1] == PUBLIC
+    out = capsys.readouterr().out
+    assert f'Also at {PUBLIC} through your HTTPS proxy' in out
+    assert 'No sign-in yet' in out
+
+
+def test_the_launcher_refuses_a_bad_public_url_before_starting(tmp_path, monkeypatch):
+    database = tmp_path / 'db'
+    local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, open_browser=False))
+    monkeypatch.setattr('sys.argv', ['start', '--database', str(database), '--public-url', 'http://x.test'])
+    monkeypatch.setattr(local_launcher.subprocess, 'Popen', lambda *a, **kw: pytest.fail('Unexpected process'))
+    with pytest.raises(SystemExit):
+        local_launcher.main()

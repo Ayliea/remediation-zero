@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from scripts import local
 from tools import local_settings
 
 logger = logging.getLogger('remediation_zero.launcher')
@@ -105,11 +106,17 @@ def main():
                         help='Use a specific workspace directory; defaults to one in the installation folder')
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--port', type=int)
+    parser.add_argument('--public-url', metavar='URL',
+                        help='The https:// address of a proxy in front, such as Tailscale Serve')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     database = args.database.expanduser().resolve() if args.database else default_database(root)
     if args.port is not None and not 1024 <= args.port <= 65535:
         parser.error('Choose a port from 1024 to 65535')
+    try:
+        public = local.public_origin(args.public_url) if args.public_url else None
+    except ValueError as error:
+        parser.error(str(error))
     try:
         preferences = local_settings.load(local_settings.settings_path(database))
     except (ValueError, OSError):
@@ -118,12 +125,16 @@ def main():
                str(database), 'serve', '--port', str(args.port if args.port is not None else preferences['port'])]
     if args.demo or (not args.saved and preferences['mode'] == 'demo'):
         command.append('--demo')
+    if public:
+        command += ['--public-url', public]
     process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, text=True)
     try:
         ready = process.stdout.readline().strip()
         if not is_ready_line(ready):
             raise SystemExit('Dashboard did not start. Check the error above; port 8081 may already be in use. Try --port 8082.')
         print(ready, flush=True)
+        if public:
+            print(f'Also at {public} through your HTTPS proxy. {local.NO_SIGN_IN}', flush=True)
         minutes = preferences['cycle_interval_minutes']
         if minutes > 0:
             logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')

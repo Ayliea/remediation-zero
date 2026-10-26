@@ -706,9 +706,18 @@ def _read_upload_form(content_type, body):
     return {'token': found['token'], 'report': found['report'], 'add_task': 'add_task' in found}
 
 
-def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None):
+def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
+            public_origin=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
+    # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
     token = secrets.token_urlsafe(32)
+    public_host = public_origin.split('://', 1)[1] if public_origin else None
+
+    def origin_for(host, port):
+        """The Origin a same-origin form POST carries for this Host, or None if the Host is refused."""
+        if host in (f'127.0.0.1:{port}', f'localhost:{port}'):
+            return f'http://{host}'
+        return public_origin if public_host is not None and host == public_host else None
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
     serial = threading.Lock()
@@ -728,7 +737,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 self._post()
 
         def _get(self):
-            if self.headers.get('Host') not in {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}:
+            if origin_for(self.headers.get('Host'), self.server.server_port) is None:
                 self.send_error(403)
                 return
             parsed = urlsplit(self.path)
@@ -818,11 +827,10 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.end_headers()
 
         def _post(self):
-            host = self.headers.get('Host')
-            allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
-            if (not config_path or host not in allowed or self.path not in ('/settings', '/upload')
+            expected = origin_for(self.headers.get('Host'), self.server.server_port)
+            if (not config_path or expected is None or self.path not in ('/settings', '/upload')
                     or (self.path == '/upload' and not upload)
-                    or self.headers.get('Origin') != f'http://{host}'
+                    or self.headers.get('Origin') != expected
                     or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
                 self.send_error(403)
                 return
@@ -903,9 +911,40 @@ DEMO_BANNER = 'Local synthetic preview: '
 SAVED_BANNER = 'Local dashboard: '
 
 
+_PUBLIC_HOST_RE = re.compile(r'[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?')
+PUBLIC_URL_RULE = 'an https:// address with a host name and an optional port, and nothing after it'
+NO_SIGN_IN = ('No sign-in yet: anyone who can reach this address can read these records. Use it only '
+              'behind a proxy that limits who can connect, such as your tailnet.')
+
+
+def public_origin(url):
+    """The origin a browser uses for `url`, the address of an HTTPS proxy in front (Tailscale
+    Serve, nginx, Caddy): `https://host[:port]`, lower case, with :443 dropped as browsers drop it.
+
+    The server itself still listens only on 127.0.0.1; this only names the one extra Host the
+    proxy forwards, so the DNS-rebinding check stays a closed list.
+    """
+    parts = urlsplit(url.strip())
+    port = parts.port  # ValueError for a non-number or out of range
+    host = (parts.hostname or '')
+    if (parts.scheme != 'https' or parts.path not in ('', '/') or parts.query or parts.fragment
+            or parts.username is not None or parts.password is not None or port == 0
+            or not _PUBLIC_HOST_RE.fullmatch(host) or parts.netloc.lower().rstrip(':') not in (
+                host, f'{host}:{port}')):
+        raise ValueError(f'The public URL must be {PUBLIC_URL_RULE}.')
+    return f'https://{host}' if port in (None, 443) else f'https://{host}:{port}'
+
+
 def serve_banner(demo, port):
     """"Local synthetic preview" only when serving demo fixtures; saved records are not synthetic."""
     return f'{DEMO_BANNER if demo else SAVED_BANNER}http://127.0.0.1:{port}'
+
+
+def _public_url(value):
+    try:
+        return public_origin(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'use {PUBLIC_URL_RULE}') from None
 
 
 def _cycle(value):
@@ -949,6 +988,8 @@ def _parser():
     serve = commands.add_parser('serve', help='Serve the dashboard and preferences on loopback')
     serve.add_argument('--demo', action='store_true', help='Show illustrative fixtures instead of saved records')
     serve.add_argument('--port', type=int, default=8081)
+    serve.add_argument('--public-url', type=_public_url, metavar='URL',
+                       help='The https:// address of a proxy in front, such as Tailscale Serve')
     greenbone = commands.add_parser('greenbone', help='Read tasks and finished reports from Greenbone; never changes anything there')
     gb_actions = greenbone.add_subparsers(dest='gb_action', required=True)
     gb_actions.add_parser('tasks', help='List the tasks the account can see: task_id  name')
@@ -1085,8 +1126,11 @@ def main():
             upload = None if args.demo else page_upload(ws, config_path, os.environ)
             view = _View(docs)
             with DashboardServer(('127.0.0.1', args.port),
-                                 handler(view, args.demo, config_path, command, upload, records=view.records)) as server:
+                                 handler(view, args.demo, config_path, command, upload, records=view.records,
+                                         public_origin=args.public_url)) as server:
                 print(serve_banner(args.demo, server.server_port), flush=True)
+                if args.public_url:
+                    print(f'Also at {args.public_url} through your HTTPS proxy. {NO_SIGN_IN}', flush=True)
                 server.serve_forever()
         else:
             print('Local workspace ready. No model calls made.')

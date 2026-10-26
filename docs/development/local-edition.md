@@ -101,8 +101,26 @@ before it creates or writes anything.
   `--demo` it shows illustrative fixtures instead of saved records. Its first
   line is `Local synthetic preview: <url>` with `--demo` and
   `Local dashboard: <url>` for saved records. It binds
-  only to loopback and has no user authentication, so do not reverse-proxy it
-  onto a network.
+  only to loopback and has no user authentication yet.
+  - `--public-url https://NAME[:PORT]` (also accepted by the launcher) lets an
+    HTTPS proxy in front, such as Tailscale Serve, nginx or Caddy, forward the
+    dashboard to other machines. The server still listens only on 127.0.0.1;
+    the option adds that one name to the Host names it answers, and a Settings
+    save or upload through it must carry exactly that `https://` origin. The
+    URL must be `https://` with a host name and an optional port and nothing
+    after it; anything else is refused before the server starts. With the
+    option set, `serve` prints a second line,
+    `Also at <url> through your HTTPS proxy.`, with a warning that there is no
+    sign-in: anyone who can reach the proxy can read the records, so use one
+    that limits who connects, such as a tailnet. For Tailscale:
+
+    ```bash
+    sudo tailscale serve --bg --https 8081 http://127.0.0.1:8081
+    python3 -S start-remediation-zero.py --saved --public-url https://HOST.TAILNET.ts.net:8081
+    ```
+
+    Sign-in, the dashboard's own HTTPS and listening on the network are
+    release project 2.
 
 - **update-enrichment** downloads CISA KEV, FIRST EPSS and NVD data into the
   workspace cache. It is the one command that reaches the internet. The
