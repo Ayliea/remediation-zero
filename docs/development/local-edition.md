@@ -101,29 +101,32 @@ before it creates or writes anything.
   `--demo` it shows illustrative fixtures instead of saved records. Its first
   line is `Local synthetic preview: <url>` with `--demo` and
   `Local dashboard: <url>` for saved records. It binds
-  only to loopback and has no user authentication yet.
+  only to loopback. Every page and form needs a signed-in account (password
+  and authenticator code); with no account yet, a visit on the server itself
+  (`http://127.0.0.1:PORT`, no `--public-url`) opens the first-account setup
+  page, and any other visit shows only the setup command. Saving Settings or
+  uploading a report asks for the password or a fresh code again first.
   - `--public-url https://NAME[:PORT]` (also accepted by the launcher) lets an
     HTTPS proxy in front, such as Tailscale Serve, nginx or Caddy, forward the
     dashboard to other machines. The server still listens only on 127.0.0.1;
-    the option adds that one name to the Host names it answers. Until sign-in
-    exists that name is read-only: Settings do not open through it (opening the
-    Scanner section signs in to Greenbone, and a save could point Greenbone,
-    credentials and all, at another server), and saves and uploads through it
-    are refused. Change settings on the server itself. The
+    the option adds that one name to the Host names it answers. A signed-in
+    session gets the full dashboard through it, Settings included, as its role
+    allows; without a session every page asks for sign-in. With the option
+    set, setup is never offered in the browser, even on 127.0.0.1, because a
+    proxy also connects from there. The
     URL must be `https://` with a host name and an optional port and nothing
     after it; anything else is refused before the server starts. With the
     option set, `serve` prints a second line,
-    `Also at <url> through your HTTPS proxy.`, with a warning that there is no
-    sign-in: anyone who can reach the proxy can read the records, so use one
-    that limits who connects, such as a tailnet. For Tailscale:
+    `Also at <url> through your HTTPS proxy.`, saying every page there asks
+    for sign-in. For Tailscale:
 
     ```bash
     sudo tailscale serve --bg --https 8081 http://127.0.0.1:8081
     python3 -S start-remediation-zero.py --saved --public-url https://HOST.TAILNET.ts.net:8081
     ```
 
-    Sign-in, the dashboard's own HTTPS and listening on the network are
-    release project 2.
+    The dashboard's own HTTPS and listening on the network are release
+    project 2.
 
 - **update-enrichment** downloads CISA KEV, FIRST EPSS and NVD data into the
   workspace cache. It is the one command that reaches the internet. The

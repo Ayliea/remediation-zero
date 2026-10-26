@@ -134,7 +134,7 @@ def main():
             raise SystemExit('Dashboard did not start. Check the error above; port 8081 may already be in use. Try --port 8082.')
         print(ready, flush=True)
         if public:
-            print(f'Also at {public} through your HTTPS proxy. {local.NO_SIGN_IN}', flush=True)
+            print(f'Also at {public} through your HTTPS proxy. {local.PROXY_SIGN_IN}', flush=True)
         minutes = preferences['cycle_interval_minutes']
         if minutes > 0:
             logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')

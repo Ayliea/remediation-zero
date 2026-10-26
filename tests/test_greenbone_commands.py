@@ -615,7 +615,7 @@ def multipart(fields, files=(), boundary=BOUNDARY):
 
 
 @pytest.fixture
-def page(gws, monkeypatch):
+def page(gws, monkeypatch, signed_in):
     """(request, token, gws): the dashboard handler with the page's upload bound to the workspace."""
     import io
     from types import SimpleNamespace
@@ -624,14 +624,15 @@ def page(gws, monkeypatch):
     path = local_settings.settings_path(gws.root)
     shown = {"scanner_state": [], "counts": {}, "scans": []}
     cls = local.handler(SimpleNamespace(snapshot=lambda: shown), False, path, None,
-                        local.page_upload(gws, path, {}))
+                        local.page_upload(gws, path, {}), accounts=signed_in.accounts)
 
     def request(method="POST", route="/upload", body=b"", *, headers=None, host="127.0.0.1:8081"):
         obj = object.__new__(cls)
         obj.server = SimpleNamespace(server_port=8081)
+        obj.client_address = ("127.0.0.1", 50000)
         obj.path = route
         base = {"Host": host, "Origin": f"http://{host}", "Content-Type": f"multipart/form-data; boundary={BOUNDARY}",
-                "Content-Length": str(len(body))}
+                "Content-Length": str(len(body)), "Cookie": signed_in.cookie()}
         base.update(headers or {})
         obj.headers = {k: v for k, v in base.items() if v is not None}
         obj.rfile, obj.wfile = io.BytesIO(body), io.BytesIO()
@@ -724,15 +725,18 @@ def test_upload_with_extra_field_is_refused(page):
     assert everything_under(gws) == before
 
 
-def test_upload_is_not_offered_without_the_page_wiring(gws):
+def test_upload_is_not_offered_without_the_page_wiring(gws, signed_in):
     import io
     from types import SimpleNamespace
     from scripts import local
     configure(gws, task_ids=())
-    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, local_settings.settings_path(gws.root))
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, local_settings.settings_path(gws.root),
+                        accounts=signed_in.accounts)
     obj = object.__new__(cls)
     obj.server, obj.path = SimpleNamespace(server_port=8081), "/upload"
-    obj.headers = {"Host": "127.0.0.1:8081", "Origin": "http://127.0.0.1:8081", "Content-Length": "0"}
+    obj.client_address = ("127.0.0.1", 50000)
+    obj.headers = {"Host": "127.0.0.1:8081", "Origin": "http://127.0.0.1:8081", "Content-Length": "0",
+                   "Cookie": signed_in.cookie()}
     codes = []
     obj.send_error = lambda code, *a: codes.append(code)
     obj.do_POST()

@@ -145,7 +145,7 @@ python3 -m venv .venv
 
 # local edition (no pip packages, no cloud account)
 python3 -S start-remediation-zero.py                                       # launcher; opens http://127.0.0.1:8081
-python3 -S start-remediation-zero.py --saved --public-url https://NAME:PORT  # also reachable through an HTTPS proxy (Tailscale Serve); no sign-in yet
+python3 -S start-remediation-zero.py --saved --public-url https://NAME:PORT  # also reachable through an HTTPS proxy (Tailscale Serve); every page needs sign-in
 python3 -S -m scripts.local --help                                         # init | seed | cycle | rescan | exception | approve | serve | check-models | update-enrichment | greenbone
 python3 -S -m scripts.local update-enrichment                              # fetch CISA KEV, EPSS and NVD into the workspace cache; reaches the internet
 python3 -S -m scripts.local greenbone tasks                                # list the account's Greenbone tasks: task_id  name

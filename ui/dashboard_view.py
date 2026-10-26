@@ -27,6 +27,8 @@ def stamp(real_ts, sim_ts):
     return result
 
 
+OWNER_MISSING = "No owner has joined yet, so risks cannot be accepted."
+
 VIEWS = {"overview": "Overview", "infrastructure": "My infrastructure",
          "actions": "Action list", "activity": "Activity"}
 
@@ -337,7 +339,10 @@ def upload_form(token, base="/"):
 
 def render(data, view="overview", demo=False, unavailable=False, settings_html=None,
            base="/", logo_url=None, approve_command=None, upload_token=None, upload_code=None,
-           chosen_tasks=None, records="synthetic"):
+           chosen_tasks=None, records="synthetic", account=None, owner_missing=False):
+    # account: {"email", "role", "token"} for the signed-in local edition, which shows who is
+    # signed in and a sign-out form carrying the session's form token; the cloud passes none.
+    # owner_missing: no owner has joined yet, so the page says risks cannot be accepted.
     # records: "saved" when the records are the install's own (imported or awaiting
     # their first import), so the banner does not call them synthetic.
     # base: where this page is mounted. logo_url: a served, cacheable logo; the
@@ -393,8 +398,15 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
     else:
         body = '<p>Recent decision history, including previous reviews. Times are UTC; scenario time is labeled separately when it differs from wall time.</p>'
         body += "".join(decision_card(r, approve_command) for r in data.get("decisions", [])) or '<p class="card">No decision activity returned.</p>'
+    signed = ""
+    if account is not None:
+        signed = (f'<form class="row" method="post" action="{base}signout"><span>Signed in as <strong>{text(account["email"])}</strong>'
+                  f' ({text(account["role"])})</span><input type="hidden" name="token" value="{text(account["token"])}">'
+                  '<button type="submit">Sign out</button></form>')
+    if owner_missing:
+        signed += f'<section class="notice" role="status"><p>{OWNER_MISSING}</p></section>'
     theme, logo = branding()
     title = 'Your next security step' if view == 'overview' else views[view]
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{views[view]} · Remediation Zero</title><style>
-{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="{logo_url or "data:image/png;base64," + logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div><h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · {footer} · Model connection optional.</footer></main></div></body></html>'''
+{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="{logo_url or "data:image/png;base64," + logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div>{signed}<h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · {footer} · Model connection optional.</footer></main></div></body></html>'''

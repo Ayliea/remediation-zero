@@ -73,6 +73,13 @@ def unconfigured_env(monkeypatch):
     return monkeypatch
 
 
+@pytest.fixture
+def signed_in(tmp_path, tmp_path_factory):
+    """Accounts with a signed-in owner and tech for the dashboard server (tests/signed_in.py)."""
+    from tests.signed_in import site
+    return site(tmp_path, tmp_path_factory.getbasetemp())
+
+
 def pytest_sessionfinish(session, exitstatus):
     if _OFFLINE["violations"]:
         reporter = session.config.pluginmanager.get_plugin("terminalreporter")

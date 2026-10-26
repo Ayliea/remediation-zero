@@ -115,16 +115,18 @@ def model_form(token, **given):
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch):
+def app(tmp_path, monkeypatch, signed_in):
     monkeypatch.setattr(ModelEndpoint, 'propose', lambda *args: pytest.fail('Settings invoked model'))
     path = tmp_path / 'test.settings.json'
-    cls = handler(SimpleNamespace(snapshot=lambda: {}), False, path)
+    cls = handler(SimpleNamespace(snapshot=lambda: {}), False, path, accounts=signed_in.accounts)
     def request(method='GET', route='/?view=settings', fields=None, origin='http://127.0.0.1:8081', host='127.0.0.1:8081'):
         obj = object.__new__(cls)
         obj.server = SimpleNamespace(server_port=8081)
+        obj.client_address = ('127.0.0.1', 50000)
         obj.path = route
         raw = urlencode(fields or {}).encode()
-        obj.headers = {'Host': host, 'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': str(len(raw))}
+        obj.headers = {'Host': host, 'Origin': origin, 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': str(len(raw)),
+                       'Cookie': signed_in.cookie()}
         obj.rfile, obj.wfile = io.BytesIO(raw), io.BytesIO()
         status, headers = [], {}
         obj.send_response = status.append

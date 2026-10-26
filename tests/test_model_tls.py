@@ -212,11 +212,15 @@ def test_the_ca_file_reaches_the_adapter():
     assert moved.proposer.ca_file == ''
 
 
+SESSION_COOKIES = {}
+
+
 @pytest.fixture
-def settings_server(tmp_path, fake_endpoints):
+def settings_server(tmp_path, fake_endpoints, signed_in):
     config_path = tmp_path / 'db.settings.json'
     httpd = local.DashboardServer(('127.0.0.1', 0), local.handler(SimpleNamespace(snapshot=lambda: {}), False,
-                                                                  config_path))
+                                                                  config_path, accounts=signed_in.accounts))
+    SESSION_COOKIES[httpd.server_port] = signed_in.cookie()  # every page needs a session
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield httpd.server_port, config_path
@@ -226,7 +230,8 @@ def settings_server(tmp_path, fake_endpoints):
 
 def save_model(port, ca_file, timeout='60'):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
-    conn.request('GET', '/?view=settings&section=model', headers={'Host': f'127.0.0.1:{port}'})
+    conn.request('GET', '/?view=settings&section=model', headers={'Host': f'127.0.0.1:{port}',
+                                                                   'Cookie': SESSION_COOKIES[port]})
     page = conn.getresponse().read().decode()
     token = re.search(r'name="token" value="([^"]+)"', page).group(1)
     assert 'name="proposer_ca_file"' in page and 'name="proposer_timeout_seconds"' in page
@@ -238,7 +243,7 @@ def save_model(port, ca_file, timeout='60'):
                   proposer_ca_file=ca_file, proposer_timeout_seconds=timeout)
     conn.request('POST', '/settings', body=urlencode(fields), headers={
         'Host': f'127.0.0.1:{port}', 'Origin': f'http://127.0.0.1:{port}', 'Sec-Fetch-Site': 'same-origin',
-        'Content-Type': 'application/x-www-form-urlencoded'})
+        'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': SESSION_COOKIES[port]})
     response = conn.getresponse()
     text = response.read().decode()
     conn.close()

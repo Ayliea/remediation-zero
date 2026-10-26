@@ -11,7 +11,10 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 'scripts/__init__.py', 'scripts/local.py', 'tools/__init__.py',
+FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 'scripts/__init__.py', 'scripts/local.py', 'scripts/local_auth.py', 'tools/__init__.py',
+         'tools/accounts.py', 'tools/access.py', 'tools/passwords.py', 'tools/totp.py', 'tools/qr_svg.py',
+         'tools/vendor/__init__.py', 'tools/vendor/qrcodegen.py', 'tools/vendor/QRCODEGEN_LICENSE.txt',
+         'tools/vendor/breached_passwords.txt', 'tools/vendor/BREACHED_PASSWORDS_SOURCE.md', 'ui/account_views.py',
          'tools/clock.py', 'tools/idempotency.py', 'tools/adjudication.py',
          'tools/inference_journal.py', 'tools/sqlite_store.py', 'tools/docstore.py', 'tools/sqlite_docstore.py', 'tools/local_layout.py', 'tools/account_store.py', 'tools/local_memory.py', 'tools/fleet_memory.py', 'engine/__init__.py', 'engine/ports.py', 'engine/triage_cycle.py',
          'engine/chase.py', 'engine/sweep.py', 'engine/report.py', 'engine/rescan.py', 'engine/seed.py',

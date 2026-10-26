@@ -36,7 +36,10 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
-from tools import local_settings
+from scripts import local_auth
+from tools import access, local_settings
+from tools.account_store import AccountStore
+from tools.accounts import Accounts, RateLimiter
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
 from tools.delivery import GitHubDelivery
@@ -50,6 +53,7 @@ from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
 from tools.model_check import check_models
 from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
+from ui import account_views
 from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
 from ui.settings_view import NO_VISIBLE_TASKS, SECTIONS, render_settings
 from worker.envelope import cycle_for_day
@@ -709,21 +713,29 @@ def _read_upload_form(content_type, body):
     return {'token': found['token'], 'report': found['report'], 'add_task': 'add_task' in found}
 
 
+#: Each existing dashboard route and the one permission it needs (tools.access).
+#: The Accounts page and its invite form are Task 8's; until then a permitted owner gets 404.
+GET_ACTIONS = dict({view: 'view' for view in VIEWS}, settings='settings', accounts='manage_accounts')
+POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts'}
+SETUP_COMMAND = 'python3 -S -m scripts.local --database DIR account setup'
+
+
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
-            public_origin=None):
+            public_origin=None, *, accounts, settings_exposed=False, server_names=(), scheme='http',
+            limiter=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
-    # Until sign-in exists, that name is read-only: no Settings (a visit signs in to Greenbone,
-    # and a save could point it, credentials and all, at another server), no saves, no uploads.
-    token = secrets.token_urlsafe(32)
+    # accounts: tools.accounts.Accounts on the workspace's accounts file, opened by serve
+    # (never by an agent stage). Every page and form needs a session from it, and the
+    # signed-in role must be allowed the route's action; see scripts/local_auth.py for how
+    # each request is classified (local, proxied, direct) and what that changes.
+    # settings_exposed: the saved listen address is a network one, so no request is local.
+    # server_names, scheme: the names a 'direct' request may use, over the TLS listener ('https').
     public_host = public_origin.split('://', 1)[1] if public_origin else None
-
-    def loopback_origin(host, port):
-        """The Origin a same-origin form POST carries for a loopback Host, else None."""
-        return f'http://{host}' if host in (f'127.0.0.1:{port}', f'localhost:{port}') else None
-
-    def proxied(host):
-        return public_host is not None and host == public_host
+    limiter = limiter if limiter is not None else RateLimiter()
+    setup_command = f'{approve_command} account setup' if approve_command else SETUP_COMMAND
+    auth = local_auth.AuthRoutes(accounts, limiter, setup_command)
+    server_names = tuple(server_names)
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
     serial = threading.Lock()
@@ -732,72 +744,147 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
         timeout = IDLE_TIMEOUT
 
         def log_message(self, *args):
-            pass  # Avoid recording URL parameters or request headers.
+            pass  # Never record request lines or headers: invite tokens are in paths.
 
         def do_GET(self):
             with serial:
-                self._get()
+                req = self._request()
+                if req is not None:
+                    self._get(req)
 
         def do_POST(self):
             with serial:
-                self._post()
+                req = self._request()
+                if req is not None:
+                    self._post(req)
 
-        def _get(self):
-            host = self.headers.get('Host')
-            through_proxy = proxied(host)
-            if not through_proxy and loopback_origin(host, self.server.server_port) is None:
+        def _request(self):
+            """Classify the request and resolve its session; None after refusing it with 403."""
+            peer = (getattr(self, 'client_address', None) or ('',))[0]
+            found = local_auth.classify(peer, self.headers.get('Host'), port=self.server.server_port,
+                                        public_host=public_host, exposed=settings_exposed,
+                                        server_names=server_names, scheme=scheme)
+            if found is None:
                 self.send_error(403)
-                return
+                return None
+            kind, origin = found
+            cookies = local_auth.read_cookies(self.headers.get('Cookie'))
+            token = cookies.get(local_auth.SESSION_COOKIE) or None
+            get_all = getattr(self.headers, 'get_all', None)
+            forwarded = get_all('X-Forwarded-For') if get_all else (
+                [self.headers['X-Forwarded-For']] if self.headers.get('X-Forwarded-For') else None)
+            try:
+                session = accounts.session(token) if token else None
+            except Exception as error:  # an unreadable accounts file: unknown, never signed out or in
+                _log('session_read_failed', error=type(error).__name__)
+                self.send_error(503, 'Sign-in could not be checked. Try again.')
+                return None
+            return local_auth.Request(kind, origin, local_auth.client_address(kind, peer, forwarded), token,
+                                      session, cookies)
+
+        def _auth(self, method, req, parsed):
+            try:
+                getattr(auth, method)(self, req, parsed.path, parsed.query)
+            except Exception as error:  # class only: never a password, code, token or path
+                _log('sign_in_page_failed', error=type(error).__name__)
+                self.send_error(503, 'This could not be completed. Try again.')
+
+        def send_page(self, body, status, headers=()):
+            self._send_html(body, status, headers)
+
+        def redirect(self, location, headers=()):
+            self.send_response(303)
+            self.send_header('Location', location)
+            self.send_header('Cache-Control', 'no-store')
+            for name, value in headers:
+                self.send_header(name, value)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def _get(self, req):
             parsed = urlsplit(self.path)
-            view = parse_qs(parsed.query).get('view', ['overview'])[0]
-            section = parse_qs(parsed.query).get('section', ['model'])[0]
-            if through_proxy and view == 'settings':
-                self.send_error(403, 'Settings open only on the server itself until sign-in exists.')
+            if auth.handles(parsed.path):
+                self._auth('get', req, parsed)
                 return
-            settings_path = None if through_proxy else config_path
-            if parsed.path != '/' or (view not in VIEWS and not (config_path and view == 'settings')) or (view == 'settings' and section not in SECTIONS):
+            query = parse_qs(parsed.query)
+            view = query.get('view', ['overview'])[0]
+            section = query.get('section', ['model'])[0]
+            if (parsed.path != '/' or view not in GET_ACTIONS or (view == 'settings' and not config_path)
+                    or (view == 'settings' and section not in SECTIONS)):
                 self.send_error(404)
                 return
+            if req.session is None and auth.no_accounts():
+                if req.kind == 'local':
+                    self.redirect('/setup')
+                else:
+                    self.send_page(account_views.first_account_page(setup_command), 200)
+                return
+            session = req.session
+            if session is None:
+                self.redirect('/signin')
+                return
+            if not access.allowed(session.role, GET_ACTIONS[view]):
+                self.send_error(403)
+                return
+            if view == 'accounts':
+                self.send_error(404)  # Task 8: the Accounts page
+                return
+            self.csrf = session.csrf
+            account = {'email': session.email, 'role': session.role, 'token': session.csrf}
             try:
                 settings_html = None
                 chosen = None
-                if settings_path:
-                    saved = local_settings.load(settings_path)
+                if config_path:
+                    saved = local_settings.load(config_path)
                     chosen = saved['scanner']['task_ids']
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
-                        message='Preferences saved. No model calls were made.' if parse_qs(parsed.query).get('saved') == ['1'] else '',
+                        message='Preferences saved. No model calls were made.' if query.get('saved') == ['1'] else '',
                         scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None)
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
                               approve_command=None if demo else approve_command,
-                              upload_token=token if upload and not demo and not through_proxy else None,
-                              upload_code=parse_qs(parsed.query).get('upload', [None])[0],
-                              chosen_tasks=chosen, records=records() if records and not demo else 'synthetic')
+                              upload_token=session.csrf if upload and not demo else None,
+                              upload_code=query.get('upload', [None])[0],
+                              chosen_tasks=chosen, records=records() if records and not demo else 'synthetic',
+                              account=account, owner_missing=not accounts.owner_exists())
                 status = 200
             except Exception:
-                body, status = render({}, view, unavailable=True, settings_html="" if settings_path else None), 503
+                body, status = render({}, view, unavailable=True, settings_html="" if config_path else None,
+                                      account=account), 503
             self._send_html(body, status)
 
+        def _may_post(self, session, action):
+            if self.path == '/accounts/invite':
+                # An owner may invite; a tech only an owner, and only while no owner has joined.
+                return (access.allowed(session.role, action)
+                        or access.may_invite(session.role, 'owner', accounts.owner_exists()))
+            return access.allowed(session.role, action)
+
         def _settings_html(self, values, section, *, message='', scanner=None):
-            return render_settings(values, section, token, message=message, fingerprint=_certificate_fingerprint(values, config_path),
+            return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, config_path),
                 keys={role: key_present(role, os.environ) for role in ROLES},
                 overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
 
-        def _send_html(self, body, status):
+        def _send_html(self, body, status, headers=()):
             encoded = body.encode()
             self.send_response(status)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(encoded)))
             self.send_header('Cache-Control', 'no-store')
+            # Inline <svg> (the QR code) is markup, not a loaded image: img-src is unchanged.
             self.send_header('Content-Security-Policy', "default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             self.send_header('X-Content-Type-Options', 'nosniff')
             # Not no-referrer: under it a browser sends "Origin: null" on this page's own form
-            # posts, which do_POST refuses. same-origin still sends nothing to other sites.
+            # posts, which do_POST refuses. same-origin still sends nothing to other sites,
+            # so an invite token in this page's URL never leaves in a Referer.
             self.send_header('Referrer-Policy', 'same-origin')
+            for name, value in headers:
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(encoded)
-        def _upload(self):
-            """POST /upload. Host, Origin and Sec-Fetch-Site were checked before this; the token is in the
-            body, so it is checked after parsing and before anything is imported. Nothing from the request
+        def _upload(self, session):
+            """POST /upload. Host, Origin, Sec-Fetch-Site, the session and its role were checked before
+            this; the session's form token is in the body, so it is checked after parsing and before
+            anything is imported, and then the session must be re-confirmed. Nothing from the request
             or the report reaches the redirect: only a code from a closed set."""
             try:
                 length = self.headers.get('Content-Length')
@@ -821,8 +908,11 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     _log('upload_parse_failed', error=type(error).__name__)
                 self.send_error(400, 'Invalid upload. Nothing was imported.')
                 return
-            if not secrets.compare_digest(supplied, token.encode()):
+            if not secrets.compare_digest(supplied, session.csrf.encode()):
                 self.send_error(403)
+                return
+            if not session.confirmed:
+                self.redirect(local_auth.confirm_location('/?view=infrastructure'))
                 return
             if not data or len(data) > MAX_REPORT_BYTES:
                 code = 'refused_too_large' if data else 'bad_request'
@@ -838,16 +928,30 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.send_header('Content-Length', '0')
             self.end_headers()
 
-        def _post(self):
-            expected = loopback_origin(self.headers.get('Host'), self.server.server_port)  # never the proxy's
-            if (not config_path or expected is None or self.path not in ('/settings', '/upload')
-                    or (self.path == '/upload' and not upload)
-                    or self.headers.get('Origin') != expected
+        def _post(self, req):
+            # The Origin must be the scheme and Host this request came in on (local_auth.classify).
+            if (self.headers.get('Origin') != req.origin
                     or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
                 self.send_error(403)
                 return
+            parsed = urlsplit(self.path)
+            if auth.handles(parsed.path):
+                self._auth('post', req, parsed)
+                return
+            action = POST_ACTIONS.get(self.path)
+            session = req.session
+            if action is None:
+                self.send_error(404)
+                return
+            if (session is None or not config_path or (self.path == '/upload' and not upload)
+                    or not self._may_post(session, action)):
+                self.send_error(403)
+                return
+            if self.path == '/accounts/invite':
+                self.send_error(404)  # Task 8: the invite form
+                return
             if self.path == '/upload':
-                self._upload()
+                self._upload(session)
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -863,17 +967,25 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 if any(len(v) != 1 for k, v in fields.items() if not (scanner_form and k == 'task_ids')):
                     raise ValueError()
                 fields = {k: '\n'.join(v) if k == 'task_ids' else v[0] for k, v in fields.items()}
-                if not secrets.compare_digest(fields.pop('token', '').encode(), token.encode()):
+                if not secrets.compare_digest(fields.pop('token', '').encode(), session.csrf.encode()):
                     self.send_error(403)
                     return
+                self.csrf = session.csrf
                 section = fields.pop('section', '')
                 values = local_settings.load(config_path)
                 if section == 'scanner_test' and not fields:
-                    # Tests the saved settings. Never saves, so nothing below runs.
+                    # Tests the saved settings. Never saves, so nothing below runs and no re-confirm is asked.
                     self._send_html(render(demo_snapshot() if demo else store.snapshot(), 'settings', demo=demo,
                                            settings_html=self._settings_html(values, 'scanner', scanner=scanner_probe(values, test=True)),
                                            approve_command=None if demo else approve_command,
-                                           records=records() if records and not demo else 'synthetic'), 200)
+                                           records=records() if records and not demo else 'synthetic',
+                                           account={'email': session.email, 'role': session.role, 'token': session.csrf},
+                                           owner_missing=not accounts.owner_exists()), 200)
+                    return
+                if not session.confirmed:
+                    # A save needs a recent re-confirm. Nothing is saved; the person comes back to this section.
+                    shown = section if section in SECTIONS else 'model'
+                    self.redirect(local_auth.confirm_location(f'/?view=settings&section={shown}'))
                     return
                 if section == 'scanner':
                     # A credential is never accepted, whatever the field is called or how it is cased.
@@ -956,9 +1068,7 @@ SAVED_BANNER = 'Local dashboard: '
 
 _PUBLIC_HOST_RE = local_settings.PUBLIC_HOST_RE  # one host rule, shared with the server names setting
 PUBLIC_URL_RULE = 'an https:// address with a host name and an optional port, and nothing after it'
-NO_SIGN_IN = ('No sign-in yet: anyone who can reach this address can read these records. Use it only '
-              'behind a proxy that limits who can connect, such as your tailnet. Settings and uploads '
-              'work only on the server itself.')
+PROXY_SIGN_IN = 'Every page there asks for sign-in; the first account is created on the server itself.'
 
 
 def public_origin(url):
@@ -1180,12 +1290,18 @@ def main():
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
             upload = None if args.demo else page_upload(ws, config_path, os.environ)
             view = _View(docs)
+            # The accounts file is opened here, by the dashboard server, and by the account
+            # commands; never through docs_for, so no agent stage can reach it.
+            accounts = Accounts(AccountStore(ws.accounts_path()), clock)
+            # Still loopback and plain HTTP: the TLS listener for a network address is Task 9's.
             with DashboardServer(('127.0.0.1', args.port),
                                  handler(view, args.demo, config_path, command, upload, records=view.records,
-                                         public_origin=args.public_url)) as server:
+                                         public_origin=args.public_url, accounts=accounts,
+                                         settings_exposed=local_settings.exposed(preferences),
+                                         server_names=tuple(preferences['server_names']))) as server:
                 print(serve_banner(args.demo, server.server_port), flush=True)
                 if args.public_url:
-                    print(f'Also at {args.public_url} through your HTTPS proxy. {NO_SIGN_IN}', flush=True)
+                    print(f'Also at {args.public_url} through your HTTPS proxy. {PROXY_SIGN_IN}', flush=True)
                 server.serve_forever()
         else:
             print('Local workspace ready. No model calls made.')

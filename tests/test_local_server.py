@@ -33,21 +33,29 @@ def no_reverse_lookup(monkeypatch):
 
 
 @pytest.fixture
-def server(tmp_path, fake_endpoints):
+def server(tmp_path, fake_endpoints, signed_in):
     config_path = tmp_path / 'db.settings.json'
-    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, config_path)
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, config_path, accounts=signed_in.accounts)
     httpd = local.DashboardServer(('127.0.0.1', 0), cls)
     fake_endpoints.tcp(httpd.socket)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
+    COOKIES[httpd.server_port] = signed_in.cookie()
     yield httpd, config_path
     httpd.shutdown()
     httpd.server_close()
 
 
-def get(port, path, timeout=5):
+#: The signed-in owner's session cookie for each running test server: every page needs one.
+COOKIES = {}
+
+
+def get(port, path, timeout=5, cookie=True):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=timeout)
-    conn.request('GET', path, headers={'Host': f'127.0.0.1:{port}'})
+    headers = {'Host': f'127.0.0.1:{port}'}
+    if cookie and port in COOKIES:
+        headers['Cookie'] = COOKIES[port]
+    conn.request('GET', path, headers=headers)
     response = conn.getresponse()
     body = response.read().decode()
     conn.close()
@@ -65,7 +73,7 @@ def test_a_settings_save_from_a_browser_is_accepted(server):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
     conn.request('POST', '/settings', body=urlencode(fields), headers={
         'Host': f'127.0.0.1:{port}', 'Origin': origin, 'Sec-Fetch-Site': 'same-origin',
-        'Content-Type': 'application/x-www-form-urlencoded'})
+        'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': COOKIES[port]})
     response = conn.getresponse()
     response.read()
     conn.close()
@@ -80,7 +88,7 @@ def test_a_post_with_a_null_origin_is_still_refused(server):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
     conn.request('POST', '/settings', body='token=x&section=scanner', headers={
         'Host': f'127.0.0.1:{port}', 'Origin': 'null', 'Sec-Fetch-Site': 'same-origin',
-        'Content-Type': 'application/x-www-form-urlencoded'})
+        'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': COOKIES[port]})
     response = conn.getresponse()
     response.read()
     conn.close()
@@ -97,10 +105,11 @@ def test_an_idle_connection_does_not_block_other_visitors(server):
         idle.close()
 
 
-def test_an_idle_connection_is_closed_after_the_idle_timeout(tmp_path, fake_endpoints, monkeypatch):
+def test_an_idle_connection_is_closed_after_the_idle_timeout(tmp_path, fake_endpoints, monkeypatch, signed_in):
     assert 0 < local.IDLE_TIMEOUT <= 30
     monkeypatch.setattr(local, 'IDLE_TIMEOUT', 1)  # read when the handler class is built
-    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, tmp_path / 'db.settings.json')
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, tmp_path / 'db.settings.json',
+                        accounts=signed_in.accounts)
     httpd = local.DashboardServer(('127.0.0.1', 0), cls)
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -113,7 +122,7 @@ def test_an_idle_connection_is_closed_after_the_idle_timeout(tmp_path, fake_endp
         httpd.server_close()
 
 
-def test_requests_are_still_handled_one_at_a_time(tmp_path, fake_endpoints):
+def test_requests_are_still_handled_one_at_a_time(tmp_path, fake_endpoints, signed_in):
     # The scanner probe's deadline and the settings read-modify-write both rely on it.
     inside, release, overlap = threading.Event(), threading.Event(), []
     active = []
@@ -127,10 +136,12 @@ def test_requests_are_still_handled_one_at_a_time(tmp_path, fake_endpoints):
         active.pop()
         return {}
 
-    cls = local.handler(SimpleNamespace(snapshot=snapshot), False, tmp_path / 'db.settings.json')
+    cls = local.handler(SimpleNamespace(snapshot=snapshot), False, tmp_path / 'db.settings.json',
+                        accounts=signed_in.accounts)
     httpd = local.DashboardServer(('127.0.0.1', 0), cls)
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    COOKIES[httpd.server_port] = signed_in.cookie()
     try:
         first = threading.Thread(target=get, args=(httpd.server_port, '/'))
         first.start()
@@ -152,13 +163,14 @@ def test_requests_are_still_handled_one_at_a_time(tmp_path, fake_endpoints):
     ('saved', 'Your saved records', 'Read-only · Infrastructure changes disabled'),
     ('synthetic', 'Synthetic environment', 'Synthetic preview'),
 ])
-def test_the_page_banner_says_what_the_records_are(tmp_path, records, notice, footer):
+def test_the_page_banner_says_what_the_records_are(tmp_path, records, notice, footer, signed_in):
     cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, tmp_path / 'db.settings.json',
-                        records=lambda: records)
+                        records=lambda: records, accounts=signed_in.accounts)
     obj = object.__new__(cls)
     obj.server = SimpleNamespace(server_port=8081)
+    obj.client_address = ('127.0.0.1', 50000)
     obj.path = '/'
-    obj.headers = {'Host': '127.0.0.1:8081'}
+    obj.headers = {'Host': '127.0.0.1:8081', 'Cookie': signed_in.cookie()}
     obj.wfile = io.BytesIO()
     obj.send_response = obj.send_header = lambda *a: None
     obj.end_headers = lambda: None
@@ -222,26 +234,30 @@ def test_a_public_url_that_is_not_a_plain_https_origin_is_refused(url):
 
 
 @pytest.fixture
-def proxied(tmp_path, fake_endpoints):
+def proxied(tmp_path, fake_endpoints, signed_in):
     config_path = tmp_path / 'db.settings.json'
-    # scanner_state present, so the Infrastructure view would show the upload form if allowed.
+    # scanner_state present, so the Infrastructure view shows the upload form when allowed.
     cls = local.handler(SimpleNamespace(snapshot=lambda: {'scanner_state': []}), False, config_path,
-                        upload=lambda data, add_task: pytest.fail('imported through the proxy'), public_origin=PUBLIC)
+                        upload=lambda data, add_task: pytest.fail('imported without a session'), public_origin=PUBLIC,
+                        accounts=signed_in.accounts)
     httpd = local.DashboardServer(('127.0.0.1', 0), cls)
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    COOKIES[httpd.server_port] = signed_in.cookie()
     yield httpd
     httpd.shutdown()
     httpd.server_close()
 
 
-def request(port, method, path, host, origin=None, body=''):
-    """A request as the proxy forwards it: the browser's Host and Origin, passed through."""
+def request(port, method, path, host, origin=None, body='', cookie=None):
+    """A request as the proxy forwards it: the browser's Host, Origin and cookie, passed through."""
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
     headers = {'Host': host, 'Sec-Fetch-Site': 'same-origin',
                'Content-Type': 'application/x-www-form-urlencoded'}
     if origin:
         headers['Origin'] = origin
+    if cookie:
+        headers['Cookie'] = cookie
     conn.request(method, path, body=body or None, headers=headers)
     response = conn.getresponse()
     text = response.read().decode()
@@ -256,52 +272,57 @@ def scanner_save(token):
 
 def test_the_configured_public_name_is_served_and_others_are_refused(proxied):
     port = proxied.server_port
-    assert request(port, 'GET', '/', 'dashboard.example.test:8443')[0].status == 200
-    assert request(port, 'GET', '/', f'127.0.0.1:{port}')[0].status == 200       # loopback still works
+    cookie = COOKIES[port]
+    assert request(port, 'GET', '/', 'dashboard.example.test:8443', cookie=cookie)[0].status == 200
+    assert request(port, 'GET', '/', f'127.0.0.1:{port}', cookie=cookie)[0].status == 200   # loopback still works
     for host in ('evil.example.test:8443', 'dashboard.example.test', 'dashboard.example.test:9999'):
-        assert request(port, 'GET', '/', host)[0].status == 403
+        assert request(port, 'GET', '/', host, cookie=cookie)[0].status == 403
 
 
-def test_nothing_can_be_changed_through_the_proxy(proxied):
-    # No sign-in yet: a save could point Greenbone, credentials and all, at another server.
+def test_nothing_can_be_changed_through_the_proxy_without_a_session(proxied):
+    # Sign-in replaced the read-only rule: a save could point Greenbone, credentials and all,
+    # at another server, so no session means no save and no upload, whatever the Origin.
     port = proxied.server_port
     host = 'dashboard.example.test:8443'
-    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}')
+    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}', cookie=COOKIES[port])
     token = re.search(r'name="token" value="([^"]+)"', body).group(1)
     for origin in (PUBLIC, 'http://dashboard.example.test:8443', f'http://127.0.0.1:{port}'):
         assert request(port, 'POST', '/settings', host, origin, scanner_save(token))[0].status == 403
         assert request(port, 'POST', '/upload', host, origin, 'x')[0].status == 403
+    # With the session, only the Origin of the way in is accepted.
+    for origin in ('http://dashboard.example.test:8443', f'http://127.0.0.1:{port}'):
+        assert request(port, 'POST', '/settings', host, origin, scanner_save(token),
+                       cookie=COOKIES[port])[0].status == 403
 
 
-def test_settings_do_not_open_through_the_proxy_and_greenbone_is_not_signed_in_to(proxied, monkeypatch):
+def test_settings_do_not_open_through_the_proxy_without_a_session(proxied, monkeypatch):
     monkeypatch.setattr(local, 'scanner_probe', lambda *a, **kw: pytest.fail('signed in to Greenbone'))
     port = proxied.server_port
     host = 'dashboard.example.test:8443'
-    for section in ('scanner', 'model'):
-        response, body = request(port, 'GET', f'/?view=settings&section={section}', host)
-        assert response.status == 403
-        assert 'only on the server itself' in body
-    for view in ('overview', 'infrastructure'):
-        response, body = request(port, 'GET', f'/?view={view}', host)
-        assert response.status == 200
-        assert 'view=settings' not in body
+    for path in ('/?view=settings&section=scanner', '/?view=settings&section=model', '/?view=overview',
+                 '/?view=infrastructure'):
+        response, body = request(port, 'GET', path, host)
+        assert response.status == 303 and response.getheader('Location') == '/signin'
         assert 'name="token"' not in body
-    # The same page on the server itself does offer the upload, so the check above means something.
-    assert 'name="token"' in request(port, 'GET', '/?view=infrastructure', f'127.0.0.1:{port}')[1]
+    # The same page with a session does offer the upload, so the check above means something.
+    assert 'name="token"' in request(port, 'GET', '/?view=infrastructure', host, cookie=COOKIES[port])[1]
 
 
 def test_a_loopback_save_still_needs_the_loopback_origin(proxied):
     port = proxied.server_port
-    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}')
+    cookie = COOKIES[port]
+    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}', cookie=cookie)
     token = re.search(r'name="token" value="([^"]+)"', body).group(1)
-    assert request(port, 'POST', '/settings', f'127.0.0.1:{port}', PUBLIC, scanner_save(token))[0].status == 403
+    assert request(port, 'POST', '/settings', f'127.0.0.1:{port}', PUBLIC, scanner_save(token),
+                   cookie=cookie)[0].status == 403
     assert request(port, 'POST', '/settings', f'127.0.0.1:{port}', f'http://127.0.0.1:{port}',
-                   scanner_save(token))[0].status == 303
+                   scanner_save(token), cookie=cookie)[0].status == 303
 
 
 def test_without_a_public_url_a_proxied_name_is_refused(server):
     httpd, _ = server
-    assert request(httpd.server_port, 'GET', '/', 'dashboard.example.test:8443')[0].status == 403
+    assert request(httpd.server_port, 'GET', '/', 'dashboard.example.test:8443',
+                   cookie=COOKIES[httpd.server_port])[0].status == 403
 
 
 def test_the_launcher_passes_the_public_url_on_and_warns(tmp_path, monkeypatch, capsys):
@@ -319,8 +340,8 @@ def test_the_launcher_passes_the_public_url_on_and_warns(tmp_path, monkeypatch, 
     assert command[command.index('--public-url') + 1] == PUBLIC
     out = capsys.readouterr().out
     assert f'Also at {PUBLIC} through your HTTPS proxy' in out
-    assert 'No sign-in yet' in out
-    assert 'only on the server itself' in out
+    assert 'asks for sign-in' in out
+    assert 'No sign-in yet' not in out
 
 
 def test_the_launcher_refuses_a_bad_public_url_before_starting(tmp_path, monkeypatch):
