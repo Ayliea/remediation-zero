@@ -1745,14 +1745,23 @@ def _tls_context(ws, settings, names):
                                f'certificate {cert_file}.') from None
     if not names:
         raise ServeRefused(NO_SERVER_NAME)
-    try:
-        cert_path, key_path = server_tls.ensure_self_signed(ws.root, names)
-    except server_tls.NoOpenssl:
-        raise ServeRefused(NO_OPENSSL) from None
-    except RuntimeError as error:  # openssl failed; the message names its error class only
-        raise ServeRefused(f'{error}. Set your own certificate (settings set application '
-                           'certificate.mode=own …) or use a proxy.') from None
-    return server_tls.server_context(cert_path, key_path), cert_path
+    # The self-signed pair is ours: one that will not load (a corrupt file, or a key and
+    # certificate changed apart) is made again once; if that does not help, both files are named.
+    for renew in (False, True):
+        try:
+            cert_path, key_path = server_tls.ensure_self_signed(ws.root, names, renew=renew)
+        except server_tls.NoOpenssl:
+            raise ServeRefused(NO_OPENSSL) from None
+        except RuntimeError as error:  # openssl failed; the message names its error class only
+            raise ServeRefused(f'{error}. Set your own certificate (settings set application '
+                               'certificate.mode=own …) or use a proxy.') from None
+        try:
+            return server_tls.server_context(cert_path, key_path), cert_path
+        except (ssl.SSLError, OSError, ValueError):
+            pass
+    raise ServeRefused(f'The certificate {cert_path} and key {key_path} in the workspace could not be loaded, '
+                       'even after making them again. Set your own certificate (settings set application '
+                       'certificate.mode=own …) or use a proxy.')
 
 
 def build_server(ws, preferences, config_path, *, demo=False, public_url=None, port=None, clock=None):
@@ -1764,18 +1773,27 @@ def build_server(ws, preferences, config_path, *, demo=False, public_url=None, p
     exposed = local_settings.exposed(preferences)
     port = preferences['port'] if port is None else port
     command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
+    # Everything that can fail is read before anything listens, so a refusal is one sentence
+    # and never leaves a socket open. The accounts file is opened here, by the dashboard server,
+    # and by the account commands; never through docs_for, so no agent stage can reach it.
+    try:
+        accounts = Accounts(AccountStore(ws.accounts_path()), clock or SimClock.from_env())
+        no_accounts = accounts.store.count_accounts() == 0
+    except (sqlite3.Error, OSError):
+        raise ServeRefused(ACCOUNTS_UNREADABLE) from None
     if exposed:
         names = default_server_names(preferences)
         context, cert_path = _tls_context(ws, preferences, names)
         address = preferences['listen_address']
+        try:
+            fingerprint = server_tls.fingerprint(cert_path)
+        except (OSError, ValueError):
+            raise ServeRefused(f'The certificate file {cert_path} could not be read as a PEM certificate.') from None
     else:
         names, context, cert_path, address = list(preferences['server_names']), None, None, '127.0.0.1'
     docs = ws.docs_for('dashboard')  # reads only: no collection is writable
     upload = None if demo else page_upload(ws, config_path, os.environ)
     view = _View(docs)
-    # The accounts file is opened here, by the dashboard server, and by the account
-    # commands; never through docs_for, so no agent stage can reach it.
-    accounts = Accounts(AccountStore(ws.accounts_path()), clock or SimClock.from_env())
     handler_class = handler(view, demo, config_path, command, upload, records=view.records,
                             public_origin=public_url, accounts=accounts, settings_exposed=exposed,
                             server_names=tuple(names), scheme='https' if exposed else 'http',
@@ -1786,10 +1804,13 @@ def build_server(ws, preferences, config_path, *, demo=False, public_url=None, p
         docs.close()
         raise ServeRefused(bind_refusal(address, port, error)) from None
     if not exposed:
-        return server, [serve_banner(demo, server.server_port)]
-    lines = [f'{DEMO_BANNER if demo else SAVED_BANNER}https://{_host_port(names[0], server.server_port)}/',
-             FINGERPRINT_LINE + server_tls.fingerprint(cert_path)]
-    if accounts.store.count_accounts() == 0:
+        lines = [serve_banner(demo, server.server_port)]
+    else:
+        lines = [f'{DEMO_BANNER if demo else SAVED_BANNER}https://{_host_port(names[0], server.server_port)}/',
+                 FINGERPRINT_LINE + fingerprint]
+    # Setup is offered in the browser only to a local visit (loopback, no proxy); otherwise
+    # the first account is made with this command, on the server.
+    if no_accounts and (exposed or public_url):
         lines.append(f'{NO_ACCOUNTS_LINE}{command} account setup')
     return server, lines
 
@@ -1919,7 +1940,7 @@ def command_line_account(ws, email, action=None):
     through docs_for."""
     try:
         row = local_accounts.resolve_as(AccountStore(ws.accounts_path()), email)
-    except sqlite3.Error:
+    except (sqlite3.Error, OSError):  # OSError: the file cannot be opened (_private_file)
         raise local_accounts.CommandRefused(ACCOUNTS_UNREADABLE) from None
     if action == 'accept_risk' and not access.allowed(row['role'], action):
         raise local_accounts.CommandRefused(f'Only an owner can accept a risk; {row["email"]} is a {row["role"]}.')
@@ -2051,14 +2072,14 @@ def main(argv=None):
                 raise SystemExit(code)
         elif args.command == 'account':
             # Opened here, as serve opens it: never through docs_for, so no agent stage reaches it.
-            accounts = Accounts(AccountStore(ws.accounts_path()), clock)
             try:
+                accounts = Accounts(AccountStore(ws.accounts_path()), clock)
                 lines = local_accounts.run(args, accounts, link_origin(preferences))
             except local_accounts.CommandRefused as refusal:
                 parser.exit(1, f'{refusal}\n')
             except KeyboardInterrupt:
                 parser.exit(1, 'Cancelled. Nothing was changed.\n')
-            except sqlite3.Error:
+            except (sqlite3.Error, OSError):  # OSError: the file cannot be opened (_private_file)
                 parser.exit(1, ACCOUNTS_UNREADABLE + '\n')
             for line in lines:
                 print(line, flush=True)

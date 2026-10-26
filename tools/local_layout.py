@@ -21,6 +21,8 @@ and SQLite's journal files inherit the database file's mode. Every `init()`
 tightens an existing file back to 0600: that is the intended default for
 customer data, not an accident. A root is adopted only if it is new, empty, or
 already holds `shared.sqlite3`; any other directory is refused untouched.
+The accounts file is the exception: `init()` only creates it, empty and 0600,
+when it is absent, and never opens it (see `_create_absent`).
 
 No clock is read here. Standard library only.
 """
@@ -88,6 +90,20 @@ def _private_file(path: Path) -> None:
         os.close(fd)
 
 
+def _create_absent(path: Path) -> None:
+    """Create `path` empty with mode 0600 if nothing is there; otherwise leave it alone.
+
+    For the accounts file: every command runs `init()`, and the remediation lifecycle must not
+    depend on the sign-in file, so it is never opened with SQLite or re-moded here. An empty
+    file is an empty SQLite database; `tools.account_store.AccountStore` creates its tables
+    (and re-tightens the mode) when the dashboard server or an account command opens it."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        return
+    os.close(fd)
+
+
 class Workspace:
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -131,8 +147,7 @@ class Workspace:
             finally:
                 conn.close()
         self._move_old_layout_approvals()
-        from tools.account_store import AccountStore  # creates the file 0600 and its tables
-        AccountStore(self.accounts_path())
+        _create_absent(self.accounts_path())
         return SQLiteStore(self._path(SHARED_FILE))  # creates the journal tables
 
     def _move_old_layout_approvals(self) -> None:

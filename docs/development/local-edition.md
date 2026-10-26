@@ -224,6 +224,11 @@ No accounts yet. Create the first one on this server: python3 -S -m scripts.loca
 
 The third line appears only while there are no accounts; the first account
 is created on the server itself, never through the network listener. A
+loopback install started with `--public-url` prints the same line, since the
+browser does not offer setup there either. A self-signed key or certificate
+that will not load (a corrupt file, or one replaced without the other) is made
+again at start; if that does not help, `serve` stops with a sentence naming
+both files. A
 browser warns about a self-signed certificate: compare the fingerprint it
 shows with the printed one (also shown in Settings) before going on, so you
 know the warning is for this server and not for something in between. The
@@ -310,9 +315,15 @@ are shown once, at setup; each signs in once in place of a code.
   hashed link and session tokens, and the audit trail. TOTP secrets are stored
   as they are: the standard library has no encryption, and whoever can read
   the file can already read every record. The file is outside every agent
-  stage's store by construction: only workspace creation, the dashboard server
-  and the `account` and `--as` commands open it, never through an agent's docstore, so no stage
-  can read or write it.
+  stage's store by construction: workspace creation only makes it, empty and
+  0600, when it is absent, without opening it; only the dashboard server and
+  the `account` and `--as` commands open it, never through an agent's
+  docstore, so no stage can read or write it. A sign-in problem never stops
+  the remediation lifecycle: `seed`, `cycle`, `rescan`, `greenbone` and
+  `exception list` work even when the accounts file cannot be read. When it
+  cannot be read or written, `serve`, the `account` commands and `--as` stop
+  with `The accounts file could not be read or written. Nothing was changed.`
+  before anything listens or is written.
 
 ## Model roles
 

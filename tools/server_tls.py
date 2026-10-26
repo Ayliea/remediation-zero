@@ -56,10 +56,21 @@ def _valid_for_a_while(exe, cert):
     return done.returncode == 0
 
 
-def ensure_self_signed(root, names):
+def _pair_loads(cert, key):
+    """True when the key loads and belongs to the certificate (load_cert_chain checks both)."""
+    try:
+        ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(str(cert), str(key))
+        return True
+    except (ssl.SSLError, OSError, ValueError):
+        return False
+
+
+def ensure_self_signed(root, names, *, renew=False):
     """Create or renew server-cert.pem and server-key.pem (0600) in `root`; return (cert, key).
 
-    Renews with under 30 days left or when the certificate's names differ from `names`.
+    Renews with under 30 days left, when the certificate's names differ from `names`, when the
+    key does not load or does not match the certificate (a corrupt file, or a key replaced
+    without its certificate), or with `renew`. The pair is ours, so remaking it loses nothing.
     The first name is the subject CN; every name is in the SAN."""
     root = Path(root)
     entries = _san(names)
@@ -69,7 +80,8 @@ def ensure_self_signed(root, names):
     exe = shutil.which('openssl')
     if exe is None:
         raise NoOpenssl()
-    if cert.is_file() and key.is_file() and _sans(cert) == _wanted(entries):
+    if (not renew and cert.is_file() and key.is_file() and _sans(cert) == _wanted(entries)
+            and _pair_loads(cert, key)):
         try:
             if _valid_for_a_while(exe, cert):
                 return cert, key

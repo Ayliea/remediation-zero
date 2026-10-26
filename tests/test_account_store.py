@@ -49,9 +49,11 @@ def test_accounts_file_is_private_and_unreachable_by_every_stage(ws):
             with pytest.raises(KeyError):
                 ws.file_for(name)
         docs.close()
-    # init is safe to repeat and re-tightens the mode
+    # init is safe to repeat and leaves the file alone; opening it re-tightens the mode
     os.chmod(path, 0o644)
     ws.init()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o644
+    AccountStore(path)
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 

@@ -7,6 +7,7 @@ Run in-process through scripts.local.main, so the accounts file can be the signe
 template (tests/signed_in.py) rather than paying for scrypt in every test. Synthetic
 data only: client.example accounts, .test server names, TEST-NET addresses."""
 import json
+import os
 import re
 
 import pytest
@@ -303,3 +304,33 @@ def test_settings_set_says_restart_required(db, capsys):
     assert saved['server_names'] == ['rz.example.test', '192.0.2.10']  # untouched fields are kept
     code, out, _ = cli(capsys, db, 'settings', 'set', 'application', 'listen_address=127.0.0.2')
     assert (code, out) == (0, local.SAVED_RESTART + '\n')
+
+
+# --- final round: an unreadable accounts file is one sentence, never a traceback (I2) ------
+
+UNREADABLE = 'The accounts file could not be read or written. Nothing was changed.\n'
+needs_non_root = pytest.mark.skipif(hasattr(os, 'geteuid') and os.geteuid() == 0,
+                                    reason='root reads a mode-000 file')
+
+
+@pytest.fixture
+def unreadable(db, people):
+    path = Workspace(db).accounts_path()
+    os.chmod(path, 0)
+    yield path
+    os.chmod(path, 0o600)
+
+
+@needs_non_root
+@pytest.mark.parametrize('argv', [
+    ('account', 'list'),
+    ('account', 'invite', '--email', 'new@client.example', '--role', 'tech', '--as', OWNER),
+    ('account', 'recover-owner', '--email', OWNER),
+    ('approve', 'RZ-0001', '--cycle', '1', '--as', OWNER),
+    ('exception', 'accept', 'RZ-0001', '--ttl', '7', '--reason', 'Synthetic', '--cycle', '1', '--as', OWNER),
+    ('serve', '--port', '0'),
+])
+def test_an_unreadable_accounts_file_is_one_sentence(db, unreadable, capsys, argv):
+    code, out, err = cli(capsys, db, *argv)
+    assert (code, err) == (1, UNREADABLE)
+    assert 'Traceback' not in out + err

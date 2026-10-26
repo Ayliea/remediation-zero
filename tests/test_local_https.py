@@ -368,3 +368,97 @@ def test_connections_over_the_cap_are_closed_and_a_freed_slot_serves_again(serve
     finally:
         for sock in held:
             sock.close()
+
+
+
+# --- final round: the self-signed pair is ours to remake (I2) ----------------------------
+
+
+@needs_openssl
+def test_a_corrupt_self_signed_key_is_made_again(served, tmp_path):
+    first, _, ws = served(server_names=[NAME])
+    old = server_tls.fingerprint(ws.root / server_tls.CERT_NAME)
+    first.shutdown()
+    first.server_close()
+    (ws.root / server_tls.KEY_NAME).write_text('-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n')
+    server, lines, ws = served(server_names=[NAME])
+    assert lines[1] == local.FINGERPRINT_LINE + server_tls.fingerprint(ws.root / server_tls.CERT_NAME)
+    assert server_tls.fingerprint(ws.root / server_tls.CERT_NAME) != old
+    assert https_get(server, ws).status == 200
+
+
+@needs_openssl
+def test_a_key_that_does_not_match_its_certificate_is_made_again(tmp_path):
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'b').mkdir()
+    cert, key = server_tls.ensure_self_signed(tmp_path / 'a', [NAME])
+    _, other = server_tls.ensure_self_signed(tmp_path / 'b', [NAME])
+    key.write_bytes(other.read_bytes())    # a valid key, but not this certificate's
+    cert, key = server_tls.ensure_self_signed(tmp_path / 'a', [NAME])
+    server_tls.server_context(cert, key)   # loads: the pair was made again
+
+
+@needs_openssl
+def test_a_self_signed_pair_that_will_not_load_is_refused_naming_both_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(local.local_settings, 'exposed', lambda value: True)
+    calls = []
+
+    def refuse(cert, key):
+        calls.append((cert, key))
+        raise ssl.SSLError('synthetic')
+
+    ws = local.open_workspace(tmp_path / 'ws')
+    monkeypatch.setattr(local.server_tls, 'server_context', refuse)
+    preferences = dict(local_settings.DEFAULTS, server_names=[NAME])
+    with pytest.raises(local.ServeRefused) as refusal:
+        local.build_server(ws, preferences, local_settings.settings_path(ws.root), port=0)
+    message = str(refusal.value)
+    assert str(ws.root / server_tls.CERT_NAME) in message and str(ws.root / server_tls.KEY_NAME) in message
+    assert len(calls) == 2 and 'BEGIN' not in message      # made again once, then refused
+
+
+@needs_openssl
+def test_a_self_signed_pair_that_fails_once_is_made_again(served, monkeypatch):
+    real, failed = server_tls.server_context, []
+
+    def once(cert, key):
+        if not failed:
+            failed.append(True)
+            raise ssl.SSLError('synthetic')
+        return real(cert, key)
+
+    monkeypatch.setattr(local.server_tls, 'server_context', once)
+    server, _, ws = served(server_names=[NAME])
+    assert failed and https_get(server, ws).status == 200
+
+
+def test_nothing_listens_when_the_accounts_file_cannot_be_opened(tmp_path, monkeypatch):
+    ws = local.open_workspace(tmp_path / 'ws')
+    bound = []
+    monkeypatch.setattr(local, 'DashboardServer', lambda *a, **k: bound.append(a) or pytest.fail('bound'))
+
+    def broken(path):
+        raise PermissionError(13, 'synthetic')
+
+    monkeypatch.setattr(local, 'AccountStore', broken)
+    with pytest.raises(local.ServeRefused) as refusal:
+        local.build_server(ws, dict(local_settings.DEFAULTS), local_settings.settings_path(ws.root), port=0)
+    assert str(refusal.value) == local.ACCOUNTS_UNREADABLE and not bound
+
+
+# --- final round: the setup command whenever the browser cannot offer setup (M5) -----------
+
+
+def test_a_proxied_loopback_install_with_no_accounts_prints_the_setup_command(tmp_path, fake_endpoints):
+    ws = local.open_workspace(tmp_path / 'ws')
+    preferences = dict(local_settings.DEFAULTS, mode='saved')
+    server, lines = local.build_server(ws, preferences, local_settings.settings_path(ws.root), port=0,
+                                       public_url='https://dashboard.example.test')
+    server.server_close()
+    assert lines == [local.serve_banner(False, server.server_port),
+                     'No accounts yet. Create the first one on this server: python3 -S -m scripts.local '
+                     f'--database {shlex.quote(str(ws.root.resolve()))} account setup']
+    # Plain loopback with no proxy offers setup in the browser: no extra line.
+    server, lines = local.build_server(ws, preferences, local_settings.settings_path(ws.root), port=0)
+    server.server_close()
+    assert lines == [local.serve_banner(False, server.server_port)]

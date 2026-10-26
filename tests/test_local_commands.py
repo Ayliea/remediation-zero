@@ -1268,3 +1268,43 @@ def test_engine_records_are_unchanged_without_an_actor(tmp_path):
         "accepted_sim_ts", "expires_sim_ts", "approved_by_human", "in_kev", "reopened", "status"}
     assert set(docs(workspace, "human_queue")["acceptance-refused-RZ-0002-c001"]) == {
         "finding_id", "cycle", "kind", "reason", "requested_by", "requested_ttl_days", "real_ts", "sim_ts"}
+
+
+# --- final round: the lifecycle never opens the accounts file (I3) -------------------
+
+needs_non_root = pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                                    reason="root reads a mode-000 file")
+
+
+@needs_non_root
+def test_cycle_seed_and_listing_work_with_an_unreadable_accounts_file(ws, capsys, tmp_path):
+    from scripts.local import run_local_cycle
+    path = ws.accounts_path()
+    os.chmod(path, 0)
+    try:
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "findings.json").write_text(json.dumps([{
+            "finding_id": "RZ-0002", "asset_id": "ast-02", "cve_id": "CVE-2021-44228", "status": "open"}]))
+        (corpus / "assets.json").write_text(json.dumps([{
+            "asset_id": "ast-02", "hostname": "db.corp.invalid", "owner_id": "own-02"}]))
+        (corpus / "owners.json").write_text(json.dumps([{
+            "owner_id": "own-02", "email": "second@example.invalid", "name": "Second Owner"}]))
+        code, out, err = _main(capsys, ws, "seed", "--corpus", str(corpus))
+        assert code == 0, err
+        assert "Traceback" not in err
+        code, _, err = _main(capsys, ws, "exception", "list")
+        assert code == 0, err
+        result = run_local_cycle(ws, 1, roles=cross_family(), clock=clock(), environ={})
+        assert result
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0     # never opened, never changed
+    finally:
+        os.chmod(path, 0o600)
+
+
+def test_init_creates_the_accounts_file_private_and_empty_without_sqlite(tmp_path):
+    ws = Workspace(tmp_path / "fresh")
+    ws.init()
+    path = ws.accounts_path()
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert path.stat().st_size == 0          # created, not opened: no tables until serve or account
