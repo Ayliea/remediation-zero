@@ -1,0 +1,592 @@
+# Copyright 2026 Daviyon Daniels
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+"""Accounts: the permission table, invites, resets and the last-owner rule."""
+import hashlib
+import json
+import sqlite3
+import threading
+
+import pytest
+
+from tools import access, totp
+from tools.account_store import AccountStore
+from tools.accounts import AccountRefused, Accounts, InviteView
+from tools.clock import ClockMode, SimClock
+from tools.passwords import recovery_hash
+
+T0 = 1_800_000_000.0          # injected wall time, seconds
+DAY = 86400.0
+PW_OWNER = "violet tangerine harbour"
+PW_TECH = "copper lantern meadow"
+PW_NEW = "quiet orchard sundial"
+
+
+class Now:
+    """A wall clock the test moves by hand."""
+
+    def __init__(self, t: float = T0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def tick(self, seconds: float = 30.0) -> None:
+        self.t += seconds
+
+
+def code_for(secret: str, now: Now) -> str:
+    return totp.code_at(secret, totp.step_for(now()))
+
+
+def wrong_code(secret: str, now: Now) -> str:
+    near = {totp.code_at(secret, totp.step_for(now()) + d) for d in (-1, 0, 1)}
+    return next(c for c in ("000000", "111111", "222222", "333333") if c not in near)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@pytest.fixture
+def now():
+    return Now()
+
+
+@pytest.fixture
+def clock():
+    c = SimClock(ClockMode.SIM, source=lambda: 1_700_000_000.0)
+    c.advance(3 * DAY)   # sim time is fixed and differs from real time
+    return c
+
+
+@pytest.fixture
+def store(tmp_path):
+    return AccountStore(tmp_path / "accounts.sqlite3")
+
+
+@pytest.fixture
+def accounts(store, clock, now):
+    return Accounts(store, clock, now=now)
+
+
+def setup_owner(accounts, now, email="owner@client.example", role="owner"):
+    secret = totp.new_secret()
+    codes = accounts.setup_first(email, role, PW_OWNER, secret, code_for(secret, now))
+    row = accounts.store.account_by_email(email)
+    return row["id"], secret, codes
+
+
+def join(accounts, now, by_id, email, role, password=PW_TECH):
+    token = accounts.invite(by_id, email, role)
+    view = accounts.invite_view(token)
+    now.tick()
+    account_id, codes = accounts.accept_invite(token, password, code_for(view.totp_secret, now))
+    return account_id, view.totp_secret, codes
+
+
+def sessions_of(store, account_id):
+    with sqlite3.connect(store.path) as c:
+        return c.execute("SELECT COUNT(*) FROM sessions WHERE account_id = ?",
+                         (account_id,)).fetchone()[0]
+
+
+def add_session(store, account_id, name):
+    with store.transaction() as cur:
+        cur.execute("INSERT INTO sessions (token_hash, account_id, csrf, created_at, last_seen) "
+                    "VALUES (?,?,?,?,?)", (name, account_id, "c", T0, T0))
+
+
+def refused(code):
+    return pytest.raises(AccountRefused, match=f"^{code}$")
+
+
+# --- the permission table ---------------------------------------------------
+
+SPEC_TABLE = {
+    "owner": {"view", "settings", "upload", "approve", "accept_risk", "manage_accounts",
+              "view_audit"},
+    "tech": {"view", "settings", "upload", "approve"},
+    None: set(),
+}
+
+
+@pytest.mark.parametrize("role", ["owner", "tech", None])
+@pytest.mark.parametrize("action", sorted(access.ACTIONS))
+def test_permission_table_matches_the_spec(role, action):
+    assert access.ACTIONS == SPEC_TABLE["owner"]
+    assert access.allowed(role, action) is (action in SPEC_TABLE[role])
+
+
+def test_unknown_action_is_denied():
+    for role in ("owner", "tech", None):
+        with pytest.raises(KeyError):
+            access.allowed(role, "delete_everything")
+    assert access.allowed("admin", "view") is False   # an unknown role gets nothing
+
+
+# --- first account ----------------------------------------------------------
+
+def test_first_account_only_once(accounts, store, now):
+    secret = totp.new_secret()
+    with refused("bad_code"):
+        accounts.setup_first("owner@client.example", "owner", PW_OWNER, secret,
+                             wrong_code(secret, now))
+    assert store.count_accounts() == 0
+    with refused("password"):
+        accounts.setup_first("owner@client.example", "owner", "short", secret,
+                             code_for(secret, now))
+    assert store.count_accounts() == 0
+
+    owner_id, _, codes = setup_owner(accounts, now, email="  Owner@Client.Example ")
+    row = store.account_by_id(owner_id)
+    assert row["email"] == "owner@client.example"
+    assert (row["role"], row["status"]) == ("owner", "active")
+    assert len(codes) == 10 and len(set(codes)) == 10
+    with sqlite3.connect(store.path) as c:
+        stored = {r[0] for r in c.execute("SELECT code_hash FROM recovery_codes")}
+    assert stored == {recovery_hash(code) for code in codes}
+
+    second = totp.new_secret()
+    with refused("accounts_exist"):
+        accounts.setup_first("tech@msp.example", "tech", PW_TECH, second, code_for(second, now))
+    assert store.count_accounts() == 1
+
+
+# --- invites ----------------------------------------------------------------
+
+def test_tech_may_invite_only_an_owner_and_only_before_one_exists(accounts, store, now):
+    assert access.may_invite("owner", "owner", True) and access.may_invite("owner", "tech", True)
+    assert access.may_invite("owner", "tech", False)
+    assert access.may_invite("tech", "owner", False)
+    assert not access.may_invite("tech", "owner", True)
+    assert not access.may_invite("tech", "tech", False)
+    assert not access.may_invite(None, "owner", False)
+
+    tech_id, _, _ = setup_owner(accounts, now, email="tech@msp.example", role="tech")
+    with refused("not_allowed"):
+        accounts.invite(tech_id, "helper@msp.example", "tech")
+    token = accounts.invite(tech_id, "owner@client.example", "owner")
+    assert accounts.invite_view(token).role == "owner"
+    view = accounts.invite_view(token)
+    now.tick()
+    owner_id, _ = accounts.accept_invite(token, PW_OWNER, code_for(view.totp_secret, now))
+    assert accounts.owner_exists()
+    with refused("not_allowed"):
+        accounts.invite(tech_id, "second-owner@client.example", "owner")
+    # the owner may invite either role
+    accounts.invite(owner_id, "helper@msp.example", "tech")
+    accounts.invite(owner_id, "partner@client.example", "owner")
+    with refused("email_taken"):
+        accounts.invite(owner_id, "HELPER@msp.example", "tech")
+    with pytest.raises(ValueError):
+        accounts.invite(owner_id, "not an email", "tech")
+    with pytest.raises(ValueError):
+        accounts.invite(owner_id, "x@client.example", "admin")
+
+
+def test_pending_invite_is_not_an_owner(accounts, store, now):
+    tech_id, _, _ = setup_owner(accounts, now, email="tech@msp.example", role="tech")
+    token = accounts.invite(tech_id, "owner@client.example", "owner")
+    assert store.account_by_email("owner@client.example")["status"] == "invited"
+    assert not accounts.owner_exists() and store.active_owner_count() == 0
+    accounts.invite_view(token)   # viewing is not joining
+    assert not accounts.owner_exists()
+    # and while no owner exists, the tech may still invite the owner again
+    with refused("email_taken"):
+        accounts.invite(tech_id, "owner@client.example", "owner")
+    accounts.invite(tech_id, "other-owner@client.example", "owner")
+
+
+def test_the_last_owner_cannot_be_removed_or_demoted(accounts, store, now, tmp_path, clock):
+    a_id, _, _ = setup_owner(accounts, now)
+    b_id, _, _ = join(accounts, now, a_id, "partner@client.example", "owner")
+    tech_id, _, _ = join(accounts, now, a_id, "tech@msp.example", "tech")
+
+    # two owners each try to remove the other at the same moment: one wins
+    barrier = threading.Barrier(2)
+    results = {}
+
+    def remove(by, whom):
+        acc = Accounts(AccountStore(tmp_path / "accounts.sqlite3"), clock, now=now)
+        barrier.wait()
+        try:
+            acc.remove(by, whom)
+            results[by] = "ok"
+        except AccountRefused as exc:
+            results[by] = exc.code
+
+    threads = [threading.Thread(target=remove, args=(a_id, b_id)),
+               threading.Thread(target=remove, args=(b_id, a_id))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results.values()) in (["last_owner", "ok"], ["not_allowed", "ok"])
+    assert store.active_owner_count() == 1
+    survivor = a_id if results[a_id] == "ok" else b_id
+
+    with refused("last_owner"):
+        accounts.remove(survivor, survivor)
+    with refused("last_owner"):
+        accounts.set_role(survivor, survivor, "tech")
+    with refused("not_allowed"):
+        accounts.remove(tech_id, survivor)
+    with refused("not_allowed"):
+        accounts.set_role(tech_id, survivor, "tech")
+    assert store.account_by_id(survivor)["role"] == "owner"
+    assert store.active_owner_count() == 1
+    # promoting someone else makes the old last owner removable
+    accounts.set_role(survivor, tech_id, "owner")
+    accounts.remove(tech_id, survivor)
+    assert store.account_by_id(survivor)["status"] == "removed"
+
+
+def test_the_last_owner_cannot_demote_themself(accounts, store, now):
+    a_id, _, _ = setup_owner(accounts, now)
+    with refused("last_owner"):
+        accounts.set_role(a_id, a_id, "tech")
+    assert store.account_by_id(a_id)["role"] == "owner"
+    b_id, _, _ = join(accounts, now, a_id, "partner@client.example", "owner")
+    accounts.set_role(a_id, a_id, "tech")       # allowed once another owner exists
+    assert store.account_by_id(a_id)["role"] == "tech"
+    with refused("last_owner"):
+        accounts.set_role(b_id, b_id, "tech")
+
+
+def test_techs_cannot_reset_or_remove_anyone(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    t1, _, _ = join(accounts, now, owner_id, "tech1@msp.example", "tech")
+    t2, _, _ = join(accounts, now, owner_id, "tech2@msp.example", "tech")
+    for target in (owner_id, t2):
+        for kind in ("reset_password", "reset_mfa"):
+            with refused("not_allowed"):
+                accounts.reset_link(t1, target, kind)
+        with refused("not_allowed"):
+            accounts.remove(t1, target)
+        with refused("not_allowed"):
+            accounts.set_role(t1, target, "owner")
+    with refused("not_allowed"):
+        accounts.set_role(t1, t1, "owner")
+    with sqlite3.connect(store.path) as c:
+        assert c.execute("SELECT COUNT(*) FROM invites WHERE kind != 'join'").fetchone()[0] == 0
+    assert {store.account_by_id(i)["status"] for i in (owner_id, t1, t2)} == {"active"}
+    # an owner can
+    accounts.reset_link(owner_id, t2, "reset_password")
+    accounts.remove(owner_id, t2)
+    with refused("no_such_account"):
+        accounts.reset_link(owner_id, t2, "reset_mfa")
+
+
+def test_owner_cannot_reset_themself_by_link(accounts, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    for kind in ("reset_password", "reset_mfa"):
+        with refused("not_allowed"):
+            accounts.reset_link(owner_id, owner_id, kind)
+    with pytest.raises(ValueError):
+        accounts.reset_link(owner_id, "someone", "join")
+
+
+def test_invite_expires_after_7_days(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    token = accounts.invite(owner_id, "tech@msp.example", "tech")
+    view = accounts.invite_view(token)
+    now.t = T0 + 7 * DAY - 1
+    assert accounts.invite_view(token) == view          # same secret, still valid
+    now.t = T0 + 7 * DAY
+    assert accounts.invite_view(token) is None
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+    assert store.account_by_email("tech@msp.example")["status"] == "invited"
+    # an expired invite does not block a fresh one for the same email
+    fresh = accounts.invite(owner_id, "tech@msp.example", "tech")
+    assert accounts.invite_view(fresh) is not None
+    # without an injected `now`, expiry runs on wall time (real_ts), never sim time
+    default = Accounts(store, accounts.clock)
+    later = default.invite(owner_id, "later@msp.example", "tech")
+    with sqlite3.connect(store.path) as c:
+        expires = c.execute("SELECT expires_at FROM invites WHERE token_hash = ?",
+                            (token_hash(later),)).fetchone()[0]
+    assert expires == accounts.clock.now().real_ts + 7 * DAY
+
+
+def test_revoked_invite_is_refused(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    token = accounts.invite(owner_id, "tech@msp.example", "tech")
+    view = accounts.invite_view(token)
+    accounts.revoke_invite(owner_id, token_hash(token))
+    assert accounts.invite_view(token) is None
+    now.tick()
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+    with refused("invalid_link"):
+        accounts.revoke_invite(owner_id, token_hash(token))
+    assert store.account_by_email("tech@msp.example")["status"] == "invited"
+
+
+def test_a_token_or_code_is_spent_exactly_once_under_concurrency(tmp_path, clock, now):
+    path = tmp_path / "accounts.sqlite3"
+    accounts = Accounts(AccountStore(path), clock, now=now)
+    owner_id, _, _ = setup_owner(accounts, now)
+    token = accounts.invite(owner_id, "tech@msp.example", "tech")
+    view = accounts.invite_view(token)
+    now.tick()
+    code = code_for(view.totp_secret, now)
+
+    # a failed attempt (weak password, wrong code) does not burn the link
+    with refused("password"):
+        accounts.accept_invite(token, "short", code)
+    with refused("bad_code"):
+        accounts.accept_invite(token, PW_TECH, "abcdef")
+    assert accounts.invite_view(token) is not None
+
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def accept():
+        mine = Accounts(AccountStore(path), clock, now=now)
+        barrier.wait()
+        try:
+            outcomes.append(mine.accept_invite(token, PW_TECH, code)[0])
+        except AccountRefused as exc:
+            outcomes.append(exc.code)
+
+    threads = [threading.Thread(target=accept) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    tech_id = AccountStore(path).account_by_email("tech@msp.example")["id"]
+    assert sorted(outcomes) == sorted([tech_id, "invalid_link"])
+    assert AccountStore(path).account_by_id(tech_id)["status"] == "active"
+
+    # a recovery code, raced, is also spent once
+    with sqlite3.connect(path) as c:
+        hashes = [r[0] for r in c.execute("SELECT code_hash FROM recovery_codes "
+                                          "WHERE account_id = ?", (tech_id,))]
+    assert len(hashes) == 10
+    barrier2 = threading.Barrier(2)
+    spent = []
+
+    def spend():
+        s = AccountStore(path)
+        barrier2.wait()
+        spent.append(s.spend_recovery_code(tech_id, hashes[0]))
+
+    threads = [threading.Thread(target=spend) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(spent) == [False, True]
+
+
+def test_reset_password_needs_the_current_code(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(owner_id, tech_id, "reset_password")
+    view = accounts.invite_view(token)
+    assert view == InviteView("reset_password", "tech@msp.example", "tech", None)
+    with refused("bad_code"):
+        accounts.accept_invite(token, PW_NEW, None)
+    # the code already used to join is not accepted again
+    with refused("bad_code"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    now.tick()
+    with refused("password"):
+        accounts.accept_invite(token, "short", None, current_code=code_for(secret, now))
+    account_id, codes = accounts.accept_invite(token, PW_NEW, None,
+                                               current_code=code_for(secret, now))
+    assert (account_id, codes) == (tech_id, None)
+    from tools.passwords import verify
+    row = store.account_by_id(tech_id)
+    assert verify(PW_NEW, row["password_hash"]) and row["totp_secret"] == secret
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+
+
+def test_reset_mfa_needs_the_current_password(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, old_secret, old_codes = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(owner_id, tech_id, "reset_mfa")
+    view = accounts.invite_view(token)
+    assert view.kind == "reset_mfa" and view.totp_secret and view.totp_secret != old_secret
+    now.tick()
+    new_code = code_for(view.totp_secret, now)
+    with refused("password"):
+        accounts.accept_invite(token, None, new_code)
+    with refused("password"):
+        accounts.accept_invite(token, None, new_code, current_password="wrong password here")
+    with refused("bad_code"):
+        accounts.accept_invite(token, None, code_for(old_secret, now), current_password=PW_TECH)
+    account_id, codes = accounts.accept_invite(token, None, new_code, current_password=PW_TECH)
+    assert account_id == tech_id and len(codes) == 10 and not set(codes) & set(old_codes)
+    row = store.account_by_id(tech_id)
+    assert row["totp_secret"] == view.totp_secret
+    with sqlite3.connect(store.path) as c:
+        stored = {r[0] for r in c.execute("SELECT code_hash FROM recovery_codes "
+                                          "WHERE account_id = ?", (tech_id,))}
+    assert stored == {recovery_hash(code) for code in codes}
+
+
+def test_recover_owner_refuses_an_unknown_email_and_promotes_a_tech_only_with_promote(
+        accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, _, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    with refused("no_such_account"):
+        accounts.recover_owner("nobody@client.example")
+    assert store.count_accounts() == 2      # it never creates an account
+
+    with refused("not_allowed"):
+        accounts.recover_owner("tech@msp.example")
+    assert store.account_by_id(tech_id)["role"] == "tech"
+    assert store.account_by_id(tech_id)["password_hash"] is not None
+
+    token = accounts.recover_owner("TECH@msp.example", promote=True)
+    row = store.account_by_id(tech_id)
+    assert (row["role"], row["status"]) == ("owner", "active")
+    assert row["password_hash"] is None and row["totp_secret"] is None
+    view = accounts.invite_view(token)
+    assert view.kind == "recover" and view.role == "owner" and view.totp_secret
+    now.tick()
+    account_id, codes = accounts.accept_invite(token, PW_NEW, code_for(view.totp_secret, now))
+    assert account_id == tech_id and len(codes) == 10
+
+    # an active owner: password and MFA cleared, a link to set new ones
+    token = accounts.recover_owner("owner@client.example")
+    assert store.account_by_id(owner_id)["password_hash"] is None
+    assert accounts.invite_view(token).kind == "recover"
+    ev = store.events(limit=1)[0]
+    assert (ev["event"], ev["actor_id"], ev["via"]) == ("recover_owner", None, "command_line")
+
+    # a removed account is not recovered
+    accounts.remove(tech_id, owner_id)
+    with refused("no_such_account"):
+        accounts.recover_owner("owner@client.example")
+
+
+def test_resets_and_removal_end_every_session(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    other_id, _, _ = join(accounts, now, owner_id, "other@msp.example", "tech")
+    add_session(store, owner_id, "s-owner")
+    add_session(store, other_id, "s-other")
+
+    def two_sessions():
+        add_session(store, tech_id, f"s1-{now()}")
+        add_session(store, tech_id, f"s2-{now()}")
+        assert sessions_of(store, tech_id) == 2
+
+    two_sessions()
+    accounts.set_role(owner_id, tech_id, "owner")
+    assert sessions_of(store, tech_id) == 0
+
+    two_sessions()
+    token = accounts.reset_link(owner_id, tech_id, "reset_password")
+    assert sessions_of(store, tech_id) == 2           # making the link changes nothing yet
+    now.tick()
+    accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    assert sessions_of(store, tech_id) == 0
+
+    two_sessions()
+    token = accounts.reset_link(owner_id, tech_id, "reset_mfa")
+    view = accounts.invite_view(token)
+    now.tick()
+    accounts.accept_invite(token, None, code_for(view.totp_secret, now), current_password=PW_NEW)
+    assert sessions_of(store, tech_id) == 0
+
+    two_sessions()
+    accounts.recover_owner("tech@msp.example")
+    assert sessions_of(store, tech_id) == 0
+
+    two_sessions()
+    accounts.remove(owner_id, tech_id)
+    assert sessions_of(store, tech_id) == 0
+    # nobody else's sessions were touched
+    assert sessions_of(store, owner_id) == 1 and sessions_of(store, other_id) == 1
+
+
+def test_every_mutation_writes_one_event_without_secrets(accounts, store, now, clock, caplog):
+    caplog.set_level("INFO", logger="remediation_zero.accounts")
+    secrets_seen = []
+
+    def count():
+        return len(store.events(limit=10_000))
+
+    def step(expected_event, fn):
+        before = count()
+        result = fn()
+        assert count() == before + 1, expected_event
+        ev = store.events(limit=1)[0]
+        assert ev["event"] == expected_event
+        stamp = clock.now()
+        assert (ev["real_ts"], ev["sim_ts"]) == (stamp.real_ts, stamp.sim_ts)
+        return result
+
+    secret = totp.new_secret()
+    secrets_seen += [secret, PW_OWNER]
+    codes = step("setup", lambda: accounts.setup_first(
+        "owner@client.example", "owner", PW_OWNER, secret, code_for(secret, now)))
+    secrets_seen += codes
+    owner_id = store.account_by_email("owner@client.example")["id"]
+
+    token = step("invite_created", lambda: accounts.invite(owner_id, "tech@msp.example", "tech"))
+    view = accounts.invite_view(token)
+    secrets_seen += [token, token_hash(token), view.totp_secret, PW_TECH]
+    now.tick()
+    tech_id, codes = step("invite_accepted", lambda: accounts.accept_invite(
+        token, PW_TECH, code_for(view.totp_secret, now)))
+    secrets_seen += codes
+    tech_secret = view.totp_secret
+
+    spare = step("invite_created", lambda: accounts.invite(owner_id, "spare@msp.example", "tech"))
+    secrets_seen += [spare, token_hash(spare)]
+    step("invite_revoked", lambda: accounts.revoke_invite(owner_id, token_hash(spare)))
+
+    link = step("reset_link_created",
+                lambda: accounts.reset_link(owner_id, tech_id, "reset_password"))
+    secrets_seen += [link, token_hash(link), PW_NEW]
+    now.tick()
+    step("password_reset", lambda: accounts.accept_invite(
+        link, PW_NEW, None, current_code=code_for(tech_secret, now)))
+
+    link = step("reset_link_created", lambda: accounts.reset_link(owner_id, tech_id, "reset_mfa"))
+    view = accounts.invite_view(link)
+    secrets_seen += [link, token_hash(link), view.totp_secret]
+    now.tick()
+    _, codes = step("mfa_reset", lambda: accounts.accept_invite(
+        link, None, code_for(view.totp_secret, now), current_password=PW_NEW))
+    secrets_seen += codes
+
+    step("role_changed", lambda: accounts.set_role(owner_id, tech_id, "owner"))
+    link = step("recover_owner", lambda: accounts.recover_owner("tech@msp.example"))
+    secrets_seen += [link, token_hash(link)]
+    step("removed", lambda: accounts.remove(owner_id, tech_id))
+
+    # refusals write nothing
+    before = count()
+    with refused("last_owner"):
+        accounts.remove(owner_id, owner_id)
+    with refused("not_allowed"):
+        accounts.reset_link(owner_id, owner_id, "reset_mfa")
+    assert count() == before
+
+    events = store.events(limit=10_000)
+    assert {e["event"] for e in events} == {
+        "setup", "invite_created", "invite_accepted", "invite_revoked", "reset_link_created",
+        "password_reset", "mfa_reset", "role_changed", "removed", "recover_owner"}
+    role_change = next(e for e in events if e["event"] == "role_changed")
+    assert json.loads(role_change["detail"]) == {"from": "tech", "to": "owner"}
+    assert (role_change["actor_id"], role_change["subject_id"]) == (owner_id, tech_id)
+
+    with sqlite3.connect(store.path) as c:
+        dump = json.dumps([list(r) for r in c.execute("SELECT * FROM account_events")])
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert len([r for r in caplog.records if r.name == "remediation_zero.accounts"]) == len(events)
+    for line in logs.splitlines():
+        json.loads(line)               # structured
+    for value in secrets_seen:
+        assert value not in dump, "secret in account_events"
+        assert value not in logs, "secret in the log"
+    for email in ("owner@client.example", "tech@msp.example", "spare@msp.example"):
+        assert email not in dump and email not in logs

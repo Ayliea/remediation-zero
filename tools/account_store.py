@@ -138,17 +138,26 @@ class AccountStore:
 
     def insert_event(self, event: str, actor_id: Optional[str], subject_id: Optional[str],
                      via: Optional[str], source: Optional[str],
-                     detail: Optional[dict[str, Any]], *, real_ts: float, sim_ts: float) -> None:
-        """Append an audit row. `detail` keys are checked before anything is written."""
+                     detail: Optional[dict[str, Any]], *, real_ts: float, sim_ts: float,
+                     cur: Optional[sqlite3.Cursor] = None) -> None:
+        """Append an audit row. `detail` keys are checked before anything is written.
+
+        With `cur` (a cursor from `transaction()`), the row is written in that
+        transaction, so it commits or rolls back with the change it records.
+        """
         for key in (detail or {}):
             low = str(key).lower()
             if key not in ALLOWED_DETAIL_KEYS or any(w in low for w in _SECRET_WORDS):
                 raise ValueError(f"event detail key not allowed: {key!r}")
         text = json.dumps(detail, sort_keys=True) if detail else None
-        with self.transaction() as cur:
-            cur.execute("INSERT INTO account_events (event, actor_id, subject_id, via, source, "
-                        "detail, real_ts, sim_ts) VALUES (?,?,?,?,?,?,?,?)",
-                        (event, actor_id, subject_id, via, source, text, real_ts, sim_ts))
+        args = (event, actor_id, subject_id, via, source, text, real_ts, sim_ts)
+        sql = ("INSERT INTO account_events (event, actor_id, subject_id, via, source, "
+               "detail, real_ts, sim_ts) VALUES (?,?,?,?,?,?,?,?)")
+        if cur is not None:
+            cur.execute(sql, args)
+            return
+        with self.transaction() as own:
+            own.execute(sql, args)
 
     def events(self, limit: int = 200) -> list[sqlite3.Row]:
         conn = self._connect()
@@ -158,15 +167,26 @@ class AccountStore:
         finally:
             conn.close()
 
-    def spend_invite(self, token_hash: str, now: float) -> Optional[sqlite3.Row]:
-        """Mark an unused, unrevoked, unexpired invite used and return it; else None."""
-        with self.transaction() as cur:
-            cur.execute("UPDATE invites SET used = 1 WHERE token_hash = ? AND used = 0 "
-                        "AND revoked = 0 AND expires_at > ?", (token_hash, now))
-            if cur.rowcount != 1:
-                return None
-            return cur.execute("SELECT * FROM invites WHERE token_hash = ?",
-                               (token_hash,)).fetchone()
+    def spend_invite(self, token_hash: str, now: float,
+                     cur: Optional[sqlite3.Cursor] = None) -> Optional[sqlite3.Row]:
+        """Mark an unused, unrevoked, unexpired invite used and return it; else None.
+
+        With `cur`, the spend happens inside the caller's transaction, so a
+        later failure in that transaction rolls it back and the link survives.
+        """
+        if cur is not None:
+            return self._spend_invite(cur, token_hash, now)
+        with self.transaction() as own:
+            return self._spend_invite(own, token_hash, now)
+
+    @staticmethod
+    def _spend_invite(cur: sqlite3.Cursor, token_hash: str, now: float) -> Optional[sqlite3.Row]:
+        cur.execute("UPDATE invites SET used = 1 WHERE token_hash = ? AND used = 0 "
+                    "AND revoked = 0 AND expires_at > ?", (token_hash, now))
+        if cur.rowcount != 1:
+            return None
+        return cur.execute("SELECT * FROM invites WHERE token_hash = ?",
+                           (token_hash,)).fetchone()
 
     def spend_recovery_code(self, account_id: str, code_hash: str) -> bool:
         with self.transaction() as cur:
