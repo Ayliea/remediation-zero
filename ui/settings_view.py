@@ -9,6 +9,9 @@ from tools.models import FORMATS
 
 SECTIONS = {'model': 'Model connection', 'storage': 'Data & storage',
             'scanner': 'Scanner', 'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
+#: Shown on the Scanner page and by `greenbone tasks` when the account lists nothing.
+NO_VISIBLE_TASKS = ('This account can see no tasks. In Greenbone, add it as an observer on each task '
+                    'to import, or give its role access to them.')
 
 
 def render_settings(values, section, token, *, message='', keys=None, overrides=False, scanner=None):
@@ -80,7 +83,7 @@ def _scanner_body(cfg, probe, form, token, e):
         ticks = '<fieldset class="role-block"><legend>Tasks on this Greenbone account</legend>'
         ticks += ''.join(
             f'<label class="check"><input name="task_ids" type="checkbox" value="{e(t["task_id"])}" {"checked" if t["task_id"] in chosen else ""}> {e(t["name"])} <code>{e(t["task_id"])}</code></label>'
-            for t in shown) or '<p>This account has no tasks.</p>'
+            for t in shown) or f'<p>{e(NO_VISIBLE_TASKS)}</p>'
         if len(tasks) > len(shown):
             ticks += f'<p>Showing {len(shown)} of {len(tasks)} tasks. Chosen tasks are always shown; type any other ID below.</p>'
         ticks += ''.join(

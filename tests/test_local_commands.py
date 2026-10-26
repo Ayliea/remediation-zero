@@ -872,7 +872,7 @@ def test_serve_reads_through_the_dashboard_stage(ws, monkeypatch):
         return real_handler(store, *args, **kwargs)
 
     monkeypatch.setattr(Workspace, "docs_for", recording)
-    monkeypatch.setattr(local, "HTTPServer", FakeServer)
+    monkeypatch.setattr(local, "DashboardServer", FakeServer)
     monkeypatch.setattr(local, "handler", capture)
     monkeypatch.setattr("sys.argv", ["local", "--database", str(ws.root), "serve", "--port", "18081"])
     local.main()

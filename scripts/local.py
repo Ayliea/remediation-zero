@@ -21,7 +21,8 @@ import secrets
 import shlex
 import sys
 import unicodedata
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -50,7 +51,7 @@ from tools.local_memory import LocalMemory
 from tools.model_check import check_models
 from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
 from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
-from ui.settings_view import SECTIONS, render_settings
+from ui.settings_view import NO_VISIBLE_TASKS, SECTIONS, render_settings
 from worker.envelope import cycle_for_day
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -267,6 +268,27 @@ class _View:
     def snapshot(self):
         return snapshot(self._docs)
 
+    def records(self):
+        return records_kind(self._docs)
+
+
+def records_kind(docs):
+    """'synthetic' for a workspace holding only seeded demo findings; 'saved' otherwise,
+    including an empty one, which is waiting for its first Greenbone import."""
+    sources = [(snap.to_dict() or {}).get('source') for snap in docs.collection('findings').stream()]
+    return 'synthetic' if sources and 'greenbone' not in sources else 'saved'
+
+
+#: Seconds a connection may sit before finishing its request. Browsers open spare
+#: connections they may never use; this closes them instead of holding a thread.
+IDLE_TIMEOUT = 15
+
+
+class DashboardServer(ThreadingHTTPServer):
+    """One thread per connection, so an idle connection holds only its own thread.
+    The handler still runs requests one at a time."""
+    daemon_threads = True
+
 
 def scanner_probe(settings, *, test=False):
     """What the Scanner section learns from Greenbone, from the saved settings. Only the
@@ -352,6 +374,8 @@ def greenbone_tasks(preferences, environ):
     except Exception as error:  # the class only: a message can carry server text
         print(f'Could not list tasks ({type(error).__name__}).', file=sys.stderr)
         return 1
+    if not tasks:
+        print(NO_VISIBLE_TASKS, file=sys.stderr)  # stdout stays one task per line
     for task in tasks:
         print(f'{terminal_safe(task["task_id"])}  {terminal_safe(task["name"])}')
     return 0
@@ -672,13 +696,28 @@ def _read_upload_form(content_type, body):
     return {'token': found['token'], 'report': found['report'], 'add_task': 'add_task' in found}
 
 
-def handler(store, demo, config_path=None, approve_command=None, upload=None):
+def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None):
+    # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     token = secrets.token_urlsafe(32)
+    # Connections are threaded; requests are not. The scanner probe's deadline and the
+    # settings read-modify-write both assume one request at a time.
+    serial = threading.Lock()
+
     class DashboardHandler(BaseHTTPRequestHandler):
+        timeout = IDLE_TIMEOUT
+
         def log_message(self, *args):
             pass  # Avoid recording URL parameters or request headers.
 
         def do_GET(self):
+            with serial:
+                self._get()
+
+        def do_POST(self):
+            with serial:
+                self._post()
+
+        def _get(self):
             if self.headers.get('Host') not in {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}:
                 self.send_error(403)
                 return
@@ -701,7 +740,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                               approve_command=None if demo else approve_command,
                               upload_token=token if upload and not demo else None,
                               upload_code=parse_qs(parsed.query).get('upload', [None])[0],
-                              chosen_tasks=chosen)
+                              chosen_tasks=chosen, records=records() if records and not demo else 'synthetic')
                 status = 200
             except Exception:
                 body, status = render({}, view, unavailable=True, settings_html="" if config_path else None), 503
@@ -720,7 +759,9 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Security-Policy', "default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Referrer-Policy', 'no-referrer')
+            # Not no-referrer: under it a browser sends "Origin: null" on this page's own form
+            # posts, which do_POST refuses. same-origin still sends nothing to other sites.
+            self.send_header('Referrer-Policy', 'same-origin')
             self.end_headers()
             self.wfile.write(encoded)
         def _upload(self):
@@ -766,7 +807,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
             self.send_header('Content-Length', '0')
             self.end_headers()
 
-        def do_POST(self):
+        def _post(self):
             host = self.headers.get('Host')
             allowed = {f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}'}
             if (not config_path or host not in allowed or self.path not in ('/settings', '/upload')
@@ -801,7 +842,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None):
                     # Tests the saved settings. Never saves, so nothing below runs.
                     self._send_html(render(demo_snapshot() if demo else store.snapshot(), 'settings', demo=demo,
                                            settings_html=self._settings_html(values, 'scanner', scanner=scanner_probe(values, test=True)),
-                                           approve_command=None if demo else approve_command), 200)
+                                           approve_command=None if demo else approve_command,
+                                           records=records() if records and not demo else 'synthetic'), 200)
                     return
                 if section == 'scanner':
                     # A credential is never accepted, whatever the field is called or how it is cased.
@@ -1031,7 +1073,9 @@ def main():
             docs = ws.docs_for('dashboard')  # reads only: no collection is writable
             command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
             upload = None if args.demo else page_upload(ws, config_path, os.environ)
-            with HTTPServer(('127.0.0.1', args.port), handler(_View(docs), args.demo, config_path, command, upload)) as server:
+            view = _View(docs)
+            with DashboardServer(('127.0.0.1', args.port),
+                                 handler(view, args.demo, config_path, command, upload, records=view.records)) as server:
                 print(serve_banner(args.demo, server.server_port), flush=True)
                 server.serve_forever()
         else:

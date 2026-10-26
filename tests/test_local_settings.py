@@ -910,7 +910,8 @@ def test_an_account_with_no_tasks_says_so(gmp):
     config.save(path, with_scanner(socket_path='/run/gvmd/gvmd.sock'))
     FakeClient.tasks = []
     body = scanner_test_page(request)[1]
-    assert 'This account has no tasks.' in body and 'Tasks listed: yes (0)' in body
+    assert 'This account can see no tasks.' in body and 'add it as an observer' in body
+    assert 'Tasks listed: yes (0)' in body
 
 
 def test_a_trickling_gvmd_cannot_hold_the_settings_page(app, tmp_path_factory, fake_endpoints, monkeypatch):

@@ -161,6 +161,19 @@ def test_greenbone_tasks_lists_from_a_fake_server(gws, gvmd, monkeypatch, capsys
     assert [ET.fromstring(r).tag for r in server.requests] == ["authenticate", "get_tasks"]
 
 
+def test_greenbone_tasks_with_none_visible_says_why_on_stderr(gws, monkeypatch, capsys):
+    # A new read-only account sees nothing until it is an observer on a task; an empty,
+    # silent success read like a broken connection during the first real-gvmd check.
+    configure(gws)
+    credentials(monkeypatch)
+    fake_client(monkeypatch, tasks=[])
+    assert run(monkeypatch, gws, "greenbone", "tasks") == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""  # stdout stays one task per line, for scripts
+    assert "This account can see no tasks." in captured.err
+    assert "add it as an observer" in captured.err
+
+
 def test_task_names_are_cleaned_before_they_reach_the_terminal(gws, monkeypatch, capsys):
     configure(gws)
     credentials(monkeypatch)

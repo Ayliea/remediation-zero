@@ -129,8 +129,10 @@ def main():
             logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')
             start_interval_runner(database, minutes)
             print(f'Press Ctrl+C here to stop. A cycle runs every {minutes} minutes and calls your configured models.', flush=True)
-        else:
+        elif '--demo' in command:
             print('Synthetic preview only. Press Ctrl+C here to stop. No model calls are made by this launcher.', flush=True)
+        else:
+            print('Press Ctrl+C here to stop. No cycle is scheduled, so this launcher makes no model calls.', flush=True)
         if not args.no_browser and preferences['open_browser']:
             webbrowser.open(ready.split()[-1])
         return_code = process.wait()

@@ -323,7 +323,9 @@ def upload_form(token, base="/"):
 
 def render(data, view="overview", demo=False, unavailable=False, settings_html=None,
            base="/", logo_url=None, approve_command=None, upload_token=None, upload_code=None,
-           chosen_tasks=None):
+           chosen_tasks=None, records="synthetic"):
+    # records: "saved" when the records are the install's own (imported or awaiting
+    # their first import), so the banner does not call them synthetic.
     # base: where this page is mounted. logo_url: a served, cacheable logo; the
     # local server has no static route, so it falls back to an inline data URI.
     # approve_command: the local edition's command prefix for approving a
@@ -332,8 +334,12 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
     rows = recent_decisions(data)
     views = dict(VIEWS, settings="Settings") if settings_html is not None else VIEWS
     nav = "".join(f'<a href="{base}?view={key}" aria-current="{"page" if key == view else "false"}">{label}</a>' for key, label in views.items())
+    saved = records == "saved" and not demo
     notice = ("Demo · Illustrative data only. No infrastructure is connected." if demo else
+              "Your saved records · Read-only. Nothing on this page changes your infrastructure." if saved else
               "Synthetic environment · Read-only. These records do not assess your business infrastructure.")
+    footer = ("Read-only · Infrastructure changes disabled" if saved else
+              "Synthetic preview · Infrastructure changes disabled")
     if unavailable:
         body = f'<section class="card"><h2>We couldn’t load your records</h2><p>Security status is unknown. Refresh to try again. An unavailable check does not mean there are no issues.</p><a href="{base}">Try again</a></section>'
     elif view == "settings":
@@ -377,4 +383,4 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
     title = 'Your next security step' if view == 'overview' else views[view]
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{views[view]} · Remediation Zero</title><style>
-{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="{logo_url or "data:image/png;base64," + logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div><h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · Synthetic preview · Infrastructure changes disabled · Model connection optional.</footer></main></div></body></html>'''
+{theme}\n</style></head><body><div class="shell"><aside><div class="brand"><img src="{logo_url or "data:image/png;base64," + logo}" alt="Remediation Zero by Ayliea"></div><nav aria-label="Main navigation">{nav}</nav></aside><main><div class="banner">{notice}</div><h1>{title}</h1><p class="intro">Let’s make the next step clear.</p>{body}<footer>Remediation Zero by Ayliea · {footer} · Model connection optional.</footer></main></div></body></html>'''
