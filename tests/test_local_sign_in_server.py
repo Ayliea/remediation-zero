@@ -1171,3 +1171,19 @@ def test_the_audit_trail_shows_where_each_event_came_from(start, signed_in):
     newest, locked = table_rows(events_section)[:2]
     assert '<td>—</td>' in newest
     assert '&lt;i&gt;192.0.2.99&lt;/i&gt;' in locked and '<i>192.0.2.99' not in body
+
+
+# --- final round: copy that says what is now true (M1, M6) --------------------------------
+
+def test_the_settings_page_describes_sign_in_as_it_is():
+    from ui.settings_view import render_settings
+    body = render_settings(dict(local_settings.DEFAULTS), 'application', 'form-token',
+                           keys={}, overrides=False, scanner=None)
+    assert 'No sign-in is provided yet' not in body and 'Do not expose this preview' not in body
+    assert 'asks for sign-in' in body and 'authenticator' in body
+
+
+def test_the_confirm_page_is_neutral_about_what_is_being_changed():
+    from ui import account_views
+    body = account_views.confirm_page('pre-value', '/')
+    assert 'before this change' in body and 'before changing settings' not in body

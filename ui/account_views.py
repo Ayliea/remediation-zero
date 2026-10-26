@@ -120,7 +120,7 @@ def invalid_link_page():
 
 
 def confirm_page(pre, next_path, message=''):
-    body = ('<p>Confirm it is you before changing settings. Enter your password, or a new code from your authenticator app.</p>'
+    body = ('<p>Confirm it is you before this change. Enter your password, or a new code from your authenticator app.</p>'
             f'{_message(message)}<form class="card account-card" method="post">{_pre(pre)}'
             '<label>Password <input name="password" type="password" autocomplete="current-password" maxlength="1024"></label>'
             '<label>Or a code from your authenticator app <input name="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6"></label>'

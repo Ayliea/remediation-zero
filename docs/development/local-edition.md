@@ -68,14 +68,14 @@ python3 -S -m scripts.local greenbone test
 python3 -S -m scripts.local greenbone pull [--cycle N]
 python3 -S -m scripts.local greenbone upload FILE [--add-task] [--cycle N]
 python3 -S -m scripts.local account setup             # the first account, on this server
-python3 -S -m scripts.local account invite --email E --role owner|tech --as EMAIL
+python3 -S -m scripts.local account invite --email E --role owner|tech --as EMAIL [--public-url URL]
 python3 -S -m scripts.local account list
 python3 -S -m scripts.local account set-role EMAIL owner|tech --as EMAIL
 python3 -S -m scripts.local account remove EMAIL --as EMAIL
-python3 -S -m scripts.local account reset-password EMAIL --as EMAIL
-python3 -S -m scripts.local account reset-mfa EMAIL --as EMAIL
+python3 -S -m scripts.local account reset-password EMAIL --as EMAIL [--public-url URL]
+python3 -S -m scripts.local account reset-mfa EMAIL --as EMAIL [--public-url URL]
 python3 -S -m scripts.local account events [--limit N]
-python3 -S -m scripts.local account recover-owner --email E [--promote]
+python3 -S -m scripts.local account recover-owner --email E [--promote] [--public-url URL]
 python3 -S -m scripts.local settings show
 python3 -S -m scripts.local settings set SECTION FIELD=VALUE...
 ```
@@ -285,7 +285,18 @@ are shown once, at setup; each signs in once in place of a code.
   `account recover-owner --email E` on the server clears that owner's
   password and authenticator, ends their sessions and prints a link to set new
   ones; for a tech it does so only with `--promote`, which makes them owner.
-  It never creates an account. Every one of these is recorded in the audit
+  It never creates an account. There is no self-service password change or
+  new-authenticator form yet: a signed-in person cannot change their own
+  password or authenticator, and an owner cannot make a reset link for
+  themself. An owner who has lost their phone signs in with a recovery code
+  (each works once), then either asks another owner for an authenticator
+  reset link (`account reset-mfa EMAIL --as OTHER-OWNER`, or the Accounts
+  page), or, as the sole owner, runs `account recover-owner --email E` on the
+  server and opens the printed link to set a new password and authenticator,
+  which also gives ten new recovery codes. Do that before the recovery codes
+  run out. To change a password, the same two ways apply: another owner's
+  password reset link, or `recover-owner` on the server for the sole owner.
+  Every one of these is recorded in the audit
   trail (`account events [--limit N]`, 1 to 1000, default 50, or the Accounts
   page), which never holds passwords, codes, tokens or secrets. Each event
   shows when, what, by whom, for which account, how (`dashboard` or
@@ -294,14 +305,27 @@ are shown once, at setup; each signs in once in place of a code.
   change or an owner recovery that promoted a tech, the old and new role.
 - **Links** printed by the commands start with `https://<first server
   name>:<port>` when the saved listen address is a network one, and
-  `http://127.0.0.1:<port>` otherwise. Behind a proxy (`--public-url`), which
-  is not saved, replace that start with the proxy's address before sending
-  the link. Links go to the terminal only, never to a log.
+  `http://127.0.0.1:<port>` otherwise. Behind a proxy, whose address is not
+  saved, add `--public-url https://NAME[:PORT]` (checked as `serve
+  --public-url` checks it) to `invite`, `reset-password`, `reset-mfa` or
+  `recover-owner`, and the link starts with that address. Links go to the
+  terminal only, never to a log.
 - **HTTPS.** A network listen address always serves HTTPS (see "HTTPS on a
   network address"): a self-signed certificate whose SHA-256 fingerprint
   `serve` prints and Settings shows, so people can check the browser warning
   is for this server; or your own certificate and key; or keep listening on
-  loopback and put an HTTPS proxy in front with `--public-url`.
+  loopback and put an HTTPS proxy in front with `--public-url`. Use one mode
+  or the other: a proxy in front of a network listen address (which speaks
+  only TLS) must connect to it over HTTPS, for Tailscale Serve
+  `https+insecure://127.0.0.1:PORT`; a plain `http://` backend gets only
+  `tls_handshake_failed`.
+- **HSTS.** With your own certificate, every response carries
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, no
+  preload). With the self-signed certificate it is not sent, a deliberate
+  deviation from the web baseline: a browser that has seen HSTS for a name
+  refuses the certificate warning's click-through, so the next renewal or
+  name change would lock everyone out. The printed fingerprint is the check
+  there instead.
 - **Settings over SSH.** `settings show` prints the settings file as JSON
   (it holds no secrets; API keys and Greenbone credentials live only in the
   environment). `settings set SECTION FIELD=VALUE...` changes the
@@ -555,8 +579,11 @@ preferences in `<workspace>.settings.json` beside the workspace folder. Saving
 never contacts a provider. Saves require a signed-in session confirmed in the
 last 5 minutes, a valid Host, a matching Origin and the session's form token;
 `settings set` on the server applies the same checks to the values. Writes are atomic and private (0600 on POSIX). There is
-no API key field and no database reset control. This is local access control,
-not authentication for public use.
+no API key field and no database reset control. Sign-in is a password and an
+authenticator code for every page (see "Sign-in and remote access"). The
+dashboard listens on 127.0.0.1 unless a network listen address is set, which
+is always served over HTTPS; or it stays on loopback behind an HTTPS proxy
+with `--public-url`.
 
 Stop every process before copying a workspace and its settings. Do not delete
 storage to retry a failed request: rerunning a cycle reuses its checkpoints,
