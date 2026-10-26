@@ -723,6 +723,29 @@ SETTINGS_BODY_LIMIT = 65536
 #: One deadline for a whole POST body, plus a second per BODY_MIN_RATE bytes for a large upload.
 BODY_SECONDS = 15
 BODY_MIN_RATE = 256 * 1024
+#: Body bytes all connections together may hold while they are read: two full uploads.
+INFLIGHT_BODY_LIMIT = 2 * (MAX_REPORT_BYTES + UPLOAD_OVERHEAD)
+BUSY_RETRY_SECONDS = 5
+
+
+class _BodyBudget:
+    """A thread-safe count of request-body bytes being held; `take` refuses past the limit."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.held = 0
+        self._lock = threading.Lock()
+
+    def take(self, size):
+        with self._lock:
+            if self.held + size > self.limit:
+                return False
+            self.held += size
+            return True
+
+    def give(self, size):
+        with self._lock:
+            self.held -= size
 
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
@@ -739,6 +762,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
     auth = local_auth.AuthRoutes(accounts, limiter)
+    # One budget per server, and serve runs one server per process.
+    body_budget = _BodyBudget(INFLIGHT_BODY_LIMIT)
     server_names = tuple(server_names)
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
@@ -783,17 +808,33 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
                 self.send_error(403)
                 return
-            if not self._read_body(parsed.path):
+            path = parsed.path
+            if auth.handles(path):
+                # Sign-in forms work without a session, so they are small: FORM_LIMIT at most.
+                try:
+                    if self._read_body(local_auth.FORM_LIMIT):
+                        req = self._request()
+                        if req is not None:
+                            auth.post(self, req, path, parsed.query)
+                finally:
+                    self._release_body()
                 return
-            if auth.handles(parsed.path):
-                req = self._request()
-                if req is not None:
-                    auth.post(self, req, parsed.path, parsed.query)
+            # Every other POST is authorised before a byte of its body is read: no session, no
+            # permission, or a route that is not there is refused on its headers alone.
+            req = self._request()
+            if req is None or self._refuse_post(req, path):
                 return
-            with serial:
-                req = self._request()
-                if req is not None:
-                    self._post(req, parsed.path)
+            limit = (MAX_REPORT_BYTES + UPLOAD_OVERHEAD if path == '/upload' else
+                     SETTINGS_BODY_LIMIT if path == '/settings' else 0)
+            try:
+                if not self._read_body(limit):
+                    return
+                with serial:
+                    req = self._request()  # read again under the lock, just before it is used
+                    if req is not None:
+                        self._post(req, path)
+            finally:
+                self._release_body()
 
         def _guarded(self, route):
             """A read or write the server cannot complete is a 503, never a dropped connection.
@@ -812,45 +853,76 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self._responded = True
             super().send_response(code, message)
 
-        def _read_body(self, path):
+        def _refuse_post(self, req, path):
+            """Answer and return True when a dashboard POST may not proceed; nothing is read.
+            The same checks run again in _post, under `serial`."""
+            action = POST_ACTIONS.get(path)
+            if action is None:
+                self.send_error(404)
+                return True
+            session = req.session
+            if (session is None or not config_path or (path == '/upload' and not upload)
+                    or not self._may_post(session, path, action)):
+                self.send_error(403)
+                return True
+            return False
+
+        def _read_body(self, limit):
             """Read a POST body before `serial` is taken, under one deadline for the whole body
-            (per-recv timeouts alone let a client trickle a byte at a time for hours). A body with
-            no usable Content-Length, or larger than its route takes, is not read: the route then
-            refuses it on its headers. False after answering 408."""
-            limit = (local_auth.FORM_LIMIT if auth.handles(path) or path == '/accounts/invite' else
-                     SETTINGS_BODY_LIMIT if path == '/settings' else
-                     MAX_REPORT_BYTES + UPLOAD_OVERHEAD if path == '/upload' else 0)
+            (per-recv timeouts alone let a client trickle a byte at a time for hours), into one
+            preallocated buffer counted against the server's in-flight budget. A body with no
+            usable Content-Length, or larger than `limit`, is not read: the route then refuses it
+            on its headers. False after answering 408, or 503 when the budget is spent."""
             length = self.headers.get('Content-Length')
             self.body_file = io.BytesIO(b'')
+            self._held = 0
             if (length is None or not (length.isascii() and length.isdigit()) or self.headers.get('Transfer-Encoding')
                     or not 0 < int(length) <= limit):
                 return True
-            left = int(length)
-            deadline = time.monotonic() + BODY_SECONDS + left / BODY_MIN_RATE
+            size = int(length)
+            if not body_budget.take(size):
+                self.close_connection = True
+                self.send_response(503)
+                self.send_header('Retry-After', str(BUSY_RETRY_SECONDS))
+                self.send_header('Content-Length', '0')
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                return False
+            self._held = size
+            deadline = time.monotonic() + BODY_SECONDS + size / BODY_MIN_RATE
             sock = getattr(self, 'connection', None)
-            chunks = []
+            buffer = bytearray(size)
+            view = memoryview(buffer)
+            got = 0
             try:
-                while left:
+                while got < size:
                     if sock is not None:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
                             raise TimeoutError()
                         sock.settimeout(remaining)
-                    chunk = self.rfile.read1(min(left, 65536))
-                    if not chunk:
+                    count = self.rfile.readinto1(view[got:])
+                    if not count:
                         break
-                    chunks.append(chunk)
-                    left -= len(chunk)
+                    got += count
             except (TimeoutError, OSError):
+                self.close_connection = True
                 if sock is not None:
                     sock.settimeout(self.timeout)
-                self.close_connection = True
                 self.send_error(408, 'The request body did not arrive in time.')
                 return False
+            finally:
+                view.release()
             if sock is not None:
                 sock.settimeout(self.timeout)
-            self.body_file = io.BytesIO(b''.join(chunks))
+            del buffer[got:]                       # a short body stays short; the route refuses it
+            self.body_file = io.BytesIO(buffer)
             return True
+
+        def _release_body(self):
+            body_budget.give(getattr(self, '_held', 0))
+            self._held = 0
+            self.body_file = io.BytesIO(b'')
 
         def _request(self, session=True):
             """Classify the request and resolve its session; None after refusing it with 403."""

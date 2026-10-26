@@ -8,6 +8,7 @@ do; setup is offered only to a local visit with no accounts; the Origin a POST
 must carry is the way the request came in. Synthetic data only."""
 import http.client
 import re
+import select
 import shutil
 import socket
 import ssl
@@ -585,26 +586,86 @@ def test_an_invite_link_sets_a_password_and_mfa_once(start, signed_in):
 # --- fix round 1 ---------------------------------------------------------------
 
 def test_a_slow_post_body_does_not_block_other_requests(start, signed_in, monkeypatch):
-    monkeypatch.setattr(local, 'BODY_SECONDS', 2)
+    # The body deadline is longer than the window watched here, and the client trickles a byte
+    # a second so no per-recv timeout ends it: only reading outside the lock lets the GET through.
+    monkeypatch.setattr(local, 'BODY_SECONDS', 8)
     server = start(signed_in.accounts)
-    slow = socket.create_connection(('127.0.0.1', server.port), timeout=10)
+    slow = socket.create_connection(('127.0.0.1', server.port), timeout=20)
+    stop = threading.Event()
+
+    def trickle():
+        try:
+            while not stop.wait(1.0):
+                slow.sendall(b'x')
+        except OSError:
+            pass
     try:
         slow.sendall((f'POST /signin HTTP/1.1\r\nHost: {server.local_host}\r\n'
                       f'Origin: http://{server.local_host}\r\nContent-Type: application/x-www-form-urlencoded\r\n'
                       'Content-Length: 8192\r\n\r\npre=').encode())
-        threading.Event().wait(0.3)
+        threading.Thread(target=trickle, daemon=True).start()
+        threading.Event().wait(1.5)
         done = []
 
         def visit():
             done.append(server.request('GET', '/', cookie=signed_in.cookie())[0].status)
         other = threading.Thread(target=visit)
         other.start()
-        other.join(5)
+        other.join(4)
         assert done == [200]
-        # The trickling body is cut off at the body deadline, without ever holding the lock.
+        # ...while the slow body is still being read: no answer to it yet.
+        assert select.select([slow], [], [], 0)[0] == []
+        # It is then cut off at the overall deadline.
         assert slow.recv(64).startswith(b'HTTP/1.0 408')
     finally:
+        stop.set()
         slow.close()
+
+
+def raw_headers(server, path, length, cookie=None, extra=''):
+    sock = socket.create_connection(('127.0.0.1', server.port), timeout=10)
+    sock.sendall((f'POST {path} HTTP/1.1\r\nHost: {server.local_host}\r\nOrigin: http://{server.local_host}\r\n'
+                  f'Content-Type: multipart/form-data; boundary=b\r\nContent-Length: {length}\r\n'
+                  + (f'Cookie: {cookie}\r\n' if cookie else '') + extra + '\r\n').encode())
+    return sock
+
+
+def test_an_anonymous_upload_is_refused_before_its_body_is_read(start, signed_in):
+    server = start(signed_in.accounts, upload=lambda data, add_task: pytest.fail('imported without a session'))
+    for path, cookie in (('/upload', None), ('/upload', 'rz_session=forged'), ('/settings', None),
+                         ('/nowhere', None)):
+        sock = raw_headers(server, path, 60 * 1024 * 1024, cookie)
+        try:
+            # Not one body byte was sent: the answer comes from the headers alone.
+            assert sock.recv(64).split(b' ')[1] in (b'403', b'404'), path
+        finally:
+            sock.close()
+    # A tech may upload, but no role may post to an owner-only route without the right.
+    sock = raw_headers(server, '/accounts/invite', 60 * 1024 * 1024, signed_in.cookie('tech'))
+    try:
+        assert sock.recv(64).split(b' ')[1] == b'403'
+    finally:
+        sock.close()
+
+
+def test_inflight_body_bytes_are_capped(start, signed_in, monkeypatch):
+    monkeypatch.setattr(local, 'INFLIGHT_BODY_LIMIT', 10000)   # read when the handler is built
+    monkeypatch.setattr(local, 'BODY_SECONDS', 8)
+    server = start(signed_in.accounts)
+    holding = raw_headers(server, '/signin', 8192)              # 8192 of the 10000 bytes, held
+    try:
+        threading.Event().wait(0.5)
+        refused = raw_headers(server, '/signin', 8192)
+        try:
+            answer = refused.recv(256)
+            assert answer.split(b' ')[1] == b'503'
+            assert b'Retry-After: 5' in answer
+        finally:
+            refused.close()
+    finally:
+        holding.close()                                         # the read ends; its bytes come back
+    threading.Event().wait(0.5)
+    assert sign_in(server, 'nobody@client.example', PW_OWNER, '000000')[0].status == 400
 
 
 def test_setup_ends_signed_in(start, tmp_path):
