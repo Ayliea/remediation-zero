@@ -142,15 +142,10 @@ def main():
         if not is_ready_line(ready):
             raise SystemExit('Dashboard did not start. Check the error above; port 8081 may already be in use. Try --port 8082.')
         print(ready, flush=True)
-        relay = None
-        if exposed:
-            # The fingerprint line always follows; the account-setup line may. The fingerprint is
-            # printed before anything else, the rest as it comes.
-            print(process.stdout.readline().rstrip('\n'), flush=True)
-            relay = threading.Thread(target=_relay, args=(process.stdout,), name='rz-banner', daemon=True)
-            relay.start()
-        if public:
-            print(f'Also at {public} through your HTTPS proxy. {local.PROXY_SIGN_IN}', flush=True)
+        # The rest of serve's banner: a network listener's names and fingerprint, the proxy line,
+        # and the account-setup command when the first account can only be made on the server.
+        relay = threading.Thread(target=_relay, args=(process.stdout,), name='rz-banner', daemon=True)
+        relay.start()
         minutes = preferences['cycle_interval_minutes']
         if minutes > 0:
             logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')

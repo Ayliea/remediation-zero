@@ -330,18 +330,23 @@ def test_the_launcher_passes_the_public_url_on_and_warns(tmp_path, monkeypatch, 
     local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, open_browser=False))
     monkeypatch.setattr('sys.argv', ['start', '--saved', '--database', str(database), '--public-url', PUBLIC])
     calls = []
+    # What serve prints behind a proxy: its banner, its own proxy line, then (no accounts yet) setup.
+    printed = ('Local dashboard: http://127.0.0.1:8081\n'
+               f'Also at {PUBLIC} through your HTTPS proxy. {local.PROXY_SIGN_IN}\n'
+               f'{local.NO_ACCOUNTS_LINE}python3 -S -m scripts.local --database {database} account setup\n')
     def start(command, **kwargs):
         calls.append(command)
-        return SimpleNamespace(stdout=io.StringIO('Local dashboard: http://127.0.0.1:8081\n'),
-                               wait=lambda **kw: 0, poll=lambda: 0)
+        return SimpleNamespace(stdout=io.StringIO(printed), wait=lambda **kw: 0, poll=lambda: 0)
     monkeypatch.setattr(local_launcher.subprocess, 'Popen', start)
     local_launcher.main()
     command = calls[-1]
     assert command[command.index('--public-url') + 1] == PUBLIC
     out = capsys.readouterr().out
-    assert f'Also at {PUBLIC} through your HTTPS proxy' in out
+    assert out.count(f'Also at {PUBLIC} through your HTTPS proxy') == 1
     assert 'asks for sign-in' in out
     assert 'No sign-in yet' not in out
+    # The first account can only be made on the server here, so its command must reach the screen.
+    assert f'{local.NO_ACCOUNTS_LINE}python3 -S -m scripts.local --database {database} account setup' in out
 
 
 def test_the_launcher_refuses_a_bad_public_url_before_starting(tmp_path, monkeypatch):
