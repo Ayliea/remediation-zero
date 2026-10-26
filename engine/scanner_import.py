@@ -47,7 +47,7 @@ from typing import Any, Callable, Collection, Optional
 from engine.ports import Ports
 from engine.rescan import run_rescan
 from engine.scanner_source import (
-    DEFAULT_QOD_FLOOR, SOURCE, NormalisedScan, ScannerSource, normalise_greenbone,
+    DEFAULT_QOD_FLOOR, SOURCE, NormalisedScan, ScannerSource, _display_name, normalise_greenbone,
     to_rescan_input,
 )
 from tools.docstore import AlreadyExists
@@ -91,7 +91,6 @@ _SCAN_END_AFTER_LISTING = 14 * _DAY
 _EARLIEST_SCAN = 946684800.0
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _STATUS_RE = re.compile(r"[A-Za-z][A-Za-z ]{0,39}")
-_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()\-]")
 #: The fixed reasons `tools.gmp` records for a report entry it refused.
 _REFUSAL_REASONS = frozenset({"bad report id", "bad status", "bad timestamp"})
 #: Fields an asset upsert refreshes on an existing asset. Nothing else is touched,
@@ -367,6 +366,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
         fields = {
             "last_pull_real_ts": stamp.real_ts, "last_pull_sim_ts": stamp.sim_ts,
             "last_result": "imported", "last_error_class": None,
+            **({"task_name": scan.task_name} if scan.task_name else {}),
             "last_imported_report_id": scan.scan_id,
             "last_imported_scan_end": scan.scan_end,
             "last_imported_cycle": cycle,
@@ -659,7 +659,7 @@ def import_upload(ports: Ports, cycle: int, data: bytes, *, chosen_task_ids: Col
         if not _UUID_RE.fullmatch(scan.task_id or ""):
             raise ImportRefused("report names a task id that is not a UUID", kind="bad_uuid")
         if not add_task:
-            name = _NAME_UNSAFE.sub("", report.task_name or "")[:80].strip() or "(unnamed)"
+            name = _display_name(report.task_name) or "(unnamed)"
             raise ImportRefused(f"report is from task {name} ({scan.task_id}), which is not "
                                 "chosen for this install")
         chosen.add(scan.task_id)

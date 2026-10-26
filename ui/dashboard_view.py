@@ -373,7 +373,7 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
             body += '<p>No requests returned in this snapshot.</p>'
         body += failed_runs_section(data)
     elif view == "infrastructure":
-        body = f'<section class="card"><h2>{text(counts.get("assets", "Unknown"))} assets recorded</h2><p>Asset names, connection health, and a complete coverage comparison are not supplied by this snapshot. Inventory count alone does not prove these assets have been checked.</p></section><section class="notice"><h2>Coverage needs confirmation</h2><p>Ask your IT provider to compare your infrastructure inventory with scan coverage. Scan freshness is not evaluated here.</p></section><h2>Recent scan evidence</h2>'
+        body = f'<section class="card"><h2>{text(counts.get("assets", "Unknown"))} {"asset" if counts.get("assets") == 1 else "assets"} recorded</h2><p>Asset names, connection health, and a complete coverage comparison are not supplied by this snapshot. Inventory count alone does not prove these assets have been checked.</p></section><section class="notice"><h2>Coverage needs confirmation</h2><p>Ask your IT provider to compare your infrastructure inventory with scan coverage. Scan freshness is not evaluated here.</p></section><h2>Recent scan evidence</h2>'
         for scan in data.get("scans", []):
             body += f'<details class="card"><summary>Scan recorded: {stamp(scan.get("real_ts"), scan.get("sim_ts"))}</summary><pre>{text(json.dumps(scan, indent=2, default=str))}</pre></details>'
         if not data.get("scans"):

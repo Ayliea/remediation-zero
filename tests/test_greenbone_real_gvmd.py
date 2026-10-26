@@ -194,3 +194,31 @@ def test_bare_port_numbers_are_read_with_their_protocol():
 
 def test_ports_with_their_protocol_are_still_read():
     assert _host(_with()).open_ports == ("22/tcp", "80/tcp", "443/tcp", "8080/tcp")
+
+
+# --- the task card names its task; one asset is "1 asset" ----------------------------
+
+
+def test_an_imported_report_stores_its_task_name_for_the_card(ws, ports):
+    import_scan(ports, 1, normalise_greenbone(report(1, task_name="Weekly scan of 192.0.2.0/24")),
+                chosen_task_ids=[TASK])
+    assert docs(ws, "scanner_state")[TASK]["task_name"] == "Weekly scan of 192.0.2.0/24"
+    assert "<h3>Weekly scan of 192.0.2.0/24</h3>" in card(ws, [TASK])
+
+
+def test_a_task_name_is_cleaned_and_an_empty_one_keeps_the_last(ws, ports):
+    import_scan(ports, 1, normalise_greenbone(report(1, task_name="Lab\n<b>scan</b>\x1b[31m" + "x" * 200)),
+                chosen_task_ids=[TASK])
+    name = docs(ws, "scanner_state")[TASK]["task_name"]
+    assert name.startswith("Lab") and len(name) <= 80
+    assert not set(name) & set("<>\n\x1b[")
+    import_scan(ports, 2, normalise_greenbone(report(2, task_name="")), chosen_task_ids=[TASK])
+    assert docs(ws, "scanner_state")[TASK]["task_name"] == name
+
+
+@pytest.mark.parametrize("assets, heading", [(1, "1 asset recorded"), (2, "2 assets recorded"),
+                                             (0, "0 assets recorded")])
+def test_the_asset_heading_agrees_with_its_count(assets, heading):
+    from ui import dashboard_view
+    page = dashboard_view.render({"counts": {"assets": assets}, "scans": []}, "infrastructure")
+    assert f"<h2>{heading}</h2>" in page

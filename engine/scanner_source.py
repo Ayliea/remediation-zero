@@ -57,6 +57,8 @@ class NormalisedScan:
     unfinished_check_count: int = 0
     #: Results the report counts but gvmd did not send; any at all and the report closes nothing.
     results_not_returned: int = 0
+    #: The task's name from the report, cleaned for display; "" when it gives none.
+    task_name: str = ""
 
 
 class ScannerSource(Protocol):
@@ -75,6 +77,14 @@ def asset_key(source: str, host_asset_id: Optional[str], ip: str) -> tuple[str, 
     if host_asset_id:
         return "gb-" + host_asset_id, "greenbone_asset_id"
     return "gb-ip-" + ip, "source_ip"
+
+
+# A task name is scanner text shown on the task's card: a closed alphabet, capped.
+_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9 ._()/:\-]")
+
+
+def _display_name(name: str) -> str:
+    return _NAME_UNSAFE.sub("", name or "")[:80].strip()
 
 
 def finding_key(asset_id: str, nvt_oid: str, port: str) -> str:
@@ -222,6 +232,7 @@ def normalise_greenbone(report: GreenboneReport, *, qod_floor: int = DEFAULT_QOD
         unfinished_checks=tuple(unfinished),
         unfinished_check_count=len(report.unfinished_checks),
         results_not_returned=not_returned,
+        task_name=_display_name(report.task_name),
     )
 
 
