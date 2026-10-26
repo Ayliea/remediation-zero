@@ -373,3 +373,20 @@ def test_events_show_the_source_and_role_changes(db, people, capsys):
     code, out, _ = cli(capsys, db, 'account', 'recover-owner', '--email', TECH)
     code, out, _ = cli(capsys, db, 'account', 'events', '--limit', '1')
     assert json.loads(out)['note'] == ''           # an owner stays owner: no change to show
+
+
+# --- final round: links through a proxy (T10) ----------------------------------------------
+
+
+@pytest.mark.parametrize('argv', [
+    ('invite', '--email', 'new@client.example', '--role', 'tech', '--as', OWNER),
+    ('reset-password', TECH, '--as', OWNER),
+    ('reset-mfa', TECH, '--as', OWNER),
+    ('recover-owner', '--email', OWNER),
+])
+def test_links_can_start_with_the_proxy_address(db, people, capsys, argv):
+    code, out, err = cli(capsys, db, 'account', *argv, '--public-url', 'https://Dashboard.example.test:443/')
+    assert code == 0, err
+    assert re.search(r'^https://dashboard\.example\.test/invite/\S+$', out, re.M)
+    code, _, err = cli(capsys, db, 'account', *argv, '--public-url', 'http://dashboard.example.test')
+    assert code == 2 and 'https://' in err

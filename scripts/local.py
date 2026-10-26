@@ -309,6 +309,8 @@ IDLE_TIMEOUT = 15
 #: byte every few seconds for ever). Each later request on the connection gets as long from
 #: the end of the one before. Bodies have their own deadline (BODY_SECONDS).
 HEADER_SECONDS = 15
+#: Sent on the TLS listener with your own certificate: a year, no includeSubDomains, no preload.
+HSTS_VALUE = 'max-age=31536000'
 #: Connections served at once, on every listener (loopback too: a proxy brings everyone
 #: through loopback). One over the cap is closed as soon as it is accepted.
 MAX_CONNECTIONS = 64
@@ -1075,7 +1077,7 @@ class _BodyBudget:
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
             public_origin=None, *, accounts, settings_exposed=False, server_names=(), scheme='http',
-            limiter=None, workspace_root=None):
+            limiter=None, workspace_root=None, hsts=False):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
     # accounts: tools.accounts.Accounts on the workspace's accounts file, opened by serve
@@ -1085,6 +1087,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # settings_exposed: the saved listen address is a network one, so no request is local.
     # server_names, scheme: the names a 'direct' request may use, over the TLS listener ('https').
     # workspace_root: where serve keeps the self-signed certificate, for the Settings fingerprint.
+    # hsts: send Strict-Transport-Security on every response (the TLS listener with your own
+    # certificate only; see build_server for why not with the self-signed one).
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
     auth = local_auth.AuthRoutes(accounts, limiter)
@@ -1110,6 +1114,11 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             # not just a per-read timeout; see _DeadlineReader and DashboardServer.
             self._reader = _DeadlineReader(self.connection, self.timeout)
             self.rfile = io.BufferedReader(self._reader)
+
+        def end_headers(self):
+            if hsts:
+                self.send_header('Strict-Transport-Security', HSTS_VALUE)
+            super().end_headers()
 
         def handle_one_request(self):
             first = getattr(self.server, 'connection_deadline', lambda: None)()
@@ -1821,10 +1830,15 @@ def build_server(ws, preferences, config_path, *, demo=False, public_url=None, p
     docs = ws.docs_for('dashboard')  # reads only: no collection is writable
     upload = None if demo else page_upload(ws, config_path, os.environ)
     view = _View(docs)
+    # HSTS only with your own certificate. Deviation from the web baseline for the self-signed
+    # one: a browser that has seen HSTS refuses the certificate warning's click-through, so the
+    # self-signed install (checked by its printed fingerprint) would lock everyone out at the
+    # first renewal or name change. Loopback is plain HTTP and never sends it.
+    hsts = exposed and preferences['certificate']['mode'] == 'own'
     handler_class = handler(view, demo, config_path, command, upload, records=view.records,
                             public_origin=public_url, accounts=accounts, settings_exposed=exposed,
                             server_names=tuple(names), scheme='https' if exposed else 'http',
-                            workspace_root=ws.root)
+                            workspace_root=ws.root, hsts=hsts)
     try:
         server = DashboardServer((address, port), handler_class, tls_context=context)
     except OSError as error:
@@ -1916,7 +1930,7 @@ def _parser():
     commands.add_parser('update-enrichment', help='Download CISA KEV, FIRST EPSS and NVD data into the workspace cache; reaches the internet')
     check = commands.add_parser('check-models', help='Explicitly send the bundled synthetic example to each configured model role')
     check.add_argument('--role', choices=ROLES, help='Check only this role')
-    local_accounts.add_parsers(commands)
+    local_accounts.add_parsers(commands, _public_url)
     settings = commands.add_parser('settings', help='Show or change the Settings page values from the server')
     settings_actions = settings.add_subparsers(dest='settings_action', required=True)
     settings_actions.add_parser('show', help='Print the settings file as JSON')
@@ -2101,7 +2115,8 @@ def main(argv=None):
             # Opened here, as serve opens it: never through docs_for, so no agent stage reaches it.
             try:
                 accounts = Accounts(AccountStore(ws.accounts_path()), clock)
-                lines = local_accounts.run(args, accounts, link_origin(preferences))
+                origin = getattr(args, 'public_url', None) or link_origin(preferences)
+                lines = local_accounts.run(args, accounts, origin)
             except local_accounts.CommandRefused as refusal:
                 parser.exit(1, f'{refusal}\n')
             except KeyboardInterrupt:

@@ -528,3 +528,31 @@ def test_the_machine_addresses_are_in_the_certificate_the_allowlist_and_the_bann
     assert server_tls._sans(ws.root / server_tls.CERT_NAME) == {('DNS', 'rz-box.example.test'),
                                                                  ('IP Address', '192.0.2.10')}
     assert https_get(server, ws, host='192.0.2.10').status == 200
+
+
+# --- final round: HSTS with your own certificate only (M2) ---------------------------------
+
+
+@needs_openssl
+def test_hsts_is_sent_with_your_own_certificate_only(served, tmp_path):
+    (tmp_path / 'own').mkdir()
+    cert, key = server_tls.ensure_self_signed(tmp_path / 'own', [NAME])
+    server, _, _ = served(server_names=[NAME], certificate={'mode': 'own', 'cert_file': str(cert),
+                                                             'key_file': str(key)})
+    context = ssl.create_default_context(cafile=str(cert))
+    context.check_hostname = False
+    for path in ('/signin', '/', '/nope'):
+        conn = http.client.HTTPSConnection('127.0.0.1', server.server_port, timeout=10, context=context)
+        conn.request('GET', path, headers={'Host': f'{NAME}:{server.server_port}'})
+        response = conn.getresponse()
+        response.read()
+        conn.close()
+        assert response.getheader('Strict-Transport-Security') == 'max-age=31536000', path
+
+
+@needs_openssl
+def test_no_hsts_with_the_self_signed_certificate_or_on_loopback(served):
+    server, _, ws = served(server_names=[NAME])
+    assert https_get(server, ws).getheader('Strict-Transport-Security') is None
+    plain, _, _ = served(exposed=False)
+    assert _plain_get(plain.server_port).getheader('Strict-Transport-Security') is None

@@ -147,7 +147,7 @@ def run(args, accounts, origin):
     """Run one `account` command; return the lines to print. CommandRefused on refusal.
 
     `accounts`: tools.accounts.Accounts on the workspace's accounts file. `origin`: the
-    address links start with (see scripts.local.link_origin)."""
+    address links start with (scripts.local.link_origin, or the command's --public-url)."""
     action = args.account_action
     store = accounts.store
     try:
@@ -200,8 +200,9 @@ def events_limit(value):
     return number
 
 
-def add_parsers(commands):
-    """The `account` command and its actions, on scripts.local's subparsers."""
+def add_parsers(commands, public_url=str):
+    """The `account` command and its actions, on scripts.local's subparsers. `public_url` is
+    the argparse type that checks `--public-url` (scripts.local's, through public_origin)."""
     account = commands.add_parser('account', help='Accounts for people who sign in: set up, invite, roles, '
                                                   'resets, recovery and the audit trail')
     actions = account.add_subparsers(dest='account_action', required=True)
@@ -228,4 +229,9 @@ def add_parsers(commands):
                                                        "owner's password and MFA and make a link to set new ones")
     recover.add_argument('--email', required=True)
     recover.add_argument('--promote', action='store_true', help='Make an active tech the owner')
+    # The commands that print a link: behind a proxy, the link starts with its address.
+    for name in ('invite', 'reset-password', 'reset-mfa', 'recover-owner'):
+        actions.choices[name].add_argument(
+            '--public-url', type=public_url, metavar='URL',
+            help='Start the link with this https:// address, the proxy in front (as serve --public-url)')
     return account
