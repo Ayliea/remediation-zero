@@ -47,12 +47,22 @@ RESET_KINDS = ("reset_password", "reset_mfa")
 # Invite kinds whose acceptance enrols a new TOTP secret and recovery codes.
 _ENROLS = ("join", "reset_mfa", "recover")
 _MAX_EMAIL = 254
+# Lockout, shared with sign-in: LOCK_AFTER failures within LOCK_WINDOW seconds
+# lock the account for LOCK_SECONDS. Runtime security timers on wall time.
+LOCK_AFTER = 5
+LOCK_WINDOW = 15 * 60
+LOCK_SECONDS = 15 * 60
+
+
+def _is_locked(row: sqlite3.Row, now: float) -> bool:
+    return row["locked_until"] is not None and row["locked_until"] > now
 
 
 class AccountRefused(Exception):
     """A rule refused the request. `code` is one of: accounts_exist,
     not_allowed, last_owner, no_such_account, invalid_link, bad_code,
-    password, email_taken. For `password`, `reason` is PasswordRefused's
+    password, email_taken, locked (a reset link used while the account is
+    locked out). For `password`, `reason` is PasswordRefused's
     reason ('too_short', 'too_long', 'breached'), 'missing', or 'incorrect'
     when a current password did not match."""
 
@@ -119,20 +129,27 @@ class Accounts:
     def invite_view(self, token: str) -> Optional[InviteView]:
         """What a live link is for, without spending it. An enrolling link
         (join, reset_mfa, recover) gets its TOTP secret on first view, kept so
-        the secret the person scans is the one accepted."""
+        the secret the person scans is the one accepted. A link whose maker
+        no longer has the authority to issue it is revoked and shows nothing."""
         if not isinstance(token, str) or not token:
             return None
         th = _token_hash(token)
+        stamp = self.clock.now()
+        voided = None
         with self.store.transaction() as cur:
             found = self._live(cur, th, self._now())
             if found is None:
                 return None
             inv, acct = found
+            voided = self._void_if_unauthorised(cur, inv, stamp)
             secret = inv["totp_secret"]
-            if inv["kind"] in _ENROLS and secret is None:
+            if voided is None and inv["kind"] in _ENROLS and secret is None:
                 secret = totp.new_secret()
                 cur.execute("UPDATE invites SET totp_secret = ? WHERE token_hash = ?",
                             (secret, th))
+        if voided is not None:
+            _log("invite_revoked", None, inv["account_id"], None, voided)
+            return None
         return InviteView(inv["kind"], acct["email"], acct["role"],
                           secret if inv["kind"] in _ENROLS else None)
 
@@ -257,6 +274,10 @@ class Accounts:
             cur.execute("DELETE FROM recovery_codes WHERE account_id = ?", (row["id"],))
             self._revoke_links(cur, row["id"])
             self._end_sessions(cur, row["id"])
+            if row["role"] != "owner":
+                # links the tech made were issued as a tech
+                self._revoke_made_by(cur, row["id"])
+            self._revoke_unauthorised_joins(cur)
             token = self._insert_invite(cur, "recover", email, "owner", row["id"], None,
                                         now, stamp)
             self._event(cur, "recover_owner", None, row["id"], via, source, detail, stamp)
@@ -279,79 +300,115 @@ class Accounts:
 
         Everything is checked before the link is spent, and the spend commits
         with the account change, so a refused attempt leaves the link usable.
+        Two exceptions, both deliberate: a link whose maker has lost the
+        authority to issue it (removed, demoted, or a tech's owner invite once
+        an owner has joined) is revoked and refused `invalid_link`; and a wrong
+        current code or password on a reset link counts towards the account's
+        lockout exactly as a failed sign-in does. A locked account's reset
+        links are refused `locked` without checking anything else.
         """
         if not isinstance(token, str) or not token:
             raise AccountRefused("invalid_link")
         th = _token_hash(token)
         now = self._now()
-        with self.store.transaction() as cur:     # a read; BEGIN IMMEDIATE keeps it simple
+        stamp = self.clock.now()
+        with self.store.transaction() as cur:
             found = self._live(cur, th, now)
-        if found is None:
+            voided = self._void_if_unauthorised(cur, found[0], stamp) if found else None
+        if voided is not None:
+            _log("invite_revoked", None, found[0]["account_id"], None, voided)
+        if found is None or voided is not None:
             raise AccountRefused("invalid_link")
         inv, acct = found
         kind = inv["kind"]
+        if kind in RESET_KINDS and _is_locked(acct, now):
+            raise AccountRefused("locked")
 
-        pw_hash = None
-        if kind in ("join", "recover", "reset_password"):
-            pw_hash = passwords.hash_password(self._new_password(password))
+        clean = (self._new_password(password)
+                 if kind in ("join", "recover", "reset_password") else None)
         if kind == "reset_mfa":
             if not isinstance(current_password, str) or not passwords.verify(
                     current_password, acct["password_hash"]):
+                self._count_failure(acct["id"], now, via, source)
                 raise AccountRefused("password", "incorrect")
         if kind == "reset_password":
             secret = acct["totp_secret"]
             step = (totp.match(secret, current_code, now, acct["last_totp_step"])
                     if secret else None)
+            if step is None:
+                self._count_failure(acct["id"], now, via, source)
         else:
             secret = inv["totp_secret"]          # set on first view
             step = totp.match(secret, code, now, None) if secret else None
         if step is None:
             raise AccountRefused("bad_code")
+        pw_hash = passwords.hash_password(clean) if clean is not None else None
         codes = passwords.new_recovery_codes() if kind in _ENROLS else None
 
         stamp = self.clock.now()
         account_id = acct["id"]
+        voided = None
         with self.store.transaction() as cur:
-            spent = self.store.spend_invite(th, now, cur=cur)
-            if spent is None:
+            current = self._live(cur, th, now)
+            if current is None or current[1]["id"] != account_id:
                 raise AccountRefused("invalid_link")
-            fresh = self._account(cur, account_id)
-            if not self._fits(spent, fresh):
-                raise AccountRefused("invalid_link")
-            if kind == "reset_password" and (
-                    fresh["totp_secret"] != secret or (fresh["last_totp_step"] is not None
-                                                       and step <= fresh["last_totp_step"])):
-                raise AccountRefused("bad_code")    # the code was used meanwhile
-            if kind == "reset_mfa" and fresh["password_hash"] != acct["password_hash"]:
-                raise AccountRefused("password", "incorrect")
-            touch = (stamp.real_ts, stamp.sim_ts, account_id)
-            if kind in ("join", "recover"):
-                cur.execute("UPDATE accounts SET status = 'active', password_hash = ?, "
-                            "totp_secret = ?, last_totp_step = ?, failed_count = 0, "
-                            "first_failed_at = NULL, locked_until = NULL, updated_real_ts = ?, "
-                            "updated_sim_ts = ? WHERE id = ?", (pw_hash, secret, step, *touch))
-            elif kind == "reset_password":
-                cur.execute("UPDATE accounts SET password_hash = ?, last_totp_step = ?, "
-                            "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
-                            "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
-                            (pw_hash, step, *touch))
-            else:
-                cur.execute("UPDATE accounts SET totp_secret = ?, last_totp_step = ?, "
-                            "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
-                            (secret, step, *touch))
-            if codes is not None:
-                self._replace_codes(cur, account_id, codes)
-            self._end_sessions(cur, account_id)
-            event, detail = {
-                "join": ("invite_accepted", {"invite_kind": "join", "role": fresh["role"]}),
-                "recover": ("invite_accepted", {"invite_kind": "recover",
-                                                "role": fresh["role"]}),
-                "reset_password": ("password_reset", None),
-                "reset_mfa": ("mfa_reset", None),
-            }[kind]
-            self._event(cur, event, account_id, account_id, via, source, detail, stamp)
+            voided = self._void_if_unauthorised(cur, current[0], stamp)
+            if voided is None:
+                event, detail = self._apply_accept(cur, th, now, kind, current[1], acct, secret,
+                                                   step, pw_hash, codes, via, source, stamp)
+        if voided is not None:
+            _log("invite_revoked", None, account_id, None, voided)
+            raise AccountRefused("invalid_link")
         _log(event, account_id, account_id, via, detail)
         return account_id, codes
+
+    def _apply_accept(self, cur: sqlite3.Cursor, th: str, now: float, kind: str,
+                      fresh: sqlite3.Row, seen: sqlite3.Row, secret: str, step: int,
+                      pw_hash: Optional[str], codes: Optional[list[str]],
+                      via: Optional[str], source: Optional[str],
+                      stamp: Stamp) -> tuple[str, Optional[dict[str, Any]]]:
+        """The write half of accept_invite, on its transaction's cursor."""
+        account_id = fresh["id"]
+        if self.store.spend_invite(th, now, cur=cur) is None:
+            raise AccountRefused("invalid_link")
+        if kind in RESET_KINDS and _is_locked(fresh, now):
+            raise AccountRefused("locked")
+        if kind == "reset_password" and (
+                fresh["totp_secret"] != secret or (fresh["last_totp_step"] is not None
+                                                   and step <= fresh["last_totp_step"])):
+            raise AccountRefused("bad_code")    # the code was used meanwhile
+        if kind == "reset_mfa" and fresh["password_hash"] != seen["password_hash"]:
+            raise AccountRefused("password", "incorrect")
+        touch = (stamp.real_ts, stamp.sim_ts, account_id)
+        if kind in ("join", "recover"):
+            cur.execute("UPDATE accounts SET status = 'active', password_hash = ?, "
+                        "totp_secret = ?, last_totp_step = ?, failed_count = 0, "
+                        "first_failed_at = NULL, locked_until = NULL, updated_real_ts = ?, "
+                        "updated_sim_ts = ? WHERE id = ?", (pw_hash, secret, step, *touch))
+        elif kind == "reset_password":
+            cur.execute("UPDATE accounts SET password_hash = ?, last_totp_step = ?, "
+                        "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
+                        "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
+                        (pw_hash, step, *touch))
+        else:
+            cur.execute("UPDATE accounts SET totp_secret = ?, last_totp_step = ?, "
+                        "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
+                        "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
+                        (secret, step, *touch))
+        if codes is not None:
+            self._replace_codes(cur, account_id, codes)
+        self._end_sessions(cur, account_id)
+        detail: Optional[dict[str, Any]] = None
+        if kind in ("join", "recover"):
+            detail = {"invite_kind": kind, "role": fresh["role"]}
+            if fresh["role"] == "owner":
+                revoked = self._revoke_unauthorised_joins(cur)
+                if revoked:
+                    detail["count"] = revoked
+        event = {"join": "invite_accepted", "recover": "invite_accepted",
+                 "reset_password": "password_reset", "reset_mfa": "mfa_reset"}[kind]
+        self._event(cur, event, account_id, account_id, via, source, detail, stamp)
+        return event, detail
 
     def revoke_invite(self, by_id: str, token_hash: str, *,
                       via: Optional[str] = None, source: Optional[str] = None) -> None:
@@ -392,7 +449,13 @@ class Accounts:
             cur.execute("UPDATE accounts SET role = ?, updated_real_ts = ?, updated_sim_ts = ? "
                         "WHERE id = ?", (role, stamp.real_ts, stamp.sim_ts, account_id))
             self._end_sessions(cur, account_id)
+            # links the subject made were issued under the old role
+            revoked = self._revoke_made_by(cur, account_id)
+            if role == "owner":
+                revoked += self._revoke_unauthorised_joins(cur)
             detail = {"from": target["role"], "to": role}
+            if revoked:
+                detail["count"] = revoked
             self._event(cur, "role_changed", actor["id"], account_id, via, source, detail, stamp)
         _log("role_changed", actor["id"], account_id, via, detail)
 
@@ -419,7 +482,10 @@ class Accounts:
             cur.execute("DELETE FROM recovery_codes WHERE account_id = ?", (account_id,))
             self._revoke_links(cur, account_id)
             self._end_sessions(cur, account_id)
+            revoked = self._revoke_made_by(cur, account_id)
             detail = {"role": target["role"]}
+            if revoked:
+                detail["count"] = revoked
             self._event(cur, "removed", actor["id"], account_id, via, source, detail, stamp)
         _log("removed", actor["id"], account_id, via, detail)
 
@@ -488,6 +554,73 @@ class Accounts:
     def _revoke_links(cur: sqlite3.Cursor, account_id: str) -> None:
         cur.execute("UPDATE invites SET revoked = 1 WHERE account_id = ? AND used = 0",
                     (account_id,))
+
+    @staticmethod
+    def _revoke_made_by(cur: sqlite3.Cursor, account_id: str) -> int:
+        """Revoke every unused link `account_id` made; returns how many."""
+        cur.execute("UPDATE invites SET revoked = 1 WHERE created_by = ? AND used = 0 "
+                    "AND revoked = 0", (account_id,))
+        return cur.rowcount
+
+    @staticmethod
+    def _revoke_unauthorised_joins(cur: sqlite3.Cursor) -> int:
+        """Once an active owner exists, a join link made by anyone who is not
+        an active owner (the bootstrap tech's owner invite) is void."""
+        cur.execute("UPDATE invites SET revoked = 1 WHERE kind = 'join' AND used = 0 "
+                    "AND revoked = 0 AND NOT EXISTS (SELECT 1 FROM accounts a WHERE "
+                    "a.id = invites.created_by AND a.role = 'owner' AND a.status = 'active') "
+                    "AND EXISTS (SELECT 1 FROM accounts WHERE role = 'owner' "
+                    "AND status = 'active')")
+        return cur.rowcount
+
+    def _void_if_unauthorised(self, cur: sqlite3.Cursor, inv: sqlite3.Row,
+                              stamp: Stamp) -> Optional[dict[str, Any]]:
+        """Revoke a link whose maker could not issue it now; return the event
+        detail when it did. `recover` links come from the server command and
+        have no maker to check."""
+        kind = inv["kind"]
+        if kind == "recover":
+            return None
+        maker = self._account(cur, inv["created_by"])
+        if maker is not None and maker["status"] == "active":
+            if kind == "join" and access.may_invite(maker["role"], inv["role"],
+                                                    self._owners(cur) > 0):
+                return None
+            if kind in RESET_KINDS and access.allowed(maker["role"], "manage_accounts"):
+                return None
+        cur.execute("UPDATE invites SET revoked = 1 WHERE token_hash = ?", (inv["token_hash"],))
+        detail = {"invite_kind": kind, "reason": "maker_not_allowed"}
+        self._event(cur, "invite_revoked", None, inv["account_id"], None, None, detail, stamp)
+        return detail
+
+    def _count_failure(self, account_id: str, now: float, via: Optional[str],
+                       source: Optional[str]) -> None:
+        """A wrong current code or password on a reset link: counted exactly as
+        a failed sign-in, in its own committed transaction so the refusal that
+        follows cannot roll it back. The fifth failure in LOCK_WINDOW locks the
+        account for LOCK_SECONDS and writes one `locked` event."""
+        stamp = self.clock.now()
+        detail = None
+        with self.store.transaction() as cur:
+            row = self._account(cur, account_id)
+            if row is None:
+                return
+            first = row["first_failed_at"]
+            if first is None or now - first >= LOCK_WINDOW:
+                count, first = 1, now
+            else:
+                count = (row["failed_count"] or 0) + 1
+            if count >= LOCK_AFTER:
+                until = now + LOCK_SECONDS
+                cur.execute("UPDATE accounts SET failed_count = 0, first_failed_at = NULL, "
+                            "locked_until = ? WHERE id = ?", (until, account_id))
+                detail = {"count": count, "locked_until": until, "method": "reset_link"}
+                self._event(cur, "locked", None, account_id, via, source, detail, stamp)
+            else:
+                cur.execute("UPDATE accounts SET failed_count = ?, first_failed_at = ? "
+                            "WHERE id = ?", (count, first, account_id))
+        if detail is not None:
+            _log("locked", None, account_id, via, detail)
 
     @staticmethod
     def _end_sessions(cur: sqlite3.Cursor, account_id: str) -> None:

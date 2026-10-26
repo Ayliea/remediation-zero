@@ -590,3 +590,210 @@ def test_every_mutation_writes_one_event_without_secrets(accounts, store, now, c
         assert value not in logs, "secret in the log"
     for email in ("owner@client.example", "tech@msp.example", "spare@msp.example"):
         assert email not in dump and email not in logs
+
+
+# --- a link is only as good as its maker's authority ------------------------
+
+def invite_row(store, token):
+    with sqlite3.connect(store.path) as c:
+        c.row_factory = sqlite3.Row
+        return c.execute("SELECT * FROM invites WHERE token_hash = ?",
+                         (token_hash(token),)).fetchone()
+
+
+def test_a_removed_inviters_link_is_refused(accounts, store, now):
+    a_id, _, _ = setup_owner(accounts, now)
+    b_id, _, _ = join(accounts, now, a_id, "partner@client.example", "owner")
+    token = accounts.invite(b_id, "tech@msp.example", "tech")
+    view = accounts.invite_view(token)
+    accounts.remove(a_id, b_id)
+    now.tick()
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+    assert store.account_by_email("tech@msp.example")["status"] == "invited"
+
+    # the check at use holds even if the maker lost authority some other way
+    c_id, _, _ = join(accounts, now, a_id, "third@client.example", "owner")
+    token = accounts.invite(c_id, "helper@msp.example", "tech")
+    view = accounts.invite_view(token)
+    with store.transaction() as cur:
+        cur.execute("UPDATE accounts SET status = 'removed' WHERE id = ?", (c_id,))
+    now.tick()
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+    row = invite_row(store, token)
+    assert (row["used"], row["revoked"]) == (0, 1)        # revoked, not spent
+    ev = store.events(limit=1)[0]
+    assert ev["event"] == "invite_revoked" and json.loads(ev["detail"]) == {
+        "invite_kind": "join", "reason": "maker_not_allowed"}
+    assert accounts.invite_view(token) is None
+
+
+def test_a_demoted_owners_reset_link_is_refused(accounts, store, now):
+    a_id, _, _ = setup_owner(accounts, now)
+    b_id, _, _ = join(accounts, now, a_id, "partner@client.example", "owner")
+    tech_id, secret, _ = join(accounts, now, a_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(b_id, tech_id, "reset_password")
+    accounts.set_role(a_id, b_id, "tech")
+    now.tick()
+    with refused("invalid_link"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+
+    # and when the demotion bypassed set_role, the link is voided where it is used
+    accounts.set_role(a_id, b_id, "owner")
+    token = accounts.reset_link(b_id, tech_id, "reset_mfa")
+    with store.transaction() as cur:
+        cur.execute("UPDATE accounts SET role = 'tech' WHERE id = ?", (b_id,))
+    assert accounts.invite_view(token) is None
+    assert invite_row(store, token)["revoked"] == 1
+    with refused("invalid_link"):
+        accounts.accept_invite(token, None, "123456", current_password=PW_TECH)
+    assert store.account_by_id(tech_id)["totp_secret"] == secret
+
+    # a recover link has no maker and is not affected
+    link = accounts.recover_owner("owner@client.example")
+    assert accounts.invite_view(link).kind == "recover"
+
+
+def test_tech_owner_invite_is_void_once_an_owner_joins(accounts, store, now):
+    tech_id, _, _ = setup_owner(accounts, now, email="tech@msp.example", role="tech")
+    first = accounts.invite(tech_id, "owner@client.example", "owner")
+    second = accounts.invite(tech_id, "spouse@client.example", "owner")
+    second_view = accounts.invite_view(second)
+    view = accounts.invite_view(first)
+    now.tick()
+    owner_id, _ = accounts.accept_invite(first, PW_OWNER, code_for(view.totp_secret, now))
+    ev = store.events(limit=1)[0]
+    assert ev["event"] == "invite_accepted"
+    assert json.loads(ev["detail"]) == {"invite_kind": "join", "role": "owner", "count": 1}
+    assert invite_row(store, second)["revoked"] == 1
+    assert accounts.invite_view(second) is None
+    with refused("invalid_link"):
+        accounts.accept_invite(second, PW_NEW, code_for(second_view.totp_secret, now))
+    # the owner may invite that person again
+    assert accounts.invite_view(accounts.invite(owner_id, "spouse@client.example", "owner"))
+
+    # and if the cascade were missed, the check at use still refuses it
+    tech2_id, _, _ = join(accounts, now, owner_id, "tech2@msp.example", "tech")
+    with store.transaction() as cur:
+        cur.execute("INSERT INTO invites (token_hash, kind, email, role, account_id, "
+                    "created_by, expires_at, real_ts, sim_ts) VALUES (?, 'join', "
+                    "'late@client.example', 'owner', 'acct-late', ?, ?, 1.0, 1.0)",
+                    (token_hash("stale-tech-link"), tech2_id, now() + DAY))
+        cur.execute("INSERT INTO accounts (id, email, role, status) VALUES "
+                    "('acct-late', 'late@client.example', 'owner', 'invited')")
+    assert accounts.invite_view("stale-tech-link") is None
+    assert invite_row(store, "stale-tech-link")["revoked"] == 1
+
+
+def test_remove_and_demotion_revoke_the_subjects_unused_links(accounts, store, now):
+    a_id, _, _ = setup_owner(accounts, now)
+    b_id, _, _ = join(accounts, now, a_id, "partner@client.example", "owner")
+    tech_id, _, _ = join(accounts, now, b_id, "tech@msp.example", "tech")   # B's used link
+    pending = accounts.invite(b_id, "tech2@msp.example", "tech")
+    reset = accounts.reset_link(b_id, tech_id, "reset_password")
+    mine = accounts.invite(a_id, "tech3@msp.example", "tech")
+
+    accounts.set_role(a_id, b_id, "tech")
+    assert invite_row(store, pending)["revoked"] == 1
+    assert invite_row(store, reset)["revoked"] == 1
+    assert invite_row(store, mine)["revoked"] == 0                # not B's
+    with sqlite3.connect(store.path) as c:
+        used = c.execute("SELECT used, revoked FROM invites WHERE created_by = ? AND used = 1",
+                         (b_id,)).fetchall()
+    assert used == [(1, 0)]                                       # history left alone
+    ev = store.events(limit=1)[0]
+    assert json.loads(ev["detail"]) == {"from": "owner", "to": "tech", "count": 2}
+
+    accounts.set_role(a_id, b_id, "owner")
+    later = accounts.invite(b_id, "tech4@msp.example", "tech")
+    accounts.remove(a_id, b_id)
+    assert invite_row(store, later)["revoked"] == 1
+    ev = store.events(limit=1)[0]
+    assert (ev["event"], json.loads(ev["detail"])) == ("removed", {"role": "owner", "count": 1})
+
+
+# --- reset links' second factor is rate limited -----------------------------
+
+def test_reset_link_second_factor_failures_lock_the_account(accounts, store, now):
+    from tools.accounts import LOCK_AFTER, LOCK_SECONDS, LOCK_WINDOW
+    assert (LOCK_AFTER, LOCK_WINDOW, LOCK_SECONDS) == (5, 900, 900)
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(owner_id, tech_id, "reset_password")
+
+    for _ in range(LOCK_AFTER - 1):
+        with refused("bad_code"):
+            accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    row = store.account_by_id(tech_id)
+    assert row["failed_count"] == LOCK_AFTER - 1 and row["locked_until"] is None
+    # failures older than the window no longer count
+    now.tick(LOCK_WINDOW)
+    with refused("bad_code"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    assert store.account_by_id(tech_id)["failed_count"] == 1
+    for _ in range(LOCK_AFTER - 2):
+        with refused("bad_code"):
+            accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    assert store.events(limit=1)[0]["event"] != "locked"
+    with refused("bad_code"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    row = store.account_by_id(tech_id)
+    assert row["locked_until"] == now() + LOCK_SECONDS
+    ev = store.events(limit=1)[0]
+    assert (ev["event"], ev["subject_id"]) == ("locked", tech_id)
+    assert json.loads(ev["detail"])["count"] == LOCK_AFTER
+    inv = invite_row(store, token)
+    assert (inv["used"], inv["revoked"]) == (0, 0)                # the link is not burnt
+
+    # a wrong current password on a reset_mfa link counts the same way
+    other_id, _, _ = join(accounts, now, owner_id, "other@msp.example", "tech")
+    link = accounts.reset_link(owner_id, other_id, "reset_mfa")
+    view = accounts.invite_view(link)
+    for _ in range(LOCK_AFTER):
+        with refused("password"):
+            accounts.accept_invite(link, None, code_for(view.totp_secret, now),
+                                   current_password="not the password at all")
+    assert store.account_by_id(other_id)["locked_until"] == now() + LOCK_SECONDS
+    assert store.events(limit=1)[0]["event"] == "locked"
+
+    # a wrong code from the link's *new* secret is not a guess at an existing factor
+    third_id, _, _ = join(accounts, now, owner_id, "third@msp.example", "tech")
+    link = accounts.reset_link(owner_id, third_id, "reset_mfa")
+    view = accounts.invite_view(link)
+    with refused("bad_code"):
+        accounts.accept_invite(link, None, wrong_code(view.totp_secret, now),
+                               current_password=PW_TECH)
+    assert (store.account_by_id(third_id)["failed_count"] or 0) == 0
+
+
+def test_a_locked_account_cannot_use_a_reset_link(accounts, store, now):
+    from tools.accounts import LOCK_AFTER, LOCK_SECONDS
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(owner_id, tech_id, "reset_password")
+    for _ in range(LOCK_AFTER):
+        with refused("bad_code"):
+            accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    locked_until = store.account_by_id(tech_id)["locked_until"]
+    events_then = len(store.events(limit=10_000))
+    now.tick()
+    # locked: even the right code is refused, and a wrong one is not counted
+    with refused("locked"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    with refused("locked"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    mfa = accounts.reset_link(owner_id, tech_id, "reset_mfa")
+    view = accounts.invite_view(mfa)
+    with refused("locked"):
+        accounts.accept_invite(mfa, None, code_for(view.totp_secret, now),
+                               current_password=PW_TECH)
+    row = store.account_by_id(tech_id)
+    assert row["locked_until"] == locked_until and row["failed_count"] == 0
+    assert len(store.events(limit=10_000)) == events_then + 1     # just the reset_link
+    assert invite_row(store, token)["used"] == 0
+    # once the lock lapses the same link works, and the counters are cleared
+    now.tick(LOCK_SECONDS)
+    accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    row = store.account_by_id(tech_id)
+    assert row["locked_until"] is None and row["failed_count"] == 0
