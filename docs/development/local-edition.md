@@ -97,11 +97,16 @@ before it creates or writes anything.
   `--approved-by-person`.
 - **approve** records a person's approval of an `unreviewed` or
   `held_for_approval` decision. See "Review" below.
-- **serve** shows the dashboard and Settings on `http://127.0.0.1:8081`. With
+- **serve** shows the dashboard and Settings on `http://127.0.0.1:8081` (the
+  saved port; `--port` overrides it). With
   `--demo` it shows illustrative fixtures instead of saved records. Its first
   line is `Local synthetic preview: <url>` with `--demo` and
-  `Local dashboard: <url>` for saved records. It binds
-  only to loopback. Every page and form needs a signed-in account (password
+  `Local dashboard: <url>` for saved records. By default it binds
+  only to loopback, over plain HTTP; a network listen address serves HTTPS
+  instead (see "HTTPS on a network address" below). If the address or port
+  cannot be used it exits with one sentence, such as
+  `This machine cannot listen on 127.0.0.1:8081: the port is already in use.`
+  Every page and form needs a signed-in account (password
   and authenticator code); with no account yet, a visit on the server itself
   (`http://127.0.0.1:PORT`, no `--public-url`) opens the first-account setup
   page, and any other visit shows only the setup command. Saving Settings or
@@ -128,8 +133,8 @@ before it creates or writes anything.
     python3 -S start-remediation-zero.py --saved --public-url https://HOST.TAILNET.ts.net:8081
     ```
 
-    The dashboard's own HTTPS and listening on the network are release
-    project 2.
+    A proxy is still the simplest way to give the dashboard a certificate
+    browsers already trust.
 
 - **update-enrichment** downloads CISA KEV, FIRST EPSS and NVD data into the
   workspace cache. It is the one command that reaches the internet. The
@@ -164,6 +169,52 @@ before it creates or writes anything.
 A `--database` that names a single database file from an earlier version is
 refused with "... is not a Remediation Zero workspace directory ...;
 nothing was changed." It is not converted. Choose a new or empty folder.
+
+## HTTPS on a network address
+
+To reach the dashboard directly from other machines (a VM or a headless
+server), set the listen address in Settings, Application, from a browser on
+the server itself, and restart. `0.0.0.0` (or `::`) listens on every address;
+a specific IP listens on that one. Any address that is not loopback always
+means HTTPS, TLS 1.2 or newer, and never plain HTTP; a plain `http://` request
+to that port is closed without an answer. In the same section:
+
+- **Server names**: the host names and IPs people type to reach the server.
+  The server answers only to these (and to `127.0.0.1` / `localhost` on its
+  port); any other Host is refused with 403. Left empty, it uses this
+  machine's host name, plus the listen address when that is a specific IP.
+  If neither gives a name, `serve` exits with
+  `No server name is set, so a certificate cannot be made. Set the names people use to reach this server: settings set application server_names=NAME`.
+- **Certificate**: `self-signed` (the default) or `own`.
+  - Self-signed: at start, `serve` runs `openssl` to make an EC P-256 key and a
+    certificate valid 825 days, naming every server name, as
+    `server-cert.pem` and `server-key.pem` (both 0600) inside the workspace
+    folder. It is reused on later starts, and made again when the names change
+    or fewer than 30 days remain. Without `openssl` (usually Windows), `serve`
+    exits with `No openssl command was found, so a certificate cannot be made. Set your own certificate (settings set application certificate.mode=own …) or use a proxy.`
+  - Own: absolute paths to a PEM certificate (or chain, server certificate
+    first) and its key. The pair is checked when saved and again at start; a
+    file that cannot be loaded stops `serve` with a sentence naming the file,
+    never its contents.
+
+Started this way, `serve` prints:
+
+```text
+Local dashboard: https://NAME:PORT/
+Certificate fingerprint (SHA-256): AB:CD:…
+No accounts yet. Create the first one on this server: python3 -S -m scripts.local --database DIR account setup
+```
+
+The third line appears only while there are no accounts; the first account
+is created on the server itself, never through the network listener. A
+browser warns about a self-signed certificate: compare the fingerprint it
+shows with the printed one (also shown in Settings) before going on, so you
+know the warning is for this server and not for something in between. The
+launcher prints the same lines and never opens a browser for a network
+address. Each connection's TLS handshake has 15 seconds, in its own thread, so
+a client that connects and sends nothing does not hold up anyone else; a
+failed handshake is logged as `tls_handshake_failed` with its error class
+only.
 
 ## Model roles
 

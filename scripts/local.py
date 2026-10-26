@@ -13,13 +13,17 @@ with no model configured. API keys come only from the environment
 printed, logged or written to settings.
 """
 import argparse
+import errno
 import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
 import shlex
+import socket
+import ssl
 import sys
 import unicodedata
 import threading
@@ -39,7 +43,7 @@ from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
 from scripts import local_auth
-from tools import access, local_settings
+from tools import access, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
 from tools.adjudication import RetryStateError
@@ -295,8 +299,53 @@ IDLE_TIMEOUT = 15
 
 class DashboardServer(ThreadingHTTPServer):
     """One thread per connection, so an idle connection holds only its own thread.
-    The handler still runs requests one at a time."""
+    The handler still runs requests one at a time.
+
+    With `tls_context`, the listener accepts plain sockets and each connection's TLS handshake
+    runs in its own thread under IDLE_TIMEOUT, so a client that connects and stalls (or sends
+    plain HTTP) holds only that thread, never the accept loop. A failed handshake is closed
+    quietly: one log line with the error class, nothing about the peer or what it sent."""
     daemon_threads = True
+
+    def __init__(self, address, handler_class, tls_context=None):
+        self.tls_context = tls_context
+        try:
+            if ipaddress.ip_address(address[0]).version == 6:
+                self.address_family = socket.AF_INET6
+        except ValueError:
+            pass  # a host name: the default family
+        super().__init__(address, handler_class)
+
+    def process_request_thread(self, request, client_address):
+        if self.tls_context is not None:
+            request = self._handshake(request)
+            if request is None:
+                return
+        super().process_request_thread(request, client_address)
+
+    def _handshake(self, raw):
+        try:
+            raw.settimeout(IDLE_TIMEOUT)
+            wrapped = self.tls_context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
+        except (OSError, ValueError) as error:
+            _log('tls_handshake_failed', error=type(error).__name__)
+            raw.close()
+            return None
+        try:
+            wrapped.do_handshake()
+        except (OSError, ValueError) as error:  # ssl.SSLError and timeouts are OSErrors
+            _log('tls_handshake_failed', error=type(error).__name__)
+            wrapped.close()
+            return None
+        return wrapped
+
+    def handle_error(self, request, client_address):
+        # A TLS connection that breaks mid-request is the client's doing: the class only, no traceback.
+        error = sys.exc_info()[1]
+        if self.tls_context is not None and isinstance(error, (ssl.SSLError, ConnectionError, TimeoutError)):
+            _log('tls_connection_failed', error=type(error).__name__)
+            return
+        super().handle_error(request, client_address)
 
 
 def scanner_probe(settings, *, test=False):
@@ -764,7 +813,7 @@ class _BodyBudget:
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
             public_origin=None, *, accounts, settings_exposed=False, server_names=(), scheme='http',
-            limiter=None):
+            limiter=None, workspace_root=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
     # accounts: tools.accounts.Accounts on the workspace's accounts file, opened by serve
@@ -773,6 +822,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # each request is classified (local, proxied, direct) and what that changes.
     # settings_exposed: the saved listen address is a network one, so no request is local.
     # server_names, scheme: the names a 'direct' request may use, over the TLS listener ('https').
+    # workspace_root: where serve keeps the self-signed certificate, for the Settings fingerprint.
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
     auth = local_auth.AuthRoutes(accounts, limiter)
@@ -1157,7 +1207,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.redirect('/?view=accounts')
 
         def _settings_html(self, values, section, *, message='', scanner=None):
-            return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, config_path),
+            return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, workspace_root),
                 keys={role: key_present(role, os.environ) for role in ROLES},
                 overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
 
@@ -1382,15 +1432,132 @@ def public_origin(url):
     return f'https://{host}' if port in (None, 443) else f'https://{host}:{port}'
 
 
-def _certificate_fingerprint(values, config_path):
-    """The fingerprint of the certificate that would be served, or None if there is none yet."""
-    from tools.server_tls import CERT_NAME, fingerprint  # imported late: only the settings page needs it
+def _certificate_fingerprint(values, workspace_root):
+    """The fingerprint of the certificate that would be served, or None if there is none yet.
+    The self-signed one is in the workspace, where serve makes it."""
     cert = values['certificate']
-    path = cert['cert_file'] if cert['mode'] == 'own' else str(Path(config_path).parent / CERT_NAME)
+    if cert['mode'] == 'own':
+        path = cert['cert_file']
+    elif workspace_root is not None:
+        path = Path(workspace_root) / server_tls.CERT_NAME
+    else:
+        return None
     try:
-        return fingerprint(path)
+        return server_tls.fingerprint(path)
     except (OSError, ValueError):
         return None
+
+
+class ServeRefused(Exception):
+    """serve cannot start; the message is the one sentence printed."""
+
+
+NO_SERVER_NAME = ('No server name is set, so a certificate cannot be made. Set the names people use to reach '
+                  'this server: settings set application server_names=NAME')
+NO_SERVER_NAME_OWN = ('No server name is set, so the server would refuse every name people use to reach it. '
+                      'Set them: settings set application server_names=NAME')
+NO_OPENSSL = ('No openssl command was found, so a certificate cannot be made. Set your own certificate '
+              '(settings set application certificate.mode=own …) or use a proxy.')
+FINGERPRINT_LINE = 'Certificate fingerprint (SHA-256): '
+NO_ACCOUNTS_LINE = 'No accounts yet. Create the first one on this server: '
+
+
+def default_server_names(settings):
+    """The names a network listener answers to and its certificate carries: the saved
+    server_names, or else this machine's host name (when it is a valid one) and the listen
+    address when it is a specific IP rather than 0.0.0.0 or ::. Possibly empty."""
+    names = list(settings['server_names'])
+    if names:
+        return names
+    try:
+        names.append(local_settings.normalize_server_name(socket.gethostname()))
+    except (ValueError, OSError):
+        pass
+    address = ipaddress.ip_address(settings['listen_address'])
+    if not address.is_unspecified and str(address) not in names:
+        names.append(str(address))
+    return names
+
+
+def _host_port(host, port):
+    return f'[{host}]:{port}' if ':' in host else f'{host}:{port}'
+
+
+def bind_refusal(address, port, error):
+    """The one sentence for a listener that could not bind."""
+    reasons = {errno.EADDRINUSE: 'the port is already in use',
+               errno.EADDRNOTAVAIL: "that address is not one of this machine's",
+               errno.EACCES: 'permission was refused'}
+    reason = reasons.get(getattr(error, 'errno', None), f'the system refused ({type(error).__name__})')
+    return f'This machine cannot listen on {_host_port(address, port)}: {reason}.'
+
+
+def _tls_context(ws, settings, names):
+    """(context, certificate path) for the network listener; ServeRefused with one sentence."""
+    cert = settings['certificate']
+    if cert['mode'] == 'own':
+        if not names:
+            raise ServeRefused(NO_SERVER_NAME_OWN)
+        cert_file, key_file = cert['cert_file'], cert['key_file']
+        try:
+            server_tls.fingerprint(cert_file)
+        except (OSError, ValueError):
+            raise ServeRefused(f'Your certificate file {cert_file} could not be read as a PEM certificate.') from None
+        try:
+            return server_tls.server_context(cert_file, key_file), cert_file
+        except (ssl.SSLError, OSError, ValueError):
+            # The key's contents are never part of the message, only its path.
+            raise ServeRefused(f'Your key file {key_file} could not be loaded, or it does not match the '
+                               f'certificate {cert_file}.') from None
+    if not names:
+        raise ServeRefused(NO_SERVER_NAME)
+    try:
+        cert_path, key_path = server_tls.ensure_self_signed(ws.root, names)
+    except server_tls.NoOpenssl:
+        raise ServeRefused(NO_OPENSSL) from None
+    except RuntimeError as error:  # openssl failed; the message names its error class only
+        raise ServeRefused(f'{error}. Set your own certificate (settings set application '
+                           'certificate.mode=own …) or use a proxy.') from None
+    return server_tls.server_context(cert_path, key_path), cert_path
+
+
+def build_server(ws, preferences, config_path, *, demo=False, public_url=None, port=None, clock=None):
+    """(server, banner lines) for `serve`; ServeRefused, before anything listens, when it cannot start.
+
+    Loopback settings (the default): plain HTTP on 127.0.0.1, as before. A network listen
+    address: TLS only, with the self-signed certificate (made or renewed in the workspace) or
+    your own, and the request kinds of scripts/local_auth.py's 'direct' over https."""
+    exposed = local_settings.exposed(preferences)
+    port = preferences['port'] if port is None else port
+    command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
+    if exposed:
+        names = default_server_names(preferences)
+        context, cert_path = _tls_context(ws, preferences, names)
+        address = preferences['listen_address']
+    else:
+        names, context, cert_path, address = list(preferences['server_names']), None, None, '127.0.0.1'
+    docs = ws.docs_for('dashboard')  # reads only: no collection is writable
+    upload = None if demo else page_upload(ws, config_path, os.environ)
+    view = _View(docs)
+    # The accounts file is opened here, by the dashboard server, and by the account
+    # commands; never through docs_for, so no agent stage can reach it.
+    accounts = Accounts(AccountStore(ws.accounts_path()), clock or SimClock.from_env())
+    handler_class = handler(view, demo, config_path, command, upload, records=view.records,
+                            public_origin=public_url, accounts=accounts, settings_exposed=exposed,
+                            server_names=tuple(names), scheme='https' if exposed else 'http',
+                            workspace_root=ws.root)
+    try:
+        server = DashboardServer((address, port), handler_class, tls_context=context)
+    except OSError as error:
+        docs.close()
+        raise ServeRefused(bind_refusal(address, port, error)) from None
+    if not exposed:
+        return server, [serve_banner(demo, server.server_port)]
+    lines = [f'{DEMO_BANNER if demo else SAVED_BANNER}https://{_host_port(names[0], server.server_port)}/',
+             FINGERPRINT_LINE + server_tls.fingerprint(cert_path)]
+    if accounts.store.count_accounts() == 0:
+        lines.append(f'{NO_ACCOUNTS_LINE}{command} account setup')
+    return server, lines
 
 
 def serve_banner(demo, port):
@@ -1443,9 +1610,10 @@ def _parser():
     approving.add_argument('finding')
     approving.add_argument('--cycle', type=_cycle, required=True)
     approving.add_argument('--by', default='local user', metavar='NAME')
-    serve = commands.add_parser('serve', help='Serve the dashboard and preferences on loopback')
+    serve = commands.add_parser('serve', help='Serve the dashboard and preferences: on loopback, or over HTTPS '
+                                              'on the saved listen address')
     serve.add_argument('--demo', action='store_true', help='Show illustrative fixtures instead of saved records')
-    serve.add_argument('--port', type=int, default=8081)
+    serve.add_argument('--port', type=int, help='Default: the saved port (8081 unless set)')
     serve.add_argument('--public-url', type=_public_url, metavar='URL',
                        help='The https:// address of a proxy in front, such as Tailscale Serve')
     greenbone = commands.add_parser('greenbone', help='Read tasks and finished reports from Greenbone; never changes anything there')
@@ -1579,20 +1747,13 @@ def main():
             if result['kev'] != 'ok' or result['epss'] != 'ok' or result['nvd_failed']:
                 raise SystemExit(1)
         elif args.command == 'serve':
-            docs = ws.docs_for('dashboard')  # reads only: no collection is writable
-            command = f'python3 -S -m scripts.local --database {shlex.quote(str(ws.root.resolve()))}'
-            upload = None if args.demo else page_upload(ws, config_path, os.environ)
-            view = _View(docs)
-            # The accounts file is opened here, by the dashboard server, and by the account
-            # commands; never through docs_for, so no agent stage can reach it.
-            accounts = Accounts(AccountStore(ws.accounts_path()), clock)
-            # Still loopback and plain HTTP: the TLS listener for a network address is Task 9's.
-            with DashboardServer(('127.0.0.1', args.port),
-                                 handler(view, args.demo, config_path, command, upload, records=view.records,
-                                         public_origin=args.public_url, accounts=accounts,
-                                         settings_exposed=local_settings.exposed(preferences),
-                                         server_names=tuple(preferences['server_names']))) as server:
-                print(serve_banner(args.demo, server.server_port), flush=True)
+            try:
+                server, lines = build_server(ws, preferences, config_path, demo=args.demo,
+                                             public_url=args.public_url, port=args.port, clock=clock)
+            except ServeRefused as refusal:
+                parser.exit(1, f'{refusal}\n')
+            with server:
+                print('\n'.join(lines), flush=True)
                 if args.public_url:
                     print(f'Also at {args.public_url} through your HTTPS proxy. {PROXY_SIGN_IN}', flush=True)
                 server.serve_forever()

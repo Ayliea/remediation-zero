@@ -88,8 +88,16 @@ def start_interval_runner(database, minutes, **kwargs):
     return runner
 
 
-#: The two first lines `scripts.local serve` prints (demo fixtures, or saved records).
-READY_PREFIXES = ('Local synthetic preview: http://127.0.0.1:', 'Local dashboard: http://127.0.0.1:')
+#: The first line `scripts.local serve` prints (demo fixtures, or saved records): on loopback,
+#: or the https:// address of a network listener.
+READY_PREFIXES = ('Local synthetic preview: http://127.0.0.1:', 'Local dashboard: http://127.0.0.1:',
+                  'Local synthetic preview: https://', 'Local dashboard: https://')
+
+
+def _relay(stream):
+    """Print what serve prints after its first line (the rest of a network listener's banner)."""
+    for line in stream:
+        print(line.rstrip('\n'), flush=True)
 
 
 def is_ready_line(line):
@@ -121,6 +129,7 @@ def main():
         preferences = local_settings.load(local_settings.settings_path(database))
     except (ValueError, OSError):
         raise SystemExit('Could not read local preferences. Check the settings file before restarting.')
+    exposed = local_settings.exposed(preferences)
     command = [sys.executable, '-S', '-m', 'scripts.local', '--database',
                str(database), 'serve', '--port', str(args.port if args.port is not None else preferences['port'])]
     if args.demo or (not args.saved and preferences['mode'] == 'demo'):
@@ -133,6 +142,13 @@ def main():
         if not is_ready_line(ready):
             raise SystemExit('Dashboard did not start. Check the error above; port 8081 may already be in use. Try --port 8082.')
         print(ready, flush=True)
+        relay = None
+        if exposed:
+            # The fingerprint line always follows; the account-setup line may. The fingerprint is
+            # printed before anything else, the rest as it comes.
+            print(process.stdout.readline().rstrip('\n'), flush=True)
+            relay = threading.Thread(target=_relay, args=(process.stdout,), name='rz-banner', daemon=True)
+            relay.start()
         if public:
             print(f'Also at {public} through your HTTPS proxy. {local.PROXY_SIGN_IN}', flush=True)
         minutes = preferences['cycle_interval_minutes']
@@ -144,9 +160,12 @@ def main():
             print('Synthetic preview only. Press Ctrl+C here to stop. No model calls are made by this launcher.', flush=True)
         else:
             print('Press Ctrl+C here to stop. No cycle is scheduled, so this launcher makes no model calls.', flush=True)
-        if not args.no_browser and preferences['open_browser']:
+        # A network listener is for other machines, and this one may have no browser at all.
+        if not exposed and not args.no_browser and preferences['open_browser']:
             webbrowser.open(ready.split()[-1])
         return_code = process.wait()
+        if relay is not None:
+            relay.join(timeout=5)
         if return_code:
             raise SystemExit(return_code)
     except KeyboardInterrupt:

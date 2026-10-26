@@ -5,6 +5,7 @@
 import hashlib
 import ipaddress
 import os
+import re
 from pathlib import Path
 import shutil
 import ssl
@@ -94,9 +95,16 @@ def ensure_self_signed(root, names):
     return cert, key
 
 
+_PEM_CERT = re.compile(r'-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----', re.S)
+
+
 def fingerprint(cert_path):
-    """SHA-256 of the certificate's DER, as colon-separated upper-case hex."""
-    der = ssl.PEM_cert_to_DER_cert(Path(cert_path).read_text())
+    """SHA-256 of the certificate's DER, as colon-separated upper-case hex. For a chain file,
+    the first certificate's: the server's own, which is what a browser shows."""
+    first = _PEM_CERT.search(Path(cert_path).read_text())
+    if first is None:
+        raise ValueError('No PEM certificate found')
+    der = ssl.PEM_cert_to_DER_cert(first.group(0))
     digest = hashlib.sha256(der).hexdigest().upper()
     return ':'.join(digest[i:i + 2] for i in range(0, len(digest), 2))
 

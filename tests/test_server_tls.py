@@ -72,6 +72,20 @@ def test_fingerprint_format(tmp_path):
     assert out.strip().split('=', 1)[1].upper() == value
 
 
+@needs_openssl
+def test_fingerprint_of_a_chain_is_the_first_certificates(tmp_path):
+    (tmp_path / 'a').mkdir()
+    (tmp_path / 'b').mkdir()
+    leaf, _ = server_tls.ensure_self_signed(tmp_path / 'a', ['a.example.test'])
+    other, _ = server_tls.ensure_self_signed(tmp_path / 'b', ['b.example.test'])
+    chain = tmp_path / 'chain.pem'
+    chain.write_text(leaf.read_text() + other.read_text())
+    assert server_tls.fingerprint(chain) == server_tls.fingerprint(leaf)
+    (tmp_path / 'empty.pem').write_text('not a certificate\n')
+    with pytest.raises(ValueError):
+        server_tls.fingerprint(tmp_path / 'empty.pem')
+
+
 def test_no_openssl_raises_NoOpenssl(tmp_path, monkeypatch):
     monkeypatch.setattr(server_tls.shutil, 'which', lambda name: None)
     with pytest.raises(server_tls.NoOpenssl):

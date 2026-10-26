@@ -852,7 +852,7 @@ def test_serve_reads_through_the_dashboard_stage(ws, monkeypatch):
         return real_docs_for(self, stage)
 
     class FakeServer:
-        def __init__(self, address, handler_class):
+        def __init__(self, address, handler_class, tls_context=None):
             self.server_port = address[1]
 
         def __enter__(self):
