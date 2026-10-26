@@ -1693,13 +1693,39 @@ NO_SERVER_NAME_OWN = ('No server name is set, so the server would refuse every n
 NO_OPENSSL = ('No openssl command was found, so a certificate cannot be made. Set your own certificate '
               '(settings set application certificate.mode=own …) or use a proxy.')
 FINGERPRINT_LINE = 'Certificate fingerprint (SHA-256): '
+#: The banner's second line on a network listener: every name and address it answers to.
+ANSWERS_TO = 'Answers to: '
 NO_ACCOUNTS_LINE = 'No accounts yet. Create the first one on this server: '
 
 
+def _machine_addresses():
+    """This machine's own addresses, as its host name resolves: never loopback or unspecified,
+    never one with an IPv6 scope ID (a browser cannot use it in a URL), each once."""
+    try:
+        found = socket.getaddrinfo(socket.gethostname(), None)
+    except (OSError, UnicodeError, ValueError):
+        return []
+    addresses = []
+    for *_, sockaddr in found:
+        text = str(sockaddr[0])
+        if '%' in text:
+            continue
+        try:
+            address = ipaddress.ip_address(text)
+        except ValueError:
+            continue
+        if address.is_loopback or address.is_unspecified or str(address) in addresses:
+            continue
+        addresses.append(str(address))
+    return addresses
+
+
 def default_server_names(settings):
-    """The names a network listener answers to and its certificate carries: the saved
-    server_names, or else this machine's host name (when it is a valid one) and the listen
-    address when it is a specific IP rather than 0.0.0.0 or ::. Possibly empty."""
+    """The names a network listener answers to and its certificate carries, and the banner's
+    `Answers to:` line: the saved server_names, or else this machine's host name (when it is a
+    valid one) and then the listen address when it is a specific IP, or, for 0.0.0.0 or ::,
+    this machine's own addresses (`_machine_addresses`), so typing the server's IP works.
+    Possibly empty."""
     names = list(settings['server_names'])
     if names:
         return names
@@ -1708,8 +1734,9 @@ def default_server_names(settings):
     except (ValueError, OSError):
         pass
     address = ipaddress.ip_address(settings['listen_address'])
-    if not address.is_unspecified and str(address) not in names:
-        names.append(str(address))
+    for name in (_machine_addresses() if address.is_unspecified else [str(address)]):
+        if name not in names:
+            names.append(name)
     return names
 
 
@@ -1807,7 +1834,7 @@ def build_server(ws, preferences, config_path, *, demo=False, public_url=None, p
         lines = [serve_banner(demo, server.server_port)]
     else:
         lines = [f'{DEMO_BANNER if demo else SAVED_BANNER}https://{_host_port(names[0], server.server_port)}/',
-                 FINGERPRINT_LINE + fingerprint]
+                 ANSWERS_TO + ', '.join(names), FINGERPRINT_LINE + fingerprint]
     # Setup is offered in the browser only to a local visit (loopback, no proxy); otherwise
     # the first account is made with this command, on the server.
     if no_accounts and (exposed or public_url):

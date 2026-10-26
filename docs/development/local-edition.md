@@ -199,7 +199,11 @@ to that port is closed without an answer. In the same section:
 - **Server names**: the host names and IPs people type to reach the server.
   The server answers only to these (and to `127.0.0.1` / `localhost` on its
   port); any other Host is refused with 403. Left empty, it uses this
-  machine's host name, plus the listen address when that is a specific IP.
+  machine's host name, plus the listen address when that is a specific IP,
+  or, for `0.0.0.0` or `::`, the machine's own addresses as its host name
+  resolves (never loopback ones, and never an IPv6 address with a scope ID),
+  so typing the server's IP works. The same list is in the certificate and on
+  the `Answers to:` line `serve` prints.
   If neither gives a name, `serve` exits with
   `No server name is set, so a certificate cannot be made. Set the names people use to reach this server: settings set application server_names=NAME`.
 - **Certificate**: `self-signed` (the default) or `own`.
@@ -218,11 +222,13 @@ Started this way, `serve` prints:
 
 ```text
 Local dashboard: https://NAME:PORT/
+Answers to: NAME, 192.0.2.10
 Certificate fingerprint (SHA-256): AB:CD:…
 No accounts yet. Create the first one on this server: python3 -S -m scripts.local --database DIR account setup
 ```
 
-The third line appears only while there are no accounts; the first account
+`Answers to:` lists every name and address the server answers to; any other
+is refused with 403. The last line appears only while there are no accounts; the first account
 is created on the server itself, never through the network listener. A
 loopback install started with `--public-url` prints the same line, since the
 browser does not offer setup there either. A self-signed key or certificate

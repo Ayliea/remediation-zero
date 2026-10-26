@@ -73,6 +73,21 @@ def https_get(server, ws, path='/signin', host=NAME, timeout=10):
     return response
 
 
+def machine_addresses(monkeypatch, host, entries):
+    """getaddrinfo for this machine's (patched) host name answers `entries`; every other
+    lookup, the test client's own included, goes to the real one."""
+    real = socket.getaddrinfo
+
+    def lookup(name, port, *args, **kwargs):
+        if name == host:
+            if isinstance(entries, BaseException):
+                raise entries
+            return entries
+        return real(name, port, *args, **kwargs)
+
+    monkeypatch.setattr(local.socket, 'getaddrinfo', lookup)
+
+
 @needs_openssl
 def test_exposed_settings_serve_https_with_tls12_minimum(served):
     server, lines, ws = served(server_names=[NAME])
@@ -130,6 +145,7 @@ def test_banner_prints_the_fingerprint_and_the_setup_command(served):
     port = server.server_port
     assert lines == [
         f'Local dashboard: https://{NAME}:{port}/',
+        f'Answers to: {NAME}, 192.0.2.10',
         f'Certificate fingerprint (SHA-256): {server_tls.fingerprint(ws.root / server_tls.CERT_NAME)}',
         'No accounts yet. Create the first one on this server: python3 -S -m scripts.local --database '
         f'{shlex.quote(str(ws.root.resolve()))} account setup',
@@ -140,6 +156,7 @@ def test_banner_prints_the_fingerprint_and_the_setup_command(served):
 @needs_openssl
 def test_exposed_without_names_uses_the_host_name(served, monkeypatch):
     monkeypatch.setattr(local.socket, 'gethostname', lambda: 'RZ-Box.example.test')
+    machine_addresses(monkeypatch, 'RZ-Box.example.test', [])
     assert local.default_server_names(dict(local_settings.DEFAULTS, listen_address='0.0.0.0')) == ['rz-box.example.test']
     assert local.default_server_names(dict(local_settings.DEFAULTS, listen_address='::')) == ['rz-box.example.test']
     assert local.default_server_names(dict(local_settings.DEFAULTS, listen_address='192.0.2.10')) == [
@@ -148,6 +165,7 @@ def test_exposed_without_names_uses_the_host_name(served, monkeypatch):
                                            server_names=[NAME])) == [NAME]
     server, lines, ws = served()  # listening on 127.0.0.1, declared exposed: the address is a name too
     assert lines[0] == f'Local dashboard: https://rz-box.example.test:{server.server_port}/'
+    assert lines[1] == 'Answers to: rz-box.example.test, 127.0.0.1'
     assert server_tls._sans(ws.root / server_tls.CERT_NAME) == {('DNS', 'rz-box.example.test'),
                                                                  ('IP Address', '127.0.0.1')}
     # The Host allowlist is the certificate's names.
@@ -158,6 +176,7 @@ def test_exposed_without_names_uses_the_host_name(served, monkeypatch):
 
 def test_exposed_with_no_usable_name_refuses_to_start(tmp_path, monkeypatch):
     monkeypatch.setattr(local.socket, 'gethostname', lambda: 'not a host name!')
+    machine_addresses(monkeypatch, 'not a host name!', [])
     ws = local.open_workspace(tmp_path / 'ws')
     preferences = dict(local_settings.DEFAULTS, listen_address='0.0.0.0')
     with pytest.raises(local.ServeRefused) as refusal:
@@ -184,7 +203,7 @@ def test_own_certificate_is_served(served, tmp_path):
     cert, key = server_tls.ensure_self_signed(tmp_path / 'own', [NAME])
     server, lines, ws = served(server_names=[NAME], certificate={'mode': 'own', 'cert_file': str(cert),
                                                                   'key_file': str(key)})
-    assert lines[1] == f'Certificate fingerprint (SHA-256): {server_tls.fingerprint(cert)}'
+    assert lines[2] == f'Certificate fingerprint (SHA-256): {server_tls.fingerprint(cert)}'
     assert not (ws.root / server_tls.CERT_NAME).exists()  # no self-signed one is made
     context = ssl.create_default_context(cafile=str(cert))
     context.check_hostname = False
@@ -261,7 +280,7 @@ def test_launcher_does_not_open_a_browser_when_exposed(tmp_path, monkeypatch, ca
 def test_settings_fingerprint_reads_the_workspace_certificate(served):
     server, lines, ws = served(server_names=[NAME])
     values = dict(local_settings.DEFAULTS, server_names=[NAME])
-    assert lines[1] == local.FINGERPRINT_LINE + local._certificate_fingerprint(values, ws.root)
+    assert lines[2] == local.FINGERPRINT_LINE + local._certificate_fingerprint(values, ws.root)
     assert local._certificate_fingerprint(values, None) is None
 
 
@@ -382,7 +401,7 @@ def test_a_corrupt_self_signed_key_is_made_again(served, tmp_path):
     first.server_close()
     (ws.root / server_tls.KEY_NAME).write_text('-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----\n')
     server, lines, ws = served(server_names=[NAME])
-    assert lines[1] == local.FINGERPRINT_LINE + server_tls.fingerprint(ws.root / server_tls.CERT_NAME)
+    assert lines[2] == local.FINGERPRINT_LINE + server_tls.fingerprint(ws.root / server_tls.CERT_NAME)
     assert server_tls.fingerprint(ws.root / server_tls.CERT_NAME) != old
     assert https_get(server, ws).status == 200
 
@@ -462,3 +481,50 @@ def test_a_proxied_loopback_install_with_no_accounts_prints_the_setup_command(tm
     server, lines = local.build_server(ws, preferences, local_settings.settings_path(ws.root), port=0)
     server.server_close()
     assert lines == [local.serve_banner(False, server.server_port)]
+
+
+
+# --- final round: an unspecified listen address answers to this machine's addresses (I7) ---
+
+
+def test_an_unspecified_address_answers_to_the_host_name_and_the_machine_addresses(monkeypatch):
+    monkeypatch.setattr(local.socket, 'gethostname', lambda: 'rz-box.example.test')
+    asked = []
+
+    def addresses(host, port, *args, **kwargs):
+        asked.append((host, port))
+        v4 = lambda a: (socket.AF_INET, socket.SOCK_STREAM, 6, '', (a, 0))
+        v6 = lambda a, scope=0: (socket.AF_INET6, socket.SOCK_STREAM, 6, '', (a, 0, 0, scope))
+        return [v4('192.0.2.10'), v4('192.0.2.10'), v4('127.0.1.1'), v4('0.0.0.0'), v6('::1'),
+                v6('fe80::1%eth0', 2), v6('2001:db8::5'), v6('2001:DB8::5'), v4('198.51.100.3')]
+
+    monkeypatch.setattr(local.socket, 'getaddrinfo', addresses)
+    for unspecified in ('0.0.0.0', '::'):
+        names = local.default_server_names(dict(local_settings.DEFAULTS, listen_address=unspecified))
+        assert names == ['rz-box.example.test', '192.0.2.10', '2001:db8::5', '198.51.100.3']
+    assert asked[0] == ('rz-box.example.test', None)
+    # A host name that is not a valid one is left out; the addresses still count.
+    monkeypatch.setattr(local.socket, 'gethostname', lambda: 'not a host name!')
+    assert local.default_server_names(dict(local_settings.DEFAULTS, listen_address='0.0.0.0')) == [
+        '192.0.2.10', '2001:db8::5', '198.51.100.3']
+    # A lookup that fails leaves the host name alone.
+    monkeypatch.setattr(local.socket, 'gethostname', lambda: 'rz-box.example.test')
+    machine_addresses(monkeypatch, 'rz-box.example.test', socket.gaierror())
+    assert local.default_server_names(dict(local_settings.DEFAULTS, listen_address='0.0.0.0')) == [
+        'rz-box.example.test']
+
+
+@needs_openssl
+def test_the_machine_addresses_are_in_the_certificate_the_allowlist_and_the_banner(served, monkeypatch):
+    monkeypatch.setattr(local.socket, 'gethostname', lambda: 'rz-box.example.test')
+    machine_addresses(monkeypatch, 'rz-box.example.test',
+                      [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('192.0.2.10', 0))])
+    real = local.default_server_names
+    # The test listens on 127.0.0.1 (the offline guard); the names are what 0.0.0.0 would get.
+    monkeypatch.setattr(local, 'default_server_names',
+                        lambda settings: real(dict(settings, listen_address='0.0.0.0')))
+    server, lines, ws = served()
+    assert lines[1] == 'Answers to: rz-box.example.test, 192.0.2.10'
+    assert server_tls._sans(ws.root / server_tls.CERT_NAME) == {('DNS', 'rz-box.example.test'),
+                                                                 ('IP Address', '192.0.2.10')}
+    assert https_get(server, ws, host='192.0.2.10').status == 200
