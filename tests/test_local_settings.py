@@ -77,14 +77,14 @@ def test_v1_settings_upgrade_to_proposer_role(tmp_path):
     path.write_text(json.dumps({'endpoint': 'http://127.0.0.1:11434/v1/chat/completions', 'model': 'llama3.1',
                                 'mode': 'saved', 'open_browser': False, 'port': 8083}))
     loaded = config.load(path)
-    assert loaded['version'] == 4
+    assert loaded['version'] == 5
     assert loaded['roles']['proposer'] == dict(format='openai_chat', model='llama3.1', family='llama',
         endpoint='http://127.0.0.1:11434/v1/chat/completions', ca_file='', timeout_seconds=60)
     assert [loaded['roles'][r] for r in ('reviewer', 'summarizer', 'guard')] == [None] * 3
     assert loaded['same_family_policy'] == 'wait'
     assert (loaded['mode'], loaded['open_browser'], loaded['port']) == ('saved', False, 8083)
     config.save(path, loaded)
-    assert json.loads(path.read_text())['version'] == 4
+    assert json.loads(path.read_text())['version'] == 5
 
 
 def test_blank_v1_connection_upgrades_to_no_proposer(tmp_path):
@@ -440,20 +440,20 @@ def with_scanner(**change):
 
 
 def _v2_file(**change):
-    v2 = {k: v for k, v in copy.deepcopy(config.DEFAULTS).items() if k != 'scanner'}
+    v2 = {k: v for k, v in copy.deepcopy(config.DEFAULTS).items() if k not in {'scanner', 'listen_address', 'server_names', 'certificate'}}
     v2.update(version=2)
     v2.update(change)
     return v2
 
 
-def test_v2_settings_upgrade_to_v4_with_scanner_defaults(tmp_path):
+def test_v2_settings_upgrade_to_v5_with_scanner_defaults(tmp_path):
     path = tmp_path / 'prefs.json'
     v2 = _v2_file(port=8090, mode='saved')
     # v2 roles had no ca_file; the upgrade adds an empty one.
     v2['roles']['proposer'] = {k: v for k, v in proposer(model='kept').items() if k not in ('ca_file', 'timeout_seconds')}
     path.write_text(json.dumps(v2))
     loaded = config.load(path)
-    assert loaded['version'] == 4
+    assert loaded['version'] == 5
     assert loaded['roles']['proposer']['ca_file'] == ''
     assert loaded['scanner'] == SCANNER_DEFAULTS
     assert (loaded['port'], loaded['mode'], loaded['roles']['proposer']['model']) == (8090, 'saved', 'kept')
@@ -461,15 +461,15 @@ def test_v2_settings_upgrade_to_v4_with_scanner_defaults(tmp_path):
     assert json.loads(path.read_text())['version'] == 2
     config.save(path, loaded)
     on_disk = json.loads(path.read_text())
-    assert on_disk['version'] == 4 and on_disk['scanner'] == SCANNER_DEFAULTS
+    assert on_disk['version'] == 5 and on_disk['scanner'] == SCANNER_DEFAULTS
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_v1_settings_reach_v4(tmp_path):
+def test_v1_settings_reach_v5(tmp_path):
     path = tmp_path / 'prefs.json'
     path.write_text(json.dumps({'endpoint': '', 'model': '', 'mode': 'demo', 'open_browser': True, 'port': 8081}))
     loaded = config.load(path)
-    assert loaded['version'] == 4 and loaded['scanner'] == SCANNER_DEFAULTS
+    assert loaded['version'] == 5 and loaded['scanner'] == SCANNER_DEFAULTS
 
 
 def test_v2_file_with_unknown_key_is_refused(tmp_path):
@@ -481,13 +481,13 @@ def test_v2_file_with_unknown_key_is_refused(tmp_path):
 
 def test_v3_file_with_unknown_key_is_refused(tmp_path):
     path = tmp_path / 'prefs.json'
-    path.write_text(json.dumps(dict(config.DEFAULTS, api_key='x')))
+    path.write_text(json.dumps(dict(v4_settings(), version=3, api_key='x')))
     with pytest.raises(ValueError):
         config.load(path)
 
 
 def test_scanner_defaults():
-    assert config.DEFAULTS['version'] == 4
+    assert config.DEFAULTS['version'] == 5
     assert config.DEFAULTS['scanner'] == SCANNER_DEFAULTS
 
 
@@ -947,3 +947,101 @@ def test_a_trickling_gvmd_cannot_hold_the_settings_page(app, tmp_path_factory, f
         assert status == 200 and 'Could not reach Greenbone: GmpError' in body
     finally:
         server.close()
+
+
+# --- Listening and certificate settings (v5) --------------------------------------------------
+
+def v4_settings():
+    old = copy.deepcopy(config.DEFAULTS)
+    for key in ('listen_address', 'server_names', 'certificate'):
+        del old[key]
+    return dict(old, version=4)
+
+
+def test_v4_settings_upgrade_to_v5_with_loopback_defaults(tmp_path):
+    path = tmp_path / 'prefs.json'
+    old = dict(v4_settings(), port=8090)
+    path.write_text(json.dumps(old))
+    loaded = config.load(path)
+    assert loaded['version'] == 5 and loaded['port'] == 8090
+    assert loaded['listen_address'] == '127.0.0.1' and loaded['server_names'] == []
+    assert loaded['certificate'] == {'mode': 'self-signed', 'cert_file': '', 'key_file': ''}
+    assert config.exposed(loaded) is False
+    assert json.loads(path.read_text())['version'] == 4  # in memory only until the next save
+    old['extra'] = 1
+    path.write_text(json.dumps(old))
+    with pytest.raises(ValueError):
+        config.load(path)
+
+
+@pytest.mark.parametrize('address', ['localhost', 'example.test', '', '1.2.3', '127.0.0.1:80', 5, None, '0.0.0.0/0'])
+def test_listen_address_must_be_an_ip_literal(address):
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, listen_address=address))
+
+
+@pytest.mark.parametrize('address, exposed', [('127.0.0.1', False), ('::1', False), ('0.0.0.0', True),
+                                              ('::', True), ('192.0.2.7', True)])
+def test_exposed_is_true_for_any_non_loopback_address(address, exposed):
+    value = config.validate(dict(config.DEFAULTS, listen_address=address))
+    assert config.exposed(value) is exposed
+
+
+def test_own_certificate_needs_two_absolute_paths():
+    def with_cert(**change):
+        return dict(config.DEFAULTS, certificate=dict(config.DEFAULTS['certificate'], **change))
+    config.validate(with_cert(mode='own', cert_file='/etc/ssl/c.pem', key_file='/etc/ssl/k.pem'))
+    for bad in (dict(mode='own'), dict(mode='own', cert_file='/etc/ssl/c.pem'),
+                dict(mode='own', cert_file='c.pem', key_file='/etc/ssl/k.pem'),
+                dict(mode='own', cert_file='/etc/ssl/c.pem', key_file='k.pem'), dict(mode='other')):
+        with pytest.raises(ValueError):
+            config.validate(with_cert(**bad))
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, certificate={'mode': 'self-signed'}))
+
+
+def test_server_names_are_lowercased_unique_and_capped():
+    assert config.parse_server_names('RZ.Example.test, 192.0.2.10  rz.example.test\n::1') == [
+        'rz.example.test', '192.0.2.10', '::1']
+    assert config.parse_server_names('') == []
+    for bad in ('bad name!', 'a_b.test', '-x.test', 'https://x.test', ','.join(f'h{i}.test' for i in range(21))):
+        with pytest.raises(ValueError):
+            config.parse_server_names(bad)
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, server_names=['Upper.test']))
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, server_names=['a.test', 'a.test']))
+
+
+def test_check_bindable_leaves_nothing_open_and_refuses_an_address_not_on_this_machine():
+    config.check_bindable('127.0.0.1', 0)
+    with pytest.raises(ValueError):
+        config.check_bindable('192.0.2.1', 0)  # TEST-NET-1: not assigned to this machine
+
+
+def test_settings_page_says_restart_required(app):
+    path, request = app
+    status, body, _ = request(route='/?view=settings&section=application')
+    assert status == 200
+    assert 'Listen address, names and certificate take effect when Remediation Zero restarts.' in body
+    for name in ('listen_address', 'server_names', 'certificate_mode', 'cert_file', 'key_file'):
+        assert f'name="{name}"' in body
+
+
+def test_application_form_saves_the_listening_fields_and_refuses_bad_ones(app):
+    path, request = app
+    token = re.search('name="token" value="([^"]+)"', request()[1])[1]
+    base = dict(token=token, section='application', mode='saved', port='8082')
+    good = dict(base, listen_address='0.0.0.0', server_names='RZ.example.test 192.0.2.10',
+                certificate_mode='self-signed', cert_file='', key_file='')
+    assert request('POST', '/settings', good)[0] == 303
+    saved = config.load(path)
+    assert saved['listen_address'] == '0.0.0.0' and saved['server_names'] == ['rz.example.test', '192.0.2.10']
+    before = path.read_text()
+    for bad in (dict(base, listen_address='not-an-ip'), dict(base, server_names='bad name!'),
+                dict(base, certificate_mode='own', cert_file='/nonexistent/c.pem', key_file='/nonexistent/k.pem'),
+                dict(base, listen_address='192.0.2.1')):
+        request.errors.clear()
+        assert request('POST', '/settings', bad)[0] == 400
+        assert path.read_text() == before
+    assert request.errors[-1][0].endswith('Nothing was saved.')

@@ -24,7 +24,7 @@ FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 's
          'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py', 'tools/enrichment_fetch.py', 'tools/greenbone_report.py', 'tools/gmp.py',
          'tools/models/__init__.py', 'tools/models/_common.py', 'tools/models/openai_chat.py',
          'tools/models/anthropic_messages.py', 'tools/models/gemini_api.py',
-         'tools/local_settings.py', 'tools/model_check.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
+         'tools/local_settings.py', 'tools/server_tls.py', 'tools/model_check.py', 'ui/settings_view.py', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
          'prompts/guard_v1.md',
          'prompts/triage.md', 'prompts/triage_no_cve.md', 'prompts/reviewer.md', 'prompts/reporting.md')
 

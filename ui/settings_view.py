@@ -14,7 +14,7 @@ NO_VISIBLE_TASKS = ('This account can see no tasks. In Greenbone, add it as an o
                     'to import, or give its role access to them.')
 
 
-def render_settings(values, section, token, *, message='', keys=None, overrides=False, scanner=None):
+def render_settings(values, section, token, *, message='', keys=None, overrides=False, scanner=None, fingerprint=None):
     e = lambda v: escape(str(v), quote=True)
     tabs = '<nav class="settings-tabs" aria-label="Settings sections">' + ''.join(
         f'<a href="/?view=settings&amp;section={k}" aria-current="{"page" if k == section else "false"}">{v}</a>'
@@ -60,8 +60,10 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
     elif section == 'application':
         options = ''.join(f'<option value="{v}" {"selected" if values["mode"] == v else ""}>{label}</option>' for v, label in [('demo','Demo examples'),('saved','Saved records')])
         body = '<h2>Make it yours</h2><p>These preferences apply the next time you start the installed launcher. Command-line flags take priority.</p>'
-        body += form(f'<label>Open by default<select name="mode">{options}</select></label><label class="check"><input name="open_browser" type="checkbox" value="yes" {"checked" if values["open_browser"] else ""}> Open browser on startup</label><label>Dashboard port<input name="port" type="number" min="1024" max="65535" required value="{values["port"]}"></label><p>Restart required. The current dashboard stays on its existing port.</p><label>Run a cycle automatically every N minutes (0 = off)<input name="cycle_interval_minutes" type="number" min="0" max="1440" step="1" required value="{e(values["cycle_interval_minutes"])}"></label><p>Each run calls your configured models. Takes effect the next time you start the launcher.</p>')
-        body += '<h3>Local access</h3><p>Host: 127.0.0.1 (fixed). No sign-in is provided. Do not expose this preview through a public proxy. It stops when you stop the launcher.</p><p>Recorded times are displayed in UTC.</p>'
+        body += form(f'<label>Open by default<select name="mode">{options}</select></label><label class="check"><input name="open_browser" type="checkbox" value="yes" {"checked" if values["open_browser"] else ""}> Open browser on startup</label><label>Dashboard port<input name="port" type="number" min="1024" max="65535" required value="{values["port"]}"></label><p>Restart required. The current dashboard stays on its existing port.</p><label>Run a cycle automatically every N minutes (0 = off)<input name="cycle_interval_minutes" type="number" min="0" max="1440" step="1" required value="{e(values["cycle_interval_minutes"])}"></label><p>Each run calls your configured models. Takes effect the next time you start the launcher.</p>{_listening_fields(values, e)}')
+        if fingerprint:
+            body += f'<p>Certificate fingerprint (SHA-256): <code>{e(fingerprint)}</code></p>'
+        body += '<h3>Local access</h3><p>The default is 127.0.0.1, this machine only. No sign-in is provided yet. Do not expose this preview through a public proxy. It stops when you stop the launcher.</p><p>Recorded times are displayed in UTC.</p>'
     elif section == 'storage':
         body = '<h2>Your data stays with you</h2><p>Storage: SQLite. Database location is selected with the <code>--database</code> command-line option; the installed launcher uses <code>remediation-zero.sqlite3</code> in its installation folder.</p><p>Backup status: Not tracked.</p><details><summary>Back up your workspace</summary><ol><li>Stop the launcher and any command-line model runs.</li><li>Copy the database and its matching .settings.json file to a private backup folder.</li><li>Restart the launcher.</li></ol><p>Environment API keys are not included. Keep backups private: suggestions and evidence may contain sensitive information.</p></details><details><summary>Restore a backup</summary><p>Stop all app processes first. Preserve the current database and settings before replacing them with a matching backup. Restart after restoring. Restoring older data may lose request history; do not use it to reset retry limits.</p></details><h3>What is stored</h3><p>Suggestions, evidence, request history, and recorded timestamps. Preferences are stored separately as JSON. API keys are read from the environment.</p>'
     elif section == 'safety':
@@ -69,6 +71,21 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
     else:
         body = '<h2>Keep your workspace intact</h2><dl><dt>Edition</dt><dd>Local preview</dd><dt>Version</dt><dd>Development build</dd><dt>Update check</dt><dd>Unavailable — no automatic check runs</dd></dl><details><summary>Install a newer preview</summary><ol><li>Stop the app and back up your database and preferences.</li><li>Install the new build into a separate directory.</li><li>Keep the original installation until you have verified the new version.</li></ol><p>There is no automatic upgrade or database migration workflow. Do not overwrite your existing installation.</p></details><details><summary>Destination already exists</summary><p>Use its start-remediation-zero.py launcher, or choose a new directory with the installer’s --directory option. Nothing was overwritten.</p></details><details><summary>Port already in use</summary><p>Stop the previous launcher or start with --port 8082.</p></details><p>Installer signatures are not available. Checksums detect corruption; they do not establish publisher authenticity.</p>'
     return tabs + (f'<p role="status" class="notice">{e(message)}</p>' if message else '') + '<section class="card settings-card">' + body + '</section>'
+
+
+def _listening_fields(values, e):
+    cert = values['certificate']
+    modes = ''.join(f'<option value="{v}" {"selected" if cert["mode"] == v else ""}>{label}</option>'
+                    for v, label in [('self-signed', 'Make a self-signed certificate'), ('own', 'Use my own certificate')])
+    return (f'<label>Listen address<input name="listen_address" maxlength="64" required value="{e(values["listen_address"])}"></label>'
+            '<p>127.0.0.1 keeps the dashboard on this machine. 0.0.0.0 or :: makes it reachable from the network, and then it is always served over HTTPS.</p>'
+            f'<label>Server names<input name="server_names" maxlength="2000" value="{e(", ".join(values["server_names"]))}" placeholder="rz.example.test, 192.0.2.10"></label>'
+            '<p>The host names and IP addresses people type to reach this server, separated by commas or spaces, up to 20. The self-signed certificate names each of them.</p>'
+            f'<label>Certificate<select name="certificate_mode">{modes}</select></label>'
+            f'<label>Certificate file (own)<input name="cert_file" maxlength="4096" value="{e(cert["cert_file"])}" placeholder="/etc/ssl/rz-cert.pem"></label>'
+            f'<label>Key file (own)<input name="key_file" maxlength="4096" value="{e(cert["key_file"])}" placeholder="/etc/ssl/rz-key.pem"></label>'
+            '<p>Absolute paths on this server, for your own certificate and its private key.</p>'
+            '<p>Listen address, names and certificate take effect when Remediation Zero restarts.</p>')
 
 
 def _scanner_body(cfg, probe, form, token, e):

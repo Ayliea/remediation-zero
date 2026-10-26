@@ -63,7 +63,8 @@ MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES
                                          for part in ('format', 'endpoint', 'model', 'family', 'ca_file',
                                                       'timeout_seconds')}
 # mode and port are required; the checkbox and the interval may be absent.
-APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes'}
+APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes', 'listen_address', 'server_names',
+                      'certificate_mode', 'cert_file', 'key_file'}
 SCANNER_REQUIRED = {'transport', 'socket_path', 'host', 'port', 'ca_file', 'task_ids', 'qod_floor'}
 SCANNER_FIELDS = SCANNER_REQUIRED | {'auto_enrichment'}
 SCANNER_PAGE_TIMEOUT = 5.0  # the settings page must stay responsive when Greenbone is not
@@ -777,7 +778,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self._send_html(body, status)
 
         def _settings_html(self, values, section, *, message='', scanner=None):
-            return render_settings(values, section, token, message=message,
+            return render_settings(values, section, token, message=message, fingerprint=_certificate_fingerprint(values, config_path),
                 keys={role: key_present(role, os.environ) for role in ROLES},
                 overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
 
@@ -908,6 +909,25 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                         if not (minutes.isascii() and minutes.isdigit()):
                             raise ValueError()
                         values['cycle_interval_minutes'] = int(minutes)
+                    if 'listen_address' in fields:
+                        values['listen_address'] = fields['listen_address'].strip()
+                    if 'server_names' in fields:
+                        values['server_names'] = local_settings.parse_server_names(fields['server_names'])
+                    if 'certificate_mode' in fields:
+                        values['certificate'] = {'mode': fields['certificate_mode'], 'cert_file': fields.get('cert_file', '').strip(),
+                                                 'key_file': fields.get('key_file', '').strip()}
+                    values = local_settings.validate(values)
+                    try:
+                        if local_settings.exposed(values):
+                            # The running server may already hold this port on loopback, which makes a bind to
+                            # the same port fail; then only the address is checked.
+                            same_port = values['port'] == getattr(self.server, 'server_port', None)
+                            local_settings.check_bindable(values['listen_address'], 0 if same_port else values['port'])
+                        if values['certificate']['mode'] == 'own':
+                            local_settings.check_certificate(values['certificate']['cert_file'], values['certificate']['key_file'])
+                    except ValueError as refusal:
+                        self.send_error(400, f'{refusal}. Nothing was saved.')
+                        return
                 else:
                     raise ValueError()
                 local_settings.save(config_path, values)
@@ -934,7 +954,7 @@ DEMO_BANNER = 'Local synthetic preview: '
 SAVED_BANNER = 'Local dashboard: '
 
 
-_PUBLIC_HOST_RE = re.compile(r'[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?')
+_PUBLIC_HOST_RE = local_settings.PUBLIC_HOST_RE  # one host rule, shared with the server names setting
 PUBLIC_URL_RULE = 'an https:// address with a host name and an optional port, and nothing after it'
 NO_SIGN_IN = ('No sign-in yet: anyone who can reach this address can read these records. Use it only '
               'behind a proxy that limits who can connect, such as your tailnet. Settings and uploads '
@@ -957,6 +977,17 @@ def public_origin(url):
                 host, f'{host}:{port}')):
         raise ValueError(f'The public URL must be {PUBLIC_URL_RULE}.')
     return f'https://{host}' if port in (None, 443) else f'https://{host}:{port}'
+
+
+def _certificate_fingerprint(values, config_path):
+    """The fingerprint of the certificate that would be served, or None if there is none yet."""
+    from tools.server_tls import CERT_NAME, fingerprint  # imported late: only the settings page needs it
+    cert = values['certificate']
+    path = cert['cert_file'] if cert['mode'] == 'own' else str(Path(config_path).parent / CERT_NAME)
+    try:
+        return fingerprint(path)
+    except (OSError, ValueError):
+        return None
 
 
 def serve_banner(demo, port):

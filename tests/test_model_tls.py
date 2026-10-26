@@ -172,12 +172,13 @@ def role(endpoint='https://models.example.test/v1/chat/completions', ca_file='')
 
 def test_version_3_settings_upgrade_with_an_empty_ca_file_and_the_default_timeout(tmp_path):
     path = tmp_path / 'db.settings.json'
-    old = dict(local_settings.DEFAULTS, version=3)
+    old = {k: v for k, v in local_settings.DEFAULTS.items() if k not in {'listen_address', 'server_names', 'certificate'}}
+    old['version'] = 3
     old['roles'] = dict(old['roles'], proposer={k: v for k, v in role().items()
                                                 if k not in ('ca_file', 'timeout_seconds')})
     path.write_text(json.dumps(old))
     loaded = local_settings.load(path)
-    assert loaded['version'] == 4
+    assert loaded['version'] == 5
     assert loaded['roles']['proposer']['ca_file'] == ''
     assert loaded['roles']['proposer']['timeout_seconds'] == 60
     assert loaded['roles']['reviewer'] is None
