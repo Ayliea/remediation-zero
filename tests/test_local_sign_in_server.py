@@ -580,3 +580,84 @@ def test_an_invite_link_sets_a_password_and_mfa_once(start, signed_in):
     assert server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))[0].status == 404
     signed_in.now.tick()
     assert sign_in(server, 'new@client.example', 'amber pelican lighthouse', code_for(secret, signed_in.now))[0].status == 303
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+def test_a_slow_post_body_does_not_block_other_requests(start, signed_in, monkeypatch):
+    monkeypatch.setattr(local, 'BODY_SECONDS', 2)
+    server = start(signed_in.accounts)
+    slow = socket.create_connection(('127.0.0.1', server.port), timeout=10)
+    try:
+        slow.sendall((f'POST /signin HTTP/1.1\r\nHost: {server.local_host}\r\n'
+                      f'Origin: http://{server.local_host}\r\nContent-Type: application/x-www-form-urlencoded\r\n'
+                      'Content-Length: 8192\r\n\r\npre=').encode())
+        threading.Event().wait(0.3)
+        done = []
+
+        def visit():
+            done.append(server.request('GET', '/', cookie=signed_in.cookie())[0].status)
+        other = threading.Thread(target=visit)
+        other.start()
+        other.join(5)
+        assert done == [200]
+        # The trickling body is cut off at the body deadline, without ever holding the lock.
+        assert slow.recv(64).startswith(b'HTTP/1.0 408')
+    finally:
+        slow.close()
+
+
+def test_setup_ends_signed_in(start, tmp_path):
+    accounts, now = empty(tmp_path)
+    server = start(accounts)
+    pre, value, body = open_form(server, '/setup')
+    secret = form_value(body, 'secret')
+    fields = {'pre': value, 'secret': secret, 'email': OWNER, 'role': 'owner', 'password': PW_OWNER,
+              'code': code_for(secret, now)}
+    response, body = server.request('POST', '/setup', cookie=pre, body=urlencode(fields))
+    assert response.status == 200
+    assert 'href="/"' in body and len(re.findall(r'<li><code>[a-z2-7]{5}-[a-z2-7]{5}</code></li>', body)) == 10
+    cookie = session_cookie(response)
+    assert cookie and 'HttpOnly' in cookie and 'SameSite=Strict' in cookie and 'Secure' not in cookie
+    response, body = server.request('GET', '/', cookie=cookie.split(';', 1)[0])
+    assert response.status == 200 and OWNER in body
+    assert [e['event'] for e in reversed(accounts.store.events(10))] == ['setup', 'sign_in']
+
+
+def test_accepting_an_invite_ends_signed_in(start, signed_in):
+    accounts = signed_in.accounts
+    owner_id = accounts.store.account_by_email(OWNER)['id']
+    link = accounts.invite(owner_id, 'new@client.example', 'tech')
+    server = start(accounts)
+    pre, value, body = open_form(server, f'/invite/{link}')
+    secret = re.search(r'<code class="totp-key">([A-Z2-7]+)</code>', body).group(1)
+    signed_in.now.tick()
+    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(secret, signed_in.now)}
+    response, body = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))
+    assert response.status == 200 and 'href="/"' in body
+    cookie = session_cookie(response).split(';', 1)[0]
+    response, body = server.request('GET', '/', cookie=cookie)
+    assert response.status == 200 and 'new@client.example' in body
+
+
+def test_first_account_page_hides_the_workspace_path_off_the_server(start, tmp_path):
+    accounts, _ = empty(tmp_path)
+    server = start(accounts, public_origin=PUBLIC)   # start() passes --database /srv/rz
+    for host in (PUBLIC_HOST, None):
+        response, body = server.request('GET', '/', host=host)
+        assert response.status == 200
+        assert '/srv/rz' not in body
+        assert '--database DIR account setup' in body
+
+
+def test_an_unreadable_accounts_file_gives_503_on_every_route(start, signed_in):
+    server = start(signed_in.accounts)
+    cookie = signed_in.cookie()
+    token = page_token(server, cookie)
+    signed_in.accounts.store.path.write_bytes(b'not a database ' * 512)
+    for method, path, sent_cookie, body in (('GET', '/', None, None), ('GET', '/', cookie, None),
+                                            ('GET', '/signin', None, None),
+                                            ('POST', '/signin', None, 'pre=x&email=a&password=b&code=c'),
+                                            ('POST', '/settings', cookie, scanner_save(token))):
+        response, _ = server.request(method, path, cookie=sent_cookie, body=body)
+        assert response.status == 503, (method, path, sent_cookie)

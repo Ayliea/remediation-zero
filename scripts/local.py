@@ -13,6 +13,7 @@ with no model configured. API keys come only from the environment
 printed, logged or written to settings.
 """
 import argparse
+import io
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import shlex
 import sys
 import unicodedata
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -717,7 +719,10 @@ def _read_upload_form(content_type, body):
 #: The Accounts page and its invite form are Task 8's; until then a permitted owner gets 404.
 GET_ACTIONS = dict({view: 'view' for view in VIEWS}, settings='settings', accounts='manage_accounts')
 POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts'}
-SETUP_COMMAND = 'python3 -S -m scripts.local --database DIR account setup'
+SETTINGS_BODY_LIMIT = 65536
+#: One deadline for a whole POST body, plus a second per BODY_MIN_RATE bytes for a large upload.
+BODY_SECONDS = 15
+BODY_MIN_RATE = 256 * 1024
 
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
@@ -733,8 +738,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # server_names, scheme: the names a 'direct' request may use, over the TLS listener ('https').
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
-    setup_command = f'{approve_command} account setup' if approve_command else SETUP_COMMAND
-    auth = local_auth.AuthRoutes(accounts, limiter, setup_command)
+    auth = local_auth.AuthRoutes(accounts, limiter)
     server_names = tuple(server_names)
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
@@ -746,19 +750,109 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
         def log_message(self, *args):
             pass  # Never record request lines or headers: invite tokens are in paths.
 
+        # `serial` is held only for the work on records, settings and imports. Classifying a
+        # request, reading its body (under BODY_SECONDS) and the sign-in pages (scrypt, and the
+        # accounts file, whose writes AccountStore serialises with BEGIN IMMEDIATE) all run
+        # outside it, so a slow client or a slow password check never stops anyone else.
+
         def do_GET(self):
-            with serial:
-                req = self._request()
-                if req is not None:
-                    self._get(req)
+            self._guarded(self._route_get)
 
         def do_POST(self):
+            self._guarded(self._route_post)
+
+        def _route_get(self):
+            parsed = urlsplit(self.path)
+            if auth.handles(parsed.path):
+                req = self._request()
+                if req is not None:
+                    auth.get(self, req, parsed.path, parsed.query)
+                return
+            with serial:
+                req = self._request()  # the session is read under the lock, just before it is used
+                if req is not None:
+                    self._get(req, parsed)
+
+        def _route_post(self):
+            parsed = urlsplit(self.path)
+            req = self._request(session=False)
+            if req is None:
+                return
+            # The Origin must be the scheme and Host this request came in on (local_auth.classify).
+            if (self.headers.get('Origin') != req.origin
+                    or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
+                self.send_error(403)
+                return
+            if not self._read_body(parsed.path):
+                return
+            if auth.handles(parsed.path):
+                req = self._request()
+                if req is not None:
+                    auth.post(self, req, parsed.path, parsed.query)
+                return
             with serial:
                 req = self._request()
                 if req is not None:
-                    self._post(req)
+                    self._post(req, parsed.path)
 
-        def _request(self):
+        def _guarded(self, route):
+            """A read or write the server cannot complete is a 503, never a dropped connection.
+            Only the error class is logged: never a path, header, password, code or token."""
+            self._responded = False
+            try:
+                route()
+            except Exception as error:
+                _log('request_failed', error=type(error).__name__)
+                if getattr(self, '_responded', False):
+                    self.close_connection = True
+                else:
+                    self.send_error(503, 'This could not be checked or completed. Try again.')
+
+        def send_response(self, code, message=None):
+            self._responded = True
+            super().send_response(code, message)
+
+        def _read_body(self, path):
+            """Read a POST body before `serial` is taken, under one deadline for the whole body
+            (per-recv timeouts alone let a client trickle a byte at a time for hours). A body with
+            no usable Content-Length, or larger than its route takes, is not read: the route then
+            refuses it on its headers. False after answering 408."""
+            limit = (local_auth.FORM_LIMIT if auth.handles(path) or path == '/accounts/invite' else
+                     SETTINGS_BODY_LIMIT if path == '/settings' else
+                     MAX_REPORT_BYTES + UPLOAD_OVERHEAD if path == '/upload' else 0)
+            length = self.headers.get('Content-Length')
+            self.body_file = io.BytesIO(b'')
+            if (length is None or not (length.isascii() and length.isdigit()) or self.headers.get('Transfer-Encoding')
+                    or not 0 < int(length) <= limit):
+                return True
+            left = int(length)
+            deadline = time.monotonic() + BODY_SECONDS + left / BODY_MIN_RATE
+            sock = getattr(self, 'connection', None)
+            chunks = []
+            try:
+                while left:
+                    if sock is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError()
+                        sock.settimeout(remaining)
+                    chunk = self.rfile.read1(min(left, 65536))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    left -= len(chunk)
+            except (TimeoutError, OSError):
+                if sock is not None:
+                    sock.settimeout(self.timeout)
+                self.close_connection = True
+                self.send_error(408, 'The request body did not arrive in time.')
+                return False
+            if sock is not None:
+                sock.settimeout(self.timeout)
+            self.body_file = io.BytesIO(b''.join(chunks))
+            return True
+
+        def _request(self, session=True):
             """Classify the request and resolve its session; None after refusing it with 403."""
             peer = (getattr(self, 'client_address', None) or ('',))[0]
             found = local_auth.classify(peer, self.headers.get('Host'), port=self.server.server_port,
@@ -773,21 +867,11 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             get_all = getattr(self.headers, 'get_all', None)
             forwarded = get_all('X-Forwarded-For') if get_all else (
                 [self.headers['X-Forwarded-For']] if self.headers.get('X-Forwarded-For') else None)
-            try:
-                session = accounts.session(token) if token else None
-            except Exception as error:  # an unreadable accounts file: unknown, never signed out or in
-                _log('session_read_failed', error=type(error).__name__)
-                self.send_error(503, 'Sign-in could not be checked. Try again.')
-                return None
+            # An unreadable accounts file raises here, and _guarded answers 503: unknown, never
+            # signed out or in.
+            live = accounts.session(token) if session and token else None
             return local_auth.Request(kind, origin, local_auth.client_address(kind, peer, forwarded), token,
-                                      session, cookies)
-
-        def _auth(self, method, req, parsed):
-            try:
-                getattr(auth, method)(self, req, parsed.path, parsed.query)
-            except Exception as error:  # class only: never a password, code, token or path
-                _log('sign_in_page_failed', error=type(error).__name__)
-                self.send_error(503, 'This could not be completed. Try again.')
+                                      live, cookies)
 
         def send_page(self, body, status, headers=()):
             self._send_html(body, status, headers)
@@ -801,11 +885,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.send_header('Content-Length', '0')
             self.end_headers()
 
-        def _get(self, req):
-            parsed = urlsplit(self.path)
-            if auth.handles(parsed.path):
-                self._auth('get', req, parsed)
-                return
+        def _get(self, req, parsed):
             query = parse_qs(parsed.query)
             view = query.get('view', ['overview'])[0]
             section = query.get('section', ['model'])[0]
@@ -817,7 +897,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 if req.kind == 'local':
                     self.redirect('/setup')
                 else:
-                    self.send_page(account_views.first_account_page(setup_command), 200)
+                    self.send_page(account_views.first_account_page(local_auth.SETUP_COMMAND), 200)
                 return
             session = req.session
             if session is None:
@@ -852,8 +932,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                                       account=account), 503
             self._send_html(body, status)
 
-        def _may_post(self, session, action):
-            if self.path == '/accounts/invite':
+        def _may_post(self, session, path, action):
+            if path == '/accounts/invite':
                 # An owner may invite; a tech only an owner, and only while no owner has joined.
                 return (access.allowed(session.role, action)
                         or access.may_invite(session.role, 'owner', accounts.owner_exists()))
@@ -898,7 +978,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 content_type = self.headers.get('Content-Type') or ''
                 if not 0 < length:
                     raise ValueError()
-                body = self.rfile.read(length)
+                body = self.body_file.read(length)
                 if len(body) != length:
                     raise ValueError()
                 form = _read_upload_form(content_type, body)
@@ -928,37 +1008,33 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.send_header('Content-Length', '0')
             self.end_headers()
 
-        def _post(self, req):
-            # The Origin must be the scheme and Host this request came in on (local_auth.classify).
-            if (self.headers.get('Origin') != req.origin
-                    or self.headers.get('Sec-Fetch-Site') not in {None, 'same-origin'}):
-                self.send_error(403)
-                return
-            parsed = urlsplit(self.path)
-            if auth.handles(parsed.path):
-                self._auth('post', req, parsed)
-                return
-            action = POST_ACTIONS.get(self.path)
+        def _post(self, req, path):
+            """A dashboard POST, under `serial`. Origin, Sec-Fetch-Site and the body were handled
+            in _route_post; `path` is the parsed path."""
+            action = POST_ACTIONS.get(path)
             session = req.session
             if action is None:
                 self.send_error(404)
                 return
-            if (session is None or not config_path or (self.path == '/upload' and not upload)
-                    or not self._may_post(session, action)):
+            if (session is None or not config_path or (path == '/upload' and not upload)
+                    or not self._may_post(session, path, action)):
                 self.send_error(403)
                 return
-            if self.path == '/accounts/invite':
+            if path == '/accounts/invite':
                 self.send_error(404)  # Task 8: the invite form
                 return
-            if self.path == '/upload':
+            if path == '/upload':
                 self._upload(session)
                 return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
-                if (not 0 < length <= 65536 or self.headers.get('Transfer-Encoding')
+                if (not 0 < length <= SETTINGS_BODY_LIMIT or self.headers.get('Transfer-Encoding')
                         or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
                     raise ValueError()
-                raw = self.rfile.read(length).decode('utf-8')
+                raw = self.body_file.read(length)
+                if len(raw) != length:
+                    raise ValueError()
+                raw = raw.decode('utf-8')
                 # Only the Scanner form repeats a field (one task_ids per ticked task) and may be longer.
                 scanner_form = 'section=scanner' in raw.split('&')
                 if length > 8192 and not scanner_form:

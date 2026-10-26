@@ -78,13 +78,13 @@ def recovery_codes_page(codes, title):
     body = ('<section class="card account-card"><h2>Your recovery codes</h2>'
             '<p>Each code signs you in once in place of an authenticator code. Keep them somewhere safe: '
             'they are shown only now.</p>'
-            f'<ul class="codes">{items}</ul><p><a class="button" href="/signin">Sign in</a></p></section>')
+            f'<ul class="codes">{items}</ul><p><a class="button" href="/">Open the dashboard</a></p></section>')
     return page(title, body)
 
 
 def done_page():
-    return page('Done', '<section class="card account-card"><p>Saved. Sign in with your new details.</p>'
-                        '<p><a class="button" href="/signin">Sign in</a></p></section>')
+    return page('Done', '<section class="card account-card"><p>Saved. You are signed in.</p>'
+                        '<p><a class="button" href="/">Open the dashboard</a></p></section>')
 
 
 _INVITE_TITLES = {'join': 'Join Remediation Zero', 'recover': 'Set a new password and authenticator',

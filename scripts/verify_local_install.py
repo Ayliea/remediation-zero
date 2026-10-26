@@ -107,6 +107,11 @@ def verify():
             status, headers, _ = browser.request('GET', '/')
             assert status == 303 and headers['location'] == '/setup', 'Setup was not offered'
             codes = browser.set_up(EMAIL, PASSWORD)
+            # Setup ends signed in; sign out, then sign in again with a recovery code.
+            token = re.search('name="token" value="([^"]+)"', browser.page('/'))[1]
+            status, headers, _ = browser.request('POST', '/signout', urlencode(dict(token=token)))
+            assert status == 303 and headers['location'] == '/signin', 'Sign-out failed'
+            assert browser.request('GET', '/')[0] == 303, 'Still signed in after sign-out'
             browser.sign_in(EMAIL, PASSWORD, codes[0])
             for view in ('overview', 'infrastructure', 'actions', 'activity'):
                 browser.page('/?view=' + view)

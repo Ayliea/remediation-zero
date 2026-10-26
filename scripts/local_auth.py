@@ -62,6 +62,9 @@ FORM_FIELDS = 12             # fields in one such form
 PASSWORD_LIMIT = 1024        # characters; longer is a failure before scrypt runs
 PRE_SECONDS = 30 * 60        # a pre-session form token's life
 COOKIE_LIMIT = 4096
+#: The command the first-account page shows. Only a visitor who has not signed in sees that
+#: page, so it names no workspace path: DIR stands for the --database the server was started with.
+SETUP_COMMAND = 'python3 -S -m scripts.local --database DIR account setup'
 _SECRET_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')
 _TOKEN_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_')
 
@@ -239,13 +242,12 @@ class AuthRoutes:
     """GET and POST for /signin, /signout, /setup, /invite/<token> and /confirm.
 
     `h` is the request handler: it supplies `send_page(body, status, headers=())`,
-    `redirect(location, headers=())`, `send_error`, `headers` and `rfile`."""
+    `redirect(location, headers=())`, `send_error`, `headers` and `body_file` (the body, already read)."""
 
-    def __init__(self, accounts, limiter, setup_command):
+    def __init__(self, accounts, limiter):
         self.accounts = accounts
         self.limiter = limiter
         self.pre = PreTokens()
-        self.setup_command = setup_command
 
     def handles(self, path):
         return path in ('/signin', '/signout', '/setup', '/confirm') or path.startswith('/invite/')
@@ -284,7 +286,7 @@ class AuthRoutes:
             elif token is not None:
                 h.send_error(404)
             else:
-                h.send_page(account_views.first_account_page(self.setup_command), 200)
+                h.send_page(account_views.first_account_page(SETUP_COMMAND), 200)
             return
         if path == '/setup':
             if req.kind != 'local' or not self.no_accounts():
@@ -343,7 +345,7 @@ class AuthRoutes:
                  '/setup': ('pre', 'secret', 'email', 'role', 'password', 'code'),
                  '/confirm': ('pre', 'password', 'code')}.get(path, ('pre', 'password', 'current_password', 'code'))
         try:
-            fields = read_form(h.headers, h.rfile, names)
+            fields = read_form(h.headers, h.body_file, names)
         except (ValueError, UnicodeError):
             h.send_error(400, 'Invalid form.')
             return
@@ -389,8 +391,8 @@ class AuthRoutes:
         try:
             if password is None:
                 raise AccountRefused('password', 'too_long' if fields.get('password') else 'missing')
-            codes = self.accounts.setup_first(email, role, password, secret, fields.get('code', ''),
-                                              via='dashboard', source=req.client)
+            codes, session = self.accounts.setup_first(email, role, password, secret, fields.get('code', ''),
+                                                       via='dashboard', source=req.client, start_session=True)
         except AccountRefused as refusal:
             if refusal.code == 'accounts_exist':
                 h.send_error(404)
@@ -400,7 +402,9 @@ class AuthRoutes:
         except ValueError:
             h.send_page(self._setup_page(pre, secret, email=email, role=role, message=_REFUSALS['email']), 400)
             return
-        h.send_page(account_views.recovery_codes_page(codes, 'Your account is ready'), 200)
+        # A new password and a code from the new secret were just verified: setup ends signed in.
+        h.send_page(account_views.recovery_codes_page(codes, 'Your account is ready'), 200,
+                    (('Set-Cookie', session_cookie(session, req.secure)),))
 
     def _confirm(self, h, req, fields, pre, query):
         nxt = safe_next(query)
@@ -425,27 +429,28 @@ class AuthRoutes:
             if view.kind == 'reset_mfa':
                 if current is None:
                     raise AccountRefused('password', 'incorrect')
-                _, codes = self.accounts.accept_invite(token, None, code, current_password=current,
-                                                       via='dashboard', source=req.client)
+                args, kwargs = (None, code), {'current_password': current}
             else:
                 if password is None:
                     raise AccountRefused('password', 'too_long' if fields.get('password') else 'missing')
                 if view.kind == 'reset_password':
-                    _, codes = self.accounts.accept_invite(token, password, None, current_code=code,
-                                                           via='dashboard', source=req.client)
+                    args, kwargs = (password, None), {'current_code': code}
                 else:
-                    _, codes = self.accounts.accept_invite(token, password, code, via='dashboard',
-                                                           source=req.client)
+                    args, kwargs = (password, code), {}
+            # The link's checks passed in this request, so it ends signed in (a new session).
+            _, codes, session = self.accounts.accept_invite(token, *args, via='dashboard', source=req.client,
+                                                            start_session=True, **kwargs)
         except AccountRefused as refusal:
             if refusal.code == 'invalid_link':
                 h.send_page(account_views.invalid_link_page(), 404)
                 return
             h.send_page(self._invite_page(pre, view, _message(refusal)), 400)
             return
+        signed_in = (('Set-Cookie', session_cookie(session, req.secure)),)
         if codes:
-            h.send_page(account_views.recovery_codes_page(codes, 'You are set up'), 200)
+            h.send_page(account_views.recovery_codes_page(codes, 'You are set up'), 200, signed_in)
         else:
-            h.send_page(account_views.done_page(), 200)
+            h.send_page(account_views.done_page(), 200, signed_in)
 
     def _sign_out(self, h, req):
         clear = (('Set-Cookie', cleared_session_cookie(req.secure)),)
@@ -453,7 +458,7 @@ class AuthRoutes:
             h.redirect('/signin', clear)
             return
         try:
-            fields = read_form(h.headers, h.rfile, ('token',))
+            fields = read_form(h.headers, h.body_file, ("token",))
         except (ValueError, UnicodeError):
             h.send_error(400, 'Invalid form.')
             return

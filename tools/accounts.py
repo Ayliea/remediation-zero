@@ -202,12 +202,15 @@ class Accounts:
     # --- mutations --------------------------------------------------------
 
     def setup_first(self, email: str, role: str, password: str, secret: str, code: str,
-                    *, via: Optional[str] = None, source: Optional[str] = None) -> list[str]:
+                    *, via: Optional[str] = None, source: Optional[str] = None,
+                    start_session: bool = False) -> Any:
         """Create the first, active account; return its 10 recovery codes.
 
         `secret` is the TOTP secret the caller showed the person and `code`
         must match it. Refused once any account exists, invited or removed
-        ones included."""
+        ones included. With `start_session` (the setup page) the account is
+        also signed in, in the same transaction, and the return value is
+        `(codes, session token)`."""
         email = normalise_email(email)
         _check_role(role)
         if self.store.count_accounts() > 0:
@@ -231,7 +234,12 @@ class Accounts:
                          stamp.sim_ts, stamp.real_ts, stamp.sim_ts))
             self._replace_codes(cur, account_id, codes)
             self._event(cur, "setup", account_id, account_id, via, source, detail, stamp)
+            token = (self._new_session(cur, account_id, self._now(), source, "setup", stamp)
+                     if start_session else None)
         _log("setup", account_id, account_id, via, detail)
+        if token is not None:
+            _log("sign_in", account_id, account_id, _VIA, {"method": "setup"})
+            return codes, token
         return codes
 
     def invite(self, by_id: str, email: str, role: str, *,
@@ -334,8 +342,12 @@ class Accounts:
                       current_password: Optional[str] = None,
                       current_code: Optional[str] = None,
                       via: Optional[str] = None,
-                      source: Optional[str] = None) -> tuple[str, Optional[list[str]]]:
-        """Use a link. Returns (account id, recovery codes or None).
+                      source: Optional[str] = None,
+                      start_session: bool = False) -> tuple:
+        """Use a link. Returns (account id, recovery codes or None), and with
+        `start_session` (the invite page) also a new session token, created in
+        the transaction that spends the link, after the account's other
+        sessions end.
 
         - join, recover: `password` is the new password, `code` is from the
           link's new TOTP secret.
@@ -409,13 +421,19 @@ class Accounts:
             if current is None or current[1]["id"] != account_id:
                 raise AccountRefused("invalid_link")
             voided = self._void_if_unauthorised(cur, current[0], stamp)
+            session = None
             if voided is None:
                 event, detail = self._apply_accept(cur, th, now, kind, current[1], acct, secret,
                                                    step, pw_hash, codes, via, source, stamp)
+                if start_session:
+                    session = self._new_session(cur, account_id, now, source, "invite", stamp)
         if voided is not None:
             _log("invite_revoked", None, account_id, None, voided)
             raise AccountRefused("invalid_link")
         _log(event, account_id, account_id, via, detail)
+        if start_session:
+            _log("sign_in", account_id, account_id, _VIA, {"method": "invite"})
+            return account_id, codes, session
         return account_id, codes
 
     def _apply_accept(self, cur: sqlite3.Cursor, th: str, now: float, kind: str,
@@ -603,11 +621,7 @@ class Accounts:
                 elif not self.store.spend_recovery_code(account_id, code_hash, cur=cur):
                     raise _Failed
                 self._clear_attempts(cur, account_id)
-                cur.execute("INSERT INTO sessions (token_hash, account_id, csrf, created_at, "
-                            "last_seen, confirmed_until) VALUES (?,?,?,?,?,NULL)",
-                            (_token_hash(token), account_id, csrf, now, now))
-                self._event(cur, "sign_in", account_id, account_id, _VIA, source, detail,
-                            stamp)
+                self._insert_session(cur, account_id, token, csrf, now, source, detail, stamp)
         except _Failed:
             return self._sign_in_failed(account_id, typed, source)
         _log("sign_in", account_id, account_id, _VIA, detail)
@@ -875,6 +889,25 @@ class Accounts:
         """Clear the guess count and any lock after a verified success. Shared with sign-in."""
         cur.execute("UPDATE accounts SET failed_count = 0, first_failed_at = NULL, "
                     "locked_until = NULL WHERE id = ?", (account_id,))
+
+    def _insert_session(self, cur: sqlite3.Cursor, account_id: str, token: str, csrf: str,
+                        now: float, source: Optional[str], detail: dict[str, Any],
+                        stamp: Stamp) -> None:
+        """A new session row and its `sign_in` event, on the caller's transaction."""
+        cur.execute("INSERT INTO sessions (token_hash, account_id, csrf, created_at, "
+                    "last_seen, confirmed_until) VALUES (?,?,?,?,?,NULL)",
+                    (_token_hash(token), account_id, csrf, now, now))
+        self._event(cur, "sign_in", account_id, account_id, _VIA, source, detail, stamp)
+
+    def _new_session(self, cur: sqlite3.Cursor, account_id: str, now: float,
+                     source: Optional[str], method: str, stamp: Stamp) -> str:
+        """Sign in an account whose new password and new TOTP code the same request
+        just verified (setup, an accepted link). Only `setup_first` and
+        `accept_invite` call it, inside their own success transaction."""
+        token = secrets.token_urlsafe(32)            # 256 bits, as sign_in
+        self._insert_session(cur, account_id, token, secrets.token_urlsafe(32), now, source,
+                             {"method": method}, stamp)
+        return token
 
     @staticmethod
     def _end_sessions(cur: sqlite3.Cursor, account_id: str) -> None:
