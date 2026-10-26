@@ -281,7 +281,11 @@ are shown once, at setup; each signs in once in place of a code.
   ones; for a tech it does so only with `--promote`, which makes them owner.
   It never creates an account. Every one of these is recorded in the audit
   trail (`account events [--limit N]`, 1 to 1000, default 50, or the Accounts
-  page), which never holds passwords, codes, tokens or secrets.
+  page), which never holds passwords, codes, tokens or secrets. Each event
+  shows when, what, by whom, for which account, how (`dashboard` or
+  `command_line`), from which address (the client address the sign-in rate
+  limit uses; `—` when there is none, as for a command) and, for a role
+  change or an owner recovery that promoted a tech, the old and new role.
 - **Links** printed by the commands start with `https://<first server
   name>:<port>` when the saved listen address is a network one, and
   `http://127.0.0.1:<port>` otherwise. Behind a proxy (`--public-url`), which

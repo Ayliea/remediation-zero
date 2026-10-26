@@ -1153,3 +1153,21 @@ def test_accepting_enrols_the_secret_on_the_page_submitted(start, signed_in):
     response, _ = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))
     assert response.status == 200
     assert accounts.store.account_by_email('new@client.example')['totp_secret'] == secret
+
+
+
+# --- final round: the audit trail's From column (I6) -------------------------------------
+
+def test_the_audit_trail_shows_where_each_event_came_from(start, signed_in):
+    accounts = signed_in.accounts
+    tech = account_id(accounts, TECH)
+    accounts.store.insert_event('locked', None, tech, 'dashboard', '<i>192.0.2.99</i>', None,
+                                real_ts=signed_in.now(), sim_ts=signed_in.now())
+    accounts.store.insert_event('sign_out', None, None, 'dashboard', None, None,
+                                real_ts=signed_in.now(), sim_ts=signed_in.now())
+    body = accounts_page(start(accounts), signed_in.cookie())
+    events_section = section_of(body, 'events')
+    assert '<th>From</th>' in events_section
+    newest, locked = table_rows(events_section)[:2]
+    assert '<td>—</td>' in newest
+    assert '&lt;i&gt;192.0.2.99&lt;/i&gt;' in locked and '<i>192.0.2.99' not in body

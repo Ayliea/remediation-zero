@@ -181,9 +181,9 @@ def test_account_commands_act_as_the_named_account(db, people, capsys):
     code, out, _ = cli(capsys, db, 'account', 'events', '--limit', '3')
     shown = [json.loads(line) for line in out.splitlines()]
     assert len(shown) == 3
-    assert all(set(r) == {'time', 'event', 'by', 'account', 'via', 'note'} for r in shown)
+    assert all(set(r) == {'time', 'event', 'by', 'account', 'via', 'from', 'note'} for r in shown)
     assert shown[0] == {'time': shown[0]['time'], 'event': 'Account removed', 'by': OWNER, 'account': TECH,
-                        'via': 'command_line', 'note': ''}
+                        'via': 'command_line', 'from': '—', 'note': ''}
     for bad in ('0', '1001', 'many'):
         assert cli(capsys, db, 'account', 'events', '--limit', bad)[0] == 2
 
@@ -352,3 +352,24 @@ def test_a_removed_account_is_invited_again_with_the_same_id(db, people, capsys)
     shown = json.loads(out)
     assert (shown['event'], shown['account'], shown['note']) == (
         'Invite created', TECH, 'invited again after being removed')
+
+
+# --- final round: where an event came from, and what a role change was (I6) ---------------
+
+
+def test_events_show_the_source_and_role_changes(db, people, capsys):
+    assert people.accounts.sign_in(OWNER, 'not the password at all', '000000', '192.0.2.44') is None
+    assert cli(capsys, db, 'account', 'set-role', TECH, 'owner', '--as', OWNER)[0] == 0
+    owner_id = store(db).account_by_email(OWNER)['id']
+    store(db).insert_event('role_changed', owner_id, owner_id, 'dashboard', '<b>198.51.100.7',
+                           {'from': 'chief', 'to': 'owner'}, real_ts=1.0, sim_ts=1.0)
+    code, out, _ = cli(capsys, db, 'account', 'events', '--limit', '3')
+    assert code == 0
+    forged, changed, failed = (json.loads(line) for line in out.splitlines())
+    assert (failed['event'], failed['from']) == ('Sign-in failed', '192.0.2.44')
+    assert (changed['event'], changed['from'], changed['note']) == ('Role changed', '—', 'tech to owner')
+    # Only the closed role set is ever shown; the source is shown as stored (the page escapes it).
+    assert forged['note'] == '' and forged['from'] == '<b>198.51.100.7'
+    code, out, _ = cli(capsys, db, 'account', 'recover-owner', '--email', TECH)
+    code, out, _ = cli(capsys, db, 'account', 'events', '--limit', '1')
+    assert json.loads(out)['note'] == ''           # an owner stays owner: no change to show

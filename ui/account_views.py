@@ -198,22 +198,38 @@ def _account_actions(row, token):
             + remove)
 
 
-def _reason(detail):
+#: Events whose note says the role change they made, from `from` and `to` in their detail.
+_ROLE_CHANGES = frozenset({'role_changed', 'recover_owner'})
+
+
+def _note(event, detail):
+    """The Note column. It reads only `reason` (from the closed set _REASONS) and, for a role
+    change, `from` and `to` (each from the closed role set); no other detail key is ever read,
+    so email_hmac never shows."""
     try:
         found = json.loads(detail) if detail else None
     except ValueError:
         return ''
-    reason = found.get('reason') if isinstance(found, dict) else None
-    return _REASONS.get(reason, '') if isinstance(reason, str) else ''
+    if not isinstance(found, dict):
+        return ''
+    reason = found.get('reason')
+    notes = [_REASONS[reason]] if isinstance(reason, str) and reason in _REASONS else []
+    if event in _ROLE_CHANGES:
+        old, new = found.get('from'), found.get('to')
+        if isinstance(old, str) and isinstance(new, str) and old in _ROLE_NAMES and new in _ROLE_NAMES:
+            notes.append(f'{_ROLE_NAMES[old]} to {_ROLE_NAMES[new]}')
+    return '; '.join(notes)
 
 
-#: The Audit trail's columns, in order; `account events` prints the same ones.
-EVENT_COLUMNS = ('time', 'event', 'by', 'account', 'via', 'note')
+#: The Audit trail's columns, in order; `account events` prints the same ones. `from` is the
+#: address the event was recorded from (the client address the rate limit uses), as stored.
+EVENT_COLUMNS = ('time', 'event', 'by', 'account', 'via', 'from', 'note')
 
 
 def event_columns(row, emails):
     """One audit event as the Audit trail shows it, in plain text: EVENT_COLUMNS to values.
-    `emails` maps account ids to emails. Only `_reason` reads the detail, so email_hmac never shows."""
+    `emails` maps account ids to emails. Only `_note` reads the detail. The page escapes every
+    value; `account events` prints them as JSON."""
     def person(account_id):
         return emails.get(account_id, 'unknown account') if account_id else '—'
     subject = person(row['subject_id'])
@@ -221,7 +237,7 @@ def event_columns(row, emails):
         subject = 'no such account'
     return {'time': utc_time(row['real_ts']), 'event': _EVENT_NAMES.get(row['event'], row['event']),
             'by': person(row['actor_id']), 'account': subject, 'via': row['via'] or '—',
-            'note': _reason(row['detail'])}
+            'from': row['source'] or '—', 'note': _note(row['event'], row['detail'])}
 
 
 def _event_row(row, emails):
@@ -257,7 +273,7 @@ def accounts_page(overview, token, *, email, message=''):
             f'<th>Role</th><th>Expires</th><th>Revoke</th></tr>{invites}</table></section>'
             '<section class="card" id="events"><h2>Audit trail</h2><p class="muted">The newest 200 events, newest '
             'first. Times are wall time.</p><table><tr><th>Time</th><th>Event</th><th>By</th><th>Account</th>'
-            f'<th>Via</th><th>Note</th></tr>{events}</table></section>')
+            f'<th>Via</th><th>From</th><th>Note</th></tr>{events}</table></section>')
     return page('Accounts', body)
 
 
