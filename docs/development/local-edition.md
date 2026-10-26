@@ -228,10 +228,13 @@ browser warns about a self-signed certificate: compare the fingerprint it
 shows with the printed one (also shown in Settings) before going on, so you
 know the warning is for this server and not for something in between. The
 launcher prints the same lines and never opens a browser for a network
-address. Each connection's TLS handshake has 15 seconds, in its own thread, so
-a client that connects and sends nothing does not hold up anyone else; a
-failed handshake is logged as `tls_handshake_failed` with its error class
-only.
+address. Each connection runs in its own thread and has 15 seconds in all,
+from being accepted to the end of its request headers, the TLS handshake
+included, however slowly the bytes arrive; a client that connects and sends
+nothing, or trickles a byte at a time, is cut off then and does not hold up
+anyone else. At most 64 connections are served at once, on every listener
+(loopback too); one more is closed as soon as it is accepted. A failed
+handshake is logged as `tls_handshake_failed` with its error class only.
 
 ## Sign-in and remote access
 

@@ -301,23 +301,58 @@ def records_kind(docs):
     return 'synthetic' if sources and 'greenbone' not in sources else 'saved'
 
 
-#: Seconds a connection may sit before finishing its request. Browsers open spare
-#: connections they may never use; this closes them instead of holding a thread.
+#: Seconds a connection may sit between two reads. Browsers open spare connections they may
+#: never use; this closes them instead of holding a thread.
 IDLE_TIMEOUT = 15
+#: Seconds from accepting a connection to the end of its request headers, TLS handshake
+#: included, however the bytes are spread out (a per-read timeout alone lets a client send a
+#: byte every few seconds for ever). Each later request on the connection gets as long from
+#: the end of the one before. Bodies have their own deadline (BODY_SECONDS).
+HEADER_SECONDS = 15
+#: Connections served at once, on every listener (loopback too: a proxy brings everyone
+#: through loopback). One over the cap is closed as soon as it is accepted.
+MAX_CONNECTIONS = 64
+
+
+class _DeadlineReader(io.RawIOBase):
+    """The connection's reads, for the handler's rfile. While `deadline` is set (the request
+    line and headers), each read waits at most until it, and no longer than `idle` per read;
+    past it, TimeoutError. With no deadline (the body), the socket's own timeout applies."""
+
+    def __init__(self, sock, idle):
+        self.sock, self.idle, self.deadline = sock, idle, None
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if self.deadline is not None:
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            self.sock.settimeout(min(remaining, self.idle))
+        return self.sock.recv_into(buffer)
 
 
 class DashboardServer(ThreadingHTTPServer):
     """One thread per connection, so an idle connection holds only its own thread.
     The handler still runs requests one at a time.
 
+    At most MAX_CONNECTIONS connections at once: a slot is taken when a connection is accepted
+    and given back when it is shut down; one over the cap is closed at once, unread. Each
+    connection has HEADER_SECONDS from accept to the end of its request headers, the TLS
+    handshake included (`connection_deadline`).
+
     With `tls_context`, the listener accepts plain sockets and each connection's TLS handshake
-    runs in its own thread under IDLE_TIMEOUT, so a client that connects and stalls (or sends
+    runs in its own thread under that deadline, so a client that connects and stalls (or sends
     plain HTTP) holds only that thread, never the accept loop. A failed handshake is closed
     quietly: one log line with the error class, nothing about the peer or what it sent."""
     daemon_threads = True
 
     def __init__(self, address, handler_class, tls_context=None):
         self.tls_context = tls_context
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._connection = threading.local()   # each connection has its own thread
         try:
             if ipaddress.ip_address(address[0]).version == 6:
                 self.address_family = socket.AF_INET6
@@ -325,7 +360,27 @@ class DashboardServer(ThreadingHTTPServer):
             pass  # a host name: the default family
         super().__init__(address, handler_class)
 
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            _log('connection_refused', reason='too_many_connections')
+            self.close_request(request)          # never counted, so nothing is given back
+            return
+        super().process_request(request, client_address)
+
+    def shutdown_request(self, request):
+        try:
+            super().shutdown_request(request)
+        finally:
+            self._slots.release()
+
+    def connection_deadline(self):
+        """The monotonic time this thread's connection must have sent its headers by; None once
+        the first request has used it (later requests start their own)."""
+        deadline, self._connection.deadline = getattr(self._connection, 'deadline', None), None
+        return deadline
+
     def process_request_thread(self, request, client_address):
+        self._connection.deadline = time.monotonic() + HEADER_SECONDS   # the thread starts at accept
         if self.tls_context is not None:
             request = self._handshake(request)
             if request is None:
@@ -333,18 +388,24 @@ class DashboardServer(ThreadingHTTPServer):
         super().process_request_thread(request, client_address)
 
     def _handshake(self, raw):
+        """The TLS socket, or None after shutting the connection down (its slot given back)."""
         try:
-            raw.settimeout(IDLE_TIMEOUT)
             wrapped = self.tls_context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
         except (OSError, ValueError) as error:
             _log('tls_handshake_failed', error=type(error).__name__)
-            raw.close()
+            self.shutdown_request(raw)
             return None
         try:
+            remaining = self._connection.deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError()
+            # CPython's do_handshake treats the socket timeout as one deadline for the whole
+            # handshake, not per read, so a trickled ClientHello cannot stretch it.
+            wrapped.settimeout(remaining)
             wrapped.do_handshake()
         except (OSError, ValueError) as error:  # ssl.SSLError and timeouts are OSErrors
             _log('tls_handshake_failed', error=type(error).__name__)
-            wrapped.close()
+            self.shutdown_request(wrapped)
             return None
         return wrapped
 
@@ -1042,6 +1103,28 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
 
         def log_message(self, *args):
             pass  # Never record request lines or headers: invite tokens are in paths.
+
+        def setup(self):
+            super().setup()
+            # The request line and headers are read under one deadline (HEADER_SECONDS),
+            # not just a per-read timeout; see _DeadlineReader and DashboardServer.
+            self._reader = _DeadlineReader(self.connection, self.timeout)
+            self.rfile = io.BufferedReader(self._reader)
+
+        def handle_one_request(self):
+            first = getattr(self.server, 'connection_deadline', lambda: None)()
+            self._reader.deadline = first if first is not None else time.monotonic() + HEADER_SECONDS
+            try:
+                super().handle_one_request()
+            finally:
+                self._reader.deadline = None
+
+        def parse_request(self):
+            ok = super().parse_request()
+            # The headers are in: from here the body's own deadline (_read_body) applies.
+            self._reader.deadline = None
+            self.connection.settimeout(self.timeout)
+            return ok
 
         # `serial` is held only for the work on records, settings and imports. Classifying a
         # request, reading its body (under BODY_SECONDS) and the sign-in pages (scrypt, and the

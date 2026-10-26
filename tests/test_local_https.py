@@ -263,3 +263,108 @@ def test_settings_fingerprint_reads_the_workspace_certificate(served):
     values = dict(local_settings.DEFAULTS, server_names=[NAME])
     assert lines[1] == local.FINGERPRINT_LINE + local._certificate_fingerprint(values, ws.root)
     assert local._certificate_fingerprint(values, None) is None
+
+
+# --- final round: a total deadline and a connection cap (I1) -----------------------
+
+
+def _client_hello(ws):
+    """The bytes of a real TLS ClientHello, made in memory: nothing is sent."""
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    tls = client_context(ws).wrap_bio(incoming, outgoing, server_hostname=NAME)
+    with pytest.raises(ssl.SSLWantReadError):
+        tls.do_handshake()
+    return outgoing.read()
+
+
+def _seconds_until_closed(sock, data, limit):
+    """Send `data` a byte a second until the server closes the connection; the seconds that took,
+    or None if it was still open after `limit` seconds."""
+    started = time.monotonic()
+    sock.settimeout(0.05)
+    for byte in data:
+        if time.monotonic() - started > limit:
+            return None
+        try:
+            sock.sendall(bytes([byte]))
+        except OSError:
+            return time.monotonic() - started
+        pause = time.monotonic() + 1
+        while time.monotonic() < pause:
+            try:
+                if sock.recv(4096) == b'':
+                    return time.monotonic() - started
+            except TimeoutError:
+                pass
+            except OSError:
+                return time.monotonic() - started
+    return None
+
+
+@needs_openssl
+def test_a_trickled_handshake_is_cut_off_by_the_deadline(served, monkeypatch):
+    monkeypatch.setattr(local, 'HEADER_SECONDS', 3, raising=False)
+    server, _, ws = served(server_names=[NAME])
+    hello = _client_hello(ws)
+    assert len(hello) > 20
+    with socket.create_connection(('127.0.0.1', server.server_port), timeout=5) as sock:
+        took = _seconds_until_closed(sock, hello, limit=12)
+    assert took is not None and took < 8, 'a byte a second kept the handshake open past the deadline'
+
+
+@needs_openssl
+def test_trickled_headers_over_tls_are_cut_off_by_the_deadline(served, monkeypatch):
+    monkeypatch.setattr(local, 'HEADER_SECONDS', 3, raising=False)
+    server, _, ws = served(server_names=[NAME])
+    raw = socket.create_connection(('127.0.0.1', server.server_port), timeout=5)
+    with client_context(ws).wrap_socket(raw, server_hostname=NAME) as sock:
+        headers = f'GET /signin HTTP/1.1\r\nHost: {NAME}:{server.server_port}\r\nX-Slow: {"a" * 40}\r\n\r\n'
+        took = _seconds_until_closed(sock, headers.encode(), limit=12)
+    assert took is not None and took < 8
+
+
+def test_trickled_headers_on_loopback_are_cut_off_by_the_deadline(served, monkeypatch):
+    monkeypatch.setattr(local, 'HEADER_SECONDS', 3, raising=False)
+    server, _, _ = served(exposed=False)
+    with socket.create_connection(('127.0.0.1', server.server_port), timeout=5) as sock:
+        headers = f'GET / HTTP/1.1\r\nHost: 127.0.0.1:{server.server_port}\r\nX-Slow: {"a" * 40}\r\n\r\n'
+        took = _seconds_until_closed(sock, headers.encode(), limit=12)
+    assert took is not None and took < 8
+
+
+def _plain_get(port, timeout=5):
+    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=timeout)
+    conn.request('GET', '/')
+    response = conn.getresponse()
+    response.read()
+    conn.close()
+    return response
+
+
+def test_connections_over_the_cap_are_closed_and_a_freed_slot_serves_again(served, monkeypatch):
+    monkeypatch.setattr(local, 'MAX_CONNECTIONS', 2, raising=False)
+    server, _, _ = served(exposed=False)
+    port = server.server_port
+    held = [socket.create_connection(('127.0.0.1', port), timeout=5) for _ in range(2)]
+    try:
+        time.sleep(0.3)  # both are accepted and hold a slot each, sending nothing
+        with socket.create_connection(('127.0.0.1', port), timeout=5) as extra:
+            started = time.monotonic()
+            try:
+                answer = extra.recv(1)
+            except ConnectionResetError:
+                answer = b''
+            assert answer == b'' and time.monotonic() - started < 3   # closed at once
+        held.pop().close()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                assert _plain_get(port, timeout=2).status == 303
+                break
+            except (OSError, http.client.HTTPException):
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.1)
+    finally:
+        for sock in held:
+            sock.close()
