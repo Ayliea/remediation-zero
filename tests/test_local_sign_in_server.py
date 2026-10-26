@@ -648,8 +648,12 @@ def test_an_anonymous_upload_is_refused_before_its_body_is_read(start, signed_in
         sock.close()
 
 
+def status_of(sock):
+    return sock.recv(256).split(b' ')[1]
+
+
 def test_inflight_body_bytes_are_capped(start, signed_in, monkeypatch):
-    monkeypatch.setattr(local, 'INFLIGHT_BODY_LIMIT', 10000)   # read when the handler is built
+    monkeypatch.setattr(local, 'FORM_BUDGET_LIMIT', 10000)     # read when the handler is built
     monkeypatch.setattr(local, 'BODY_SECONDS', 8)
     server = start(signed_in.accounts)
     holding = raw_headers(server, '/signin', 8192)              # 8192 of the 10000 bytes, held
@@ -666,6 +670,83 @@ def test_inflight_body_bytes_are_capped(start, signed_in, monkeypatch):
         holding.close()                                         # the read ends; its bytes come back
     threading.Event().wait(0.5)
     assert sign_in(server, 'nobody@client.example', PW_OWNER, '000000')[0].status == 400
+    # The released bytes are all back: another full-size body is read (and refused as a bad form).
+    full = raw_headers(server, '/signin', 8192)
+    try:
+        full.sendall(b'x' * 8192)
+        assert status_of(full) == b'400'
+    finally:
+        full.close()
+
+
+def test_uploads_cannot_block_sign_in(start, signed_in, monkeypatch):
+    monkeypatch.setattr(local, 'INFLIGHT_BODY_LIMIT', 100000)
+    monkeypatch.setattr(local, 'BODY_SECONDS', 8)
+    server = start(signed_in.accounts, upload=lambda data, add_task: 'imported')
+    held = [raw_headers(server, '/upload', 50000, signed_in.cookie(who)) for who in ('owner', 'tech')]
+    try:
+        threading.Event().wait(0.5)
+        # The authorised budget is full: a settings save waits its turn...
+        token = page_token(server, signed_in.cookie())
+        assert server.request('POST', '/settings', cookie=signed_in.cookie(),
+                              body=scanner_save(token))[0].status == 503
+        # ...but sign-in does not: it has its own budget.
+        assert sign_in(server, 'nobody@client.example', PW_OWNER, '000000')[0].status == 400
+    finally:
+        for sock in held:
+            sock.close()
+
+
+def test_anonymous_sign_in_bodies_cannot_block_a_settings_save(start, signed_in, monkeypatch):
+    monkeypatch.setattr(local, 'FORM_BUDGET_LIMIT', 2 * 8192)
+    monkeypatch.setattr(local, 'BODY_SECONDS', 8)
+    server = start(signed_in.accounts)
+    held = [raw_headers(server, '/signin', 8192) for _ in range(2)]
+    try:
+        threading.Event().wait(0.5)
+        extra = raw_headers(server, '/signin', 8192)
+        try:
+            assert status_of(extra) == b'503'                    # the sign-in budget is full
+        finally:
+            extra.close()
+        token = page_token(server, signed_in.cookie())
+        assert server.request('POST', '/settings', cookie=signed_in.cookie(),
+                              body=scanner_save(token))[0].status == 303
+    finally:
+        for sock in held:
+            sock.close()
+
+
+def test_one_upload_per_session(start, signed_in, monkeypatch):
+    monkeypatch.setattr(local, 'BODY_SECONDS', 8)
+    imported = []
+    server = start(signed_in.accounts, upload=lambda data, add_task: imported.append(data) or 'imported')
+    first = raw_headers(server, '/upload', 50000, signed_in.cookie())
+    try:
+        threading.Event().wait(0.5)
+        second = raw_headers(server, '/upload', 50000, signed_in.cookie())
+        try:
+            answer = second.recv(256)
+            assert answer.split(b' ')[1] == b'409' and b'Retry-After: 5' in answer
+        finally:
+            second.close()
+        # Another session's upload is not held up.
+        other = raw_headers(server, '/upload', 10, signed_in.cookie('tech'))
+        try:
+            other.sendall(b'x' * 10)
+            assert status_of(other) == b'400'                    # read, then refused as a bad form
+        finally:
+            other.close()
+    finally:
+        first.close()
+    threading.Event().wait(0.5)
+    again = raw_headers(server, '/upload', 10, signed_in.cookie())   # the slot came back
+    try:
+        again.sendall(b'x' * 10)
+        assert status_of(again) == b'400'
+    finally:
+        again.close()
+    assert imported == []
 
 
 def test_setup_ends_signed_in(start, tmp_path):
