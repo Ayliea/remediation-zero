@@ -334,3 +334,21 @@ def test_an_unreadable_accounts_file_is_one_sentence(db, unreadable, capsys, arg
     code, out, err = cli(capsys, db, *argv)
     assert (code, err) == (1, UNREADABLE)
     assert 'Traceback' not in out + err
+
+
+# --- final round: a removed person can be invited again (I5) -----------------------------
+
+
+def test_a_removed_account_is_invited_again_with_the_same_id(db, people, capsys):
+    tech_id = store(db).account_by_email(TECH)['id']
+    assert cli(capsys, db, 'account', 'remove', TECH, '--as', OWNER)[0] == 0
+    code, out, err = cli(capsys, db, 'account', 'invite', '--email', TECH, '--role', 'owner', '--as', OWNER)
+    assert code == 0, err
+    token = re.search(r'/invite/(\S+)', out)[1]
+    view = link(db, token)
+    assert (view.email, view.role, view.kind) == (TECH, 'owner', 'join')
+    assert store(db).account_by_email(TECH)['id'] == tech_id
+    code, out, _ = cli(capsys, db, 'account', 'events', '--limit', '1')
+    shown = json.loads(out)
+    assert (shown['event'], shown['account'], shown['note']) == (
+        'Invite created', TECH, 'invited again after being removed')

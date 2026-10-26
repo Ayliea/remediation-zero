@@ -575,7 +575,8 @@ def test_an_invite_link_sets_a_password_and_mfa_once(start, signed_in):
     assert '<svg' in body and 'new@client.example' in body
     secret = re.search(r'<code class="totp-key">([A-Z2-7]+)</code>', body).group(1)
     signed_in.now.tick()
-    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': wrong_code(secret, signed_in.now)}
+    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': wrong_code(secret, signed_in.now),
+              'secret': secret, 'secret_mac': form_value(body, 'secret_mac')}
     assert server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))[0].status == 400
     fields['code'] = code_for(secret, signed_in.now)
     response, body = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))
@@ -778,7 +779,8 @@ def test_accepting_an_invite_ends_signed_in(start, signed_in):
     pre, value, body = open_form(server, f'/invite/{link}')
     secret = re.search(r'<code class="totp-key">([A-Z2-7]+)</code>', body).group(1)
     signed_in.now.tick()
-    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(secret, signed_in.now)}
+    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(secret, signed_in.now),
+              'secret': secret, 'secret_mac': form_value(body, 'secret_mac')}
     response, body = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))
     assert response.status == 200 and 'href="/"' in body
     cookie = session_cookie(response).split(';', 1)[0]
@@ -1035,7 +1037,7 @@ def test_tech_can_invite_the_owner_only_while_no_owner_exists(start, tmp_path):
         assert server.request('POST', path, cookie=cookie, body=fields)[0].status == 403, path
     # Once the owner has joined, the tech's owner invite is gone.
     now.tick()
-    accounts.accept_invite(link, PW_OWNER, code_for(view.totp_secret, now))
+    accounts.accept_invite(link, PW_OWNER, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert accounts.owner_exists()
     response, _ = server.request('POST', '/accounts/invite', cookie=cookie,
                                  body=urlencode({'token': token, 'email': 'second@client.example'}))
@@ -1102,3 +1104,52 @@ def test_records_without_actor_say_recorded_before_sign_in(start, signed_in, tmp
     # The cloud console passes no account and its records carry no person_approval: unchanged.
     from ui.dashboard_view import render
     assert 'recorded before sign-in' not in render({'decisions': [dict(before, person_approval=None)]}, 'activity')
+
+
+# --- final round: a new secret on every view of a link, carried by the form (I4) ----------
+
+def _secret_of(body):
+    return re.search(r'<code class="totp-key">([A-Z2-7]+)</code>', body).group(1)
+
+
+def test_each_view_of_an_invite_link_shows_a_new_secret(start, signed_in):
+    accounts = signed_in.accounts
+    link = accounts.invite(account_id(accounts, OWNER), 'new@client.example', 'tech')
+    server = start(accounts)
+    _, _, first = open_form(server, f'/invite/{link}')
+    _, _, second = open_form(server, f'/invite/{link}')
+    assert _secret_of(first) != _secret_of(second)
+    assert form_value(first, 'secret') == _secret_of(first) and form_value(first, 'secret_mac')
+    stored = all_values(accounts, 'SELECT totp_secret FROM invites')
+    assert stored and set(stored) == {None}
+
+
+def test_a_tampered_invite_secret_is_refused(start, signed_in):
+    accounts = signed_in.accounts
+    link = accounts.invite(account_id(accounts, OWNER), 'new@client.example', 'tech')
+    server = start(accounts)
+    pre, value, body = open_form(server, f'/invite/{link}')
+    mine = totp.new_secret()          # a secret the attacker knows, with the page's MAC
+    signed_in.now.tick()
+    base = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(mine, signed_in.now)}
+    for extra in ({'secret': mine, 'secret_mac': form_value(body, 'secret_mac')},
+                  {'secret': mine},
+                  {'secret': _secret_of(body), 'secret_mac': '0' * 64}):
+        response, text = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode({**base, **extra}))
+        assert response.status == 400 and 'Invalid form.' in text
+    assert accounts.store.account_by_email('new@client.example')['status'] == 'invited'
+
+
+def test_accepting_enrols_the_secret_on_the_page_submitted(start, signed_in):
+    accounts = signed_in.accounts
+    link = accounts.invite(account_id(accounts, OWNER), 'new@client.example', 'tech')
+    server = start(accounts)
+    pre, value, first = open_form(server, f'/invite/{link}')
+    open_form(server, f'/invite/{link}')          # a later view (a link scanner, say) changes nothing
+    secret = _secret_of(first)
+    signed_in.now.tick()
+    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(secret, signed_in.now),
+              'secret': secret, 'secret_mac': form_value(first, 'secret_mac')}
+    response, _ = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode(fields))
+    assert response.status == 200
+    assert accounts.store.account_by_email('new@client.example')['totp_secret'] == secret

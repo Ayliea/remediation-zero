@@ -94,7 +94,7 @@ _INVITE_TITLES = {'join': 'Join Remediation Zero', 'recover': 'Set a new passwor
                   'reset_password': 'Set a new password', 'reset_mfa': 'Set up a new authenticator'}
 
 
-def invite_page(pre, kind, email, role, secret, uri, qr, message=''):
+def invite_page(pre, kind, email, role, secret, uri, qr, message='', secret_mac=None):
     who = f'<p>For <strong>{_e(email)}</strong>, as {"owner" if role == "owner" else "tech"}.</p>'
     new_password = ('<label>New password (12 to 128 characters) <input name="password" type="password" '
                     'autocomplete="new-password" required minlength="12" maxlength="128"></label>')
@@ -106,7 +106,9 @@ def invite_page(pre, kind, email, role, secret, uri, qr, message=''):
                   'autocomplete="current-password" required maxlength="1024"></label>' + _enrol(secret, uri, qr) + code)
     else:
         fields = new_password + _enrol(secret, uri, qr) + code
-    body = (f'{who}{_message(message)}<form class="card account-card" method="post">{_pre(pre)}'
+    sealed = (f'<input type="hidden" name="secret" value="{_e(secret)}">'
+              f'<input type="hidden" name="secret_mac" value="{_e(secret_mac)}">') if secret and secret_mac else ''
+    body = (f'{who}{_message(message)}<form class="card account-card" method="post">{_pre(pre)}{sealed}'
             f'{fields}<button type="submit">Save</button></form>'
             '<p class="muted">This link works once and expires after 7 days.</p>')
     return page(_INVITE_TITLES.get(kind, 'Join Remediation Zero'), body)
@@ -165,7 +167,8 @@ _EVENT_NAMES = {
 #: The only part of an event's detail a page shows: a reason from this closed set. Nothing
 #: else in detail (never email_hmac) is read.
 _REASONS = {'malformed': 'what was typed as the email was not an address',
-            'maker_not_allowed': 'whoever made it can no longer issue it'}
+            'maker_not_allowed': 'whoever made it can no longer issue it',
+            'reinvited': 'invited again after being removed'}
 
 
 def refusal_sentence(code):

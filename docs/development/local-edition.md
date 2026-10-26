@@ -261,7 +261,13 @@ are shown once, at setup; each signs in once in place of a code.
   owner|tech --as EMAIL`, or the Accounts page). Before any owner has joined,
   the installing tech may invite the owner, and nothing else. The link is
   shown once; it works once, expires after 7 days and can be revoked. The
-  person opening it sets a password and an authenticator.
+  person opening it sets a password and an authenticator. Each time the page
+  is opened it shows a new authenticator key, and the one on the page that is
+  submitted is the one set up; no key is stored for a link, so something that
+  fetched the link first (a mail scanner, a chat preview) never holds the
+  account's second factor. A removed person can be invited again: their
+  account comes back with the same id, so older records still name them, and
+  the audit trail says "invited again after being removed".
 - **Roles.** An owner does everything, and is the only role that can accept a
   risk, manage accounts or read the audit trail. A tech works the findings,
   uploads reports, approves held decisions and changes Settings. The last

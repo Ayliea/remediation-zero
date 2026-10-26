@@ -21,9 +21,14 @@ timers and use the injected wall clock `now`, by default `clock.now().real_ts`
 
 A pending invite is not a joined owner: only `active` accounts count. Removed
 accounts keep their row, marked `removed`, so records that name them still
-resolve; their email is not invited again (`email_taken`). An `invited`
-account whose links have all expired or been revoked may be invited again,
-reusing its row.
+resolve. A removed account, or an `invited` one whose links have all expired
+or been revoked, may be invited again: the same row and id come back as
+`invited` with the new role (the event says `reason: reinvited` for a removed
+one), so old records still name the same person. An active account's email,
+or one with a live link, is `email_taken`.
+
+No TOTP secret is stored for a link: every view of an enrolling link shows a
+new one, and acceptance enrols the one the submitted page carried.
 
 Sign-in has one failure path. An unknown email, an invited or removed
 account, a locked account, a wrong password and a wrong code all return None,
@@ -138,6 +143,14 @@ def normalise_email(email: str) -> str:
     return value
 
 
+_SECRET_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+
+
+def _is_secret(value: Any) -> bool:
+    """A TOTP secret as totp.new_secret makes them: 32 base32 characters."""
+    return isinstance(value, str) and len(value) == 32 and set(value) <= _SECRET_CHARS
+
+
 def _check_role(role: str) -> None:
     if role not in ROLES:
         raise ValueError(f"role must be one of {ROLES}")
@@ -190,10 +203,13 @@ class Accounts:
         self.revoke_invite(by_id, token_hash, via=via, source=source)
 
     def invite_view(self, token: str) -> Optional[InviteView]:
-        """What a live link is for, without spending it. An enrolling link
-        (join, reset_mfa, recover) gets its TOTP secret on first view, kept so
-        the secret the person scans is the one accepted. A link whose maker
-        no longer has the authority to issue it is revoked and shows nothing."""
+        """What a live link is for, without spending it. For an enrolling link
+        (join, reset_mfa, recover) every view carries a new TOTP secret, and
+        nothing is stored: the page puts it in its form under a server MAC, and
+        `accept_invite` enrols the secret the submitted form carried. So
+        whatever fetched the link before the person (a mail scanner, a chat
+        unfurler) saw a secret that is never enrolled. A link whose maker no
+        longer has the authority to issue it is revoked and shows nothing."""
         if not isinstance(token, str) or not token:
             return None
         th = _token_hash(token)
@@ -205,16 +221,11 @@ class Accounts:
                 return None
             inv, acct = found
             voided = self._void_if_unauthorised(cur, inv, stamp)
-            secret = inv["totp_secret"]
-            if voided is None and inv["kind"] in _ENROLS and secret is None:
-                secret = totp.new_secret()
-                cur.execute("UPDATE invites SET totp_secret = ? WHERE token_hash = ?",
-                            (secret, th))
         if voided is not None:
             _log("invite_revoked", None, inv["account_id"], None, voided)
             return None
         return InviteView(inv["kind"], acct["email"], acct["role"],
-                          secret if inv["kind"] in _ENROLS else None)
+                          totp.new_secret() if inv["kind"] in _ENROLS else None)
 
     # --- mutations --------------------------------------------------------
 
@@ -274,12 +285,17 @@ class Accounts:
             existing = cur.execute("SELECT * FROM accounts WHERE email = ?",
                                    (email,)).fetchone()
             if existing is not None:
-                if existing["status"] != "invited" or self._has_live_invite(
+                if existing["status"] == "active" or self._has_live_invite(
                         cur, existing["id"], now):
                     raise AccountRefused("email_taken")
                 account_id = existing["id"]
-                cur.execute("UPDATE accounts SET role = ?, updated_real_ts = ?, "
-                            "updated_sim_ts = ? WHERE id = ?",
+                if existing["status"] == "removed":
+                    # The same row and id come back, so records that name the person
+                    # still resolve to them; removal already cleared its credentials.
+                    detail["reason"] = "reinvited"
+                cur.execute("UPDATE accounts SET role = ?, status = 'invited', "
+                            "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
+                            "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
                             (role, stamp.real_ts, stamp.sim_ts, account_id))
             else:
                 account_id = secrets.token_hex(16)
@@ -356,6 +372,7 @@ class Accounts:
         return token
 
     def accept_invite(self, token: str, password: Optional[str], code: Optional[str], *,
+                      secret: Optional[str] = None,
                       current_password: Optional[str] = None,
                       current_code: Optional[str] = None,
                       via: Optional[str] = None,
@@ -366,12 +383,13 @@ class Accounts:
         the transaction that spends the link, after the account's other
         sessions end.
 
-        - join, recover: `password` is the new password, `code` is from the
-          link's new TOTP secret.
+        - join, recover: `password` is the new password, `secret` is the new
+          TOTP secret the page showed (the caller has verified the form's MAC
+          over it; see scripts/local_auth.py) and `code` is from it.
         - reset_password: `password` is the new password, `current_code` is
           from the account's existing TOTP secret.
-        - reset_mfa: `current_password` is the account's password, `code` is
-          from the link's new TOTP secret.
+        - reset_mfa: `current_password` is the account's password, `secret`
+          and `code` as for join.
 
         Everything is checked before the link is spent, and the spend commits
         with the account change, so a refused attempt leaves the link usable.
@@ -408,8 +426,8 @@ class Accounts:
         if kind == "reset_password":
             secret = acct["totp_secret"]
         else:
-            secret = inv["totp_secret"]          # set on first view
-            step = totp.match(secret, code, now, None) if secret else None
+            # the secret the submitted page showed; never one stored on the link
+            step = totp.match(secret, code, now, None) if _is_secret(secret) else None
             if step is None:
                 raise AccountRefused("bad_code")
         if kind in RESET_KINDS:

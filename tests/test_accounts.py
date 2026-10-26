@@ -81,7 +81,7 @@ def join(accounts, now, by_id, email, role, password=PW_TECH):
     token = accounts.invite(by_id, email, role)
     view = accounts.invite_view(token)
     now.tick()
-    account_id, codes = accounts.accept_invite(token, password, code_for(view.totp_secret, now))
+    account_id, codes = accounts.accept_invite(token, password, code_for(view.totp_secret, now), secret=view.totp_secret)
     return account_id, view.totp_secret, codes
 
 
@@ -170,7 +170,7 @@ def test_tech_may_invite_only_an_owner_and_only_before_one_exists(accounts, stor
     assert accounts.invite_view(token).role == "owner"
     view = accounts.invite_view(token)
     now.tick()
-    owner_id, _ = accounts.accept_invite(token, PW_OWNER, code_for(view.totp_secret, now))
+    owner_id, _ = accounts.accept_invite(token, PW_OWNER, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert accounts.owner_exists()
     with refused("not_allowed"):
         accounts.invite(tech_id, "second-owner@client.example", "owner")
@@ -292,11 +292,12 @@ def test_invite_expires_after_7_days(accounts, store, now):
     token = accounts.invite(owner_id, "tech@msp.example", "tech")
     view = accounts.invite_view(token)
     now.t = T0 + 7 * DAY - 1
-    assert accounts.invite_view(token) == view          # same secret, still valid
+    still = accounts.invite_view(token)                 # still valid; a new secret each view
+    assert (still.kind, still.email, still.role) == (view.kind, view.email, view.role)
     now.t = T0 + 7 * DAY
     assert accounts.invite_view(token) is None
     with refused("invalid_link"):
-        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert store.account_by_email("tech@msp.example")["status"] == "invited"
     # an expired invite does not block a fresh one for the same email
     fresh = accounts.invite(owner_id, "tech@msp.example", "tech")
@@ -318,7 +319,7 @@ def test_revoked_invite_is_refused(accounts, store, now):
     assert accounts.invite_view(token) is None
     now.tick()
     with refused("invalid_link"):
-        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now), secret=view.totp_secret)
     with refused("invalid_link"):
         accounts.revoke_invite(owner_id, token_hash(token))
     assert store.account_by_email("tech@msp.example")["status"] == "invited"
@@ -335,9 +336,9 @@ def test_a_token_or_code_is_spent_exactly_once_under_concurrency(tmp_path, clock
 
     # a failed attempt (weak password, wrong code) does not burn the link
     with refused("password"):
-        accounts.accept_invite(token, "short", code)
+        accounts.accept_invite(token, "short", code, secret=view.totp_secret)
     with refused("bad_code"):
-        accounts.accept_invite(token, PW_TECH, "abcdef")
+        accounts.accept_invite(token, PW_TECH, "abcdef", secret=view.totp_secret)
     assert accounts.invite_view(token) is not None
 
     barrier = threading.Barrier(2)
@@ -347,7 +348,7 @@ def test_a_token_or_code_is_spent_exactly_once_under_concurrency(tmp_path, clock
         mine = Accounts(AccountStore(path), clock, now=now)
         barrier.wait()
         try:
-            outcomes.append(mine.accept_invite(token, PW_TECH, code)[0])
+            outcomes.append(mine.accept_invite(token, PW_TECH, code, secret=view.totp_secret)[0])
         except AccountRefused as exc:
             outcomes.append(exc.code)
 
@@ -414,12 +415,15 @@ def test_reset_mfa_needs_the_current_password(accounts, store, now):
     now.tick()
     new_code = code_for(view.totp_secret, now)
     with refused("password"):
-        accounts.accept_invite(token, None, new_code)
+        accounts.accept_invite(token, None, new_code, secret=view.totp_secret)
     with refused("password"):
-        accounts.accept_invite(token, None, new_code, current_password="wrong password here")
+        accounts.accept_invite(token, None, new_code, secret=view.totp_secret,
+                               current_password="wrong password here")
     with refused("bad_code"):
-        accounts.accept_invite(token, None, code_for(old_secret, now), current_password=PW_TECH)
-    account_id, codes = accounts.accept_invite(token, None, new_code, current_password=PW_TECH)
+        accounts.accept_invite(token, None, code_for(old_secret, now), secret=view.totp_secret,
+                               current_password=PW_TECH)
+    account_id, codes = accounts.accept_invite(token, None, new_code, secret=view.totp_secret,
+                                               current_password=PW_TECH)
     assert account_id == tech_id and len(codes) == 10 and not set(codes) & set(old_codes)
     row = store.account_by_id(tech_id)
     assert row["totp_secret"] == view.totp_secret
@@ -449,7 +453,7 @@ def test_recover_owner_refuses_an_unknown_email_and_promotes_a_tech_only_with_pr
     view = accounts.invite_view(token)
     assert view.kind == "recover" and view.role == "owner" and view.totp_secret
     now.tick()
-    account_id, codes = accounts.accept_invite(token, PW_NEW, code_for(view.totp_secret, now))
+    account_id, codes = accounts.accept_invite(token, PW_NEW, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert account_id == tech_id and len(codes) == 10
 
     # an active owner: password and MFA cleared, a link to set new ones
@@ -492,7 +496,7 @@ def test_resets_and_removal_end_every_session(accounts, store, now):
     token = accounts.reset_link(owner_id, tech_id, "reset_mfa")
     view = accounts.invite_view(token)
     now.tick()
-    accounts.accept_invite(token, None, code_for(view.totp_secret, now), current_password=PW_NEW)
+    accounts.accept_invite(token, None, code_for(view.totp_secret, now), secret=view.totp_secret, current_password=PW_NEW)
     assert sessions_of(store, tech_id) == 0
 
     two_sessions()
@@ -535,7 +539,7 @@ def test_every_mutation_writes_one_event_without_secrets(accounts, store, now, c
     secrets_seen += [token, token_hash(token), view.totp_secret, PW_TECH]
     now.tick()
     tech_id, codes = step("invite_accepted", lambda: accounts.accept_invite(
-        token, PW_TECH, code_for(view.totp_secret, now)))
+        token, PW_TECH, code_for(view.totp_secret, now), secret=view.totp_secret))
     secrets_seen += codes
     tech_secret = view.totp_secret
 
@@ -555,7 +559,7 @@ def test_every_mutation_writes_one_event_without_secrets(accounts, store, now, c
     secrets_seen += [link, token_hash(link), view.totp_secret]
     now.tick()
     _, codes = step("mfa_reset", lambda: accounts.accept_invite(
-        link, None, code_for(view.totp_secret, now), current_password=PW_NEW))
+        link, None, code_for(view.totp_secret, now), secret=view.totp_secret, current_password=PW_NEW))
     secrets_seen += codes
 
     step("role_changed", lambda: accounts.set_role(owner_id, tech_id, "owner"))
@@ -609,7 +613,7 @@ def test_a_removed_inviters_link_is_refused(accounts, store, now):
     accounts.remove(a_id, b_id)
     now.tick()
     with refused("invalid_link"):
-        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert store.account_by_email("tech@msp.example")["status"] == "invited"
 
     # the check at use holds even if the maker lost authority some other way
@@ -620,7 +624,7 @@ def test_a_removed_inviters_link_is_refused(accounts, store, now):
         cur.execute("UPDATE accounts SET status = 'removed' WHERE id = ?", (c_id,))
     now.tick()
     with refused("invalid_link"):
-        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now))
+        accounts.accept_invite(token, PW_TECH, code_for(view.totp_secret, now), secret=view.totp_secret)
     row = invite_row(store, token)
     assert (row["used"], row["revoked"]) == (0, 1)        # revoked, not spent
     ev = store.events(limit=1)[0]
@@ -662,14 +666,14 @@ def test_tech_owner_invite_is_void_once_an_owner_joins(accounts, store, now):
     second_view = accounts.invite_view(second)
     view = accounts.invite_view(first)
     now.tick()
-    owner_id, _ = accounts.accept_invite(first, PW_OWNER, code_for(view.totp_secret, now))
+    owner_id, _ = accounts.accept_invite(first, PW_OWNER, code_for(view.totp_secret, now), secret=view.totp_secret)
     ev = store.events(limit=1)[0]
     assert ev["event"] == "invite_accepted"
     assert json.loads(ev["detail"]) == {"invite_kind": "join", "role": "owner", "count": 1}
     assert invite_row(store, second)["revoked"] == 1
     assert accounts.invite_view(second) is None
     with refused("invalid_link"):
-        accounts.accept_invite(second, PW_NEW, code_for(second_view.totp_secret, now))
+        accounts.accept_invite(second, PW_NEW, code_for(second_view.totp_secret, now), secret=second_view.totp_secret)
     # the owner may invite that person again
     assert accounts.invite_view(accounts.invite(owner_id, "spouse@client.example", "owner"))
 
@@ -752,7 +756,7 @@ def test_reset_link_second_factor_failures_lock_the_account(accounts, store, now
     view = accounts.invite_view(link)
     for _ in range(LOCK_AFTER):
         with refused("password"):
-            accounts.accept_invite(link, None, code_for(view.totp_secret, now),
+            accounts.accept_invite(link, None, code_for(view.totp_secret, now), secret=view.totp_secret,
                                    current_password="not the password at all")
     assert store.account_by_id(other_id)["locked_until"] == now() + LOCK_SECONDS
     assert store.events(limit=1)[0]["event"] == "locked"
@@ -762,7 +766,7 @@ def test_reset_link_second_factor_failures_lock_the_account(accounts, store, now
     link = accounts.reset_link(owner_id, third_id, "reset_mfa")
     view = accounts.invite_view(link)
     with refused("bad_code"):
-        accounts.accept_invite(link, None, wrong_code(view.totp_secret, now),
+        accounts.accept_invite(link, None, wrong_code(view.totp_secret, now), secret=view.totp_secret,
                                current_password=PW_TECH)
     assert (store.account_by_id(third_id)["failed_count"] or 0) == 0
 
@@ -786,7 +790,7 @@ def test_a_locked_account_cannot_use_a_reset_link(accounts, store, now):
     mfa = accounts.reset_link(owner_id, tech_id, "reset_mfa")
     view = accounts.invite_view(mfa)
     with refused("locked"):
-        accounts.accept_invite(mfa, None, code_for(view.totp_secret, now),
+        accounts.accept_invite(mfa, None, code_for(view.totp_secret, now), secret=view.totp_secret,
                                current_password=PW_TECH)
     row = store.account_by_id(tech_id)
     assert row["locked_until"] == locked_until and row["failed_count"] == 0
@@ -867,7 +871,7 @@ def test_concurrent_reset_guesses_cannot_exceed_the_cap(tmp_path, clock, now, mo
 
     assert password_checks == []
     outcomes = burst(lambda acc: acc.accept_invite(
-        pw_link, None, code_for(new_secret, now), current_password="wrong guess, in parallel"))
+        pw_link, None, code_for(new_secret, now), secret=new_secret, current_password="wrong guess, in parallel"))
     assert len(password_checks) == LOCK_AFTER
     assert outcomes.count("password") == LOCK_AFTER and outcomes.count("locked") == 15
     assert store.account_by_id(other_id)["locked_until"] == now() + LOCK_SECONDS
@@ -893,7 +897,7 @@ def test_a_correct_guess_after_the_cap_is_refused(accounts, store, now, monkeypa
     with refused("locked"):
         accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
     with refused("locked"):
-        accounts.accept_invite(mfa, None, code_for(new_secret, now), current_password=PW_TECH)
+        accounts.accept_invite(mfa, None, code_for(new_secret, now), secret=new_secret, current_password=PW_TECH)
     assert code_checks == [] and password_checks == []     # never verified while locked
     row = store.account_by_id(tech_id)
     assert row["totp_secret"] == secret
@@ -906,3 +910,57 @@ def test_a_correct_guess_after_the_cap_is_refused(accounts, store, now, monkeypa
     accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
     row = store.account_by_id(tech_id)
     assert row["locked_until"] is None and row["failed_count"] == 0
+
+
+# --- final round: no TOTP secret is kept for a link (I4), a removed email comes back (I5) ---
+
+
+def test_each_view_of_an_enrolling_link_shows_a_new_secret_and_stores_none(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, _, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    links = [accounts.invite(owner_id, "new@msp.example", "tech"),
+             accounts.reset_link(owner_id, tech_id, "reset_mfa"),
+             accounts.recover_owner("owner@client.example")]
+    for token in links:
+        first, second = accounts.invite_view(token), accounts.invite_view(token)
+        assert first.totp_secret and second.totp_secret and first.totp_secret != second.totp_secret
+        assert invite_row(store, token)["totp_secret"] is None
+
+
+def test_accepting_enrols_the_secret_given_and_needs_one(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    token = accounts.invite(owner_id, "tech@msp.example", "tech")
+    shown, later = accounts.invite_view(token), accounts.invite_view(token)
+    now.tick()
+    with refused("bad_code"):        # no secret: nothing to check the code against
+        accounts.accept_invite(token, PW_TECH, code_for(shown.totp_secret, now))
+    with refused("bad_code"):        # not a secret at all
+        accounts.accept_invite(token, PW_TECH, code_for(shown.totp_secret, now), secret="not-base32!")
+    account_id, codes = accounts.accept_invite(token, PW_TECH, code_for(shown.totp_secret, now),
+                                               secret=shown.totp_secret)
+    row = store.account_by_id(account_id)
+    assert row["totp_secret"] == shown.totp_secret != later.totp_secret
+    assert len(codes) == 10
+
+
+def test_a_removed_account_can_be_invited_again_keeping_its_id(accounts, store, now):
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, _, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    accounts.remove(owner_id, tech_id)
+    token = accounts.invite(owner_id, "Tech@MSP.example", "owner")
+    row = store.account_by_id(tech_id)
+    assert (row["status"], row["role"], row["password_hash"], row["totp_secret"]) == (
+        "invited", "owner", None, None)
+    created = [dict(r) for r in store.events(50) if r["event"] == "invite_created"][0]
+    assert created["subject_id"] == tech_id
+    assert json.loads(created["detail"]) == {"invite_kind": "join", "role": "owner", "reason": "reinvited"}
+    # a second invite while that one is live is still refused
+    with refused("email_taken"):
+        accounts.invite(owner_id, "tech@msp.example", "tech")
+    view = accounts.invite_view(token)
+    now.tick()
+    account_id, _ = accounts.accept_invite(token, PW_NEW, code_for(view.totp_secret, now),
+                                           secret=view.totp_secret)
+    assert account_id == tech_id            # old records still name the same person
+    assert store.account_by_id(tech_id)["status"] == "active"
+    assert store.count_accounts() == 2

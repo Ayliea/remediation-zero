@@ -34,6 +34,15 @@ browser would drop a Secure cookie on some versions and nothing crosses a
 network); it is kept together with the Origin and Sec-Fetch-Site checks and a
 per-session form token.
 
+**A link's new TOTP secret is never stored** (join, MFA reset, recovery): every
+GET of the page makes a new one and puts it in the form beside a MAC,
+HMAC-SHA256 under a per-process key over the link's token hash and the
+secret. The POST is refused as an invalid form unless the MAC verifies
+(`hmac.compare_digest`), and only then is that secret enrolled. Whatever fetched
+the link before the person did (a mail scanner, a chat unfurler) saw a secret
+that is never enrolled, and a secret chosen by anyone else is refused. A server
+restart only means the page is opened again.
+
 **Invite tokens are in the path** (`/invite/<token>`): the link is what the
 inviter copies. It is single use, expires after 7 days, is stored only as a
 SHA-256, and pages are served with `Referrer-Policy: same-origin`. The server
@@ -162,6 +171,24 @@ def cleared_session_cookie(secure):
     return _cookie(SESSION_COOKIE, '', secure, max_age=0)
 
 
+class SecretSeals:
+    """The MAC that ties a link page's TOTP secret to that link, so the POST can carry the
+    secret without its being stored or chosen by the client. Per-process key; runtime only."""
+
+    def __init__(self):
+        self._key = secrets.token_bytes(32)
+
+    def seal(self, token, secret):
+        body = hashlib.sha256(token.encode()).hexdigest() + secret   # token hash || secret
+        return hmac.new(self._key, body.encode(), hashlib.sha256).hexdigest()
+
+    def valid(self, token, secret, mac):
+        if not (isinstance(secret, str) and len(secret) == 32 and set(secret) <= _SECRET_CHARS
+                and isinstance(mac, str) and len(mac) == 64 and mac.isascii()):
+            return False
+        return hmac.compare_digest(mac, self.seal(token, secret))
+
+
 class PreTokens:
     """Short-lived double-submit values, signed with a per-process key so a value
     planted in the cookie by anyone else is not accepted. Runtime-only: the age is
@@ -248,6 +275,7 @@ class AuthRoutes:
         self.accounts = accounts
         self.limiter = limiter
         self.pre = PreTokens()
+        self.seals = SecretSeals()
 
     def handles(self, path):
         return path in ('/signin', '/signout', '/setup', '/confirm') or path.startswith('/invite/')
@@ -313,16 +341,19 @@ class AuthRoutes:
                 h.send_page(account_views.invalid_link_page(), 404)
                 return
             pre, headers = self._pre_for(req)
-            h.send_page(self._invite_page(pre, view), 200, headers)
+            h.send_page(self._invite_page(pre, token, view, view.totp_secret), 200, headers)
 
     def _setup_page(self, pre, secret, *, email='', role='owner', message=''):
         uri = totp.otpauth_uri(secret, email or 'first account')
         return account_views.setup_page(pre, secret, uri, qr_svg(uri), email=email, role=role, message=message)
 
-    def _invite_page(self, pre, view, message=''):
-        uri = totp.otpauth_uri(view.totp_secret, view.email) if view.totp_secret else None
-        return account_views.invite_page(pre, view.kind, view.email, view.role, view.totp_secret, uri,
-                                         qr_svg(uri) if uri else None, message=message)
+    def _invite_page(self, pre, token, view, secret, message=''):
+        """The link's page. `secret` is the new TOTP secret it shows (None for a password reset),
+        sealed into the form for this link: a fresh one on a GET, the submitted one on a retry."""
+        uri = totp.otpauth_uri(secret, view.email) if secret else None
+        return account_views.invite_page(pre, view.kind, view.email, view.role, secret, uri,
+                                         qr_svg(uri) if uri else None, message=message,
+                                         secret_mac=self.seals.seal(token, secret) if secret else None)
 
     # --- POST ----------------------------------------------------------------
 
@@ -343,7 +374,8 @@ class AuthRoutes:
             return
         names = {'/signin': ('pre', 'email', 'password', 'code'),
                  '/setup': ('pre', 'secret', 'email', 'role', 'password', 'code'),
-                 '/confirm': ('pre', 'password', 'code')}.get(path, ('pre', 'password', 'current_password', 'code'))
+                 '/confirm': ('pre', 'password', 'code')}.get(
+                     path, ('pre', 'password', 'current_password', 'code', 'secret', 'secret_mac'))
         try:
             fields = read_form(h.headers, h.body_file, names)
         except (ValueError, UnicodeError):
@@ -422,6 +454,13 @@ class AuthRoutes:
         if view is None:
             h.send_page(account_views.invalid_link_page(), 404)
             return
+        secret = None
+        if view.kind != 'reset_password':
+            # The secret this page showed, sealed for this link; nothing else is ever enrolled.
+            secret = fields.get('secret')
+            if not self.seals.valid(token, secret, fields.get('secret_mac')):
+                h.send_error(400, 'Invalid form.')
+                return
         password = self._capped(fields.get('password'))
         current = self._capped(fields.get('current_password'))
         code = fields.get('code', '')
@@ -429,14 +468,14 @@ class AuthRoutes:
             if view.kind == 'reset_mfa':
                 if current is None:
                     raise AccountRefused('password', 'incorrect')
-                args, kwargs = (None, code), {'current_password': current}
+                args, kwargs = (None, code), {'current_password': current, 'secret': secret}
             else:
                 if password is None:
                     raise AccountRefused('password', 'too_long' if fields.get('password') else 'missing')
                 if view.kind == 'reset_password':
                     args, kwargs = (password, None), {'current_code': code}
                 else:
-                    args, kwargs = (password, code), {}
+                    args, kwargs = (password, code), {'secret': secret}
             # The link's checks passed in this request, so it ends signed in (a new session).
             _, codes, session = self.accounts.accept_invite(token, *args, via='dashboard', source=req.client,
                                                             start_session=True, **kwargs)
@@ -444,7 +483,7 @@ class AuthRoutes:
             if refusal.code == 'invalid_link':
                 h.send_page(account_views.invalid_link_page(), 404)
                 return
-            h.send_page(self._invite_page(pre, view, _message(refusal)), 400)
+            h.send_page(self._invite_page(pre, token, view, secret, _message(refusal)), 400)
             return
         signed_in = (('Set-Cookie', session_cookie(session, req.secure)),)
         if codes:
