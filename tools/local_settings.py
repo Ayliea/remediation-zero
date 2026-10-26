@@ -72,6 +72,8 @@ def normalize_server_name(name):
     if not isinstance(name, str):
         raise ValueError('A server name must be text')
     name = name.strip().lower()
+    if '%' in name:
+        raise ValueError('An IPv6 scope ID is not allowed')
     try:
         return str(ipaddress.ip_address(name))
     except ValueError:
@@ -99,6 +101,8 @@ def _validate_listening(value):
     if not isinstance(address, str):
         raise ValueError('The listen address must be an IP address')
     try:
+        if '%' in address:
+            raise ValueError()  # an IPv6 scope ID is free text, not part of the address
         ipaddress.ip_address(address)
     except ValueError:
         raise ValueError('The listen address must be an IP address, such as 127.0.0.1 or 0.0.0.0') from None

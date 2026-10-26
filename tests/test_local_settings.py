@@ -1045,3 +1045,24 @@ def test_application_form_saves_the_listening_fields_and_refuses_bad_ones(app):
         assert request('POST', '/settings', bad)[0] == 400
         assert path.read_text() == before
     assert request.errors[-1][0].endswith('Nothing was saved.')
+
+
+def test_ipv6_scope_ids_are_refused():
+    with pytest.raises(ValueError):
+        config.normalize_server_name('fe80::1%eth0')
+    with pytest.raises(ValueError):
+        config.parse_server_names('::1%x,dns:evil.test')
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, listen_address='fe80::1%eth0'))
+    with pytest.raises(ValueError):
+        config.validate(dict(config.DEFAULTS, server_names=['fe80::1%eth0']))
+
+
+def test_a_hand_edited_name_with_a_comma_is_refused(tmp_path):
+    for bad in ('a.test,DNS:evil.test', 'a.test evil.test', '::1%x,dns:evil.test', 'a.test\n'):
+        with pytest.raises(ValueError):
+            config.validate(dict(config.DEFAULTS, server_names=[bad]))
+    path = tmp_path / 'prefs.json'
+    path.write_text(json.dumps(dict(config.DEFAULTS, server_names=['a.test,DNS:evil.test'])))
+    with pytest.raises(ValueError):
+        config.load(path)

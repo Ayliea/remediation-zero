@@ -97,3 +97,10 @@ def test_check_certificate_refuses_a_mismatched_key(tmp_path):
 def test_server_context_has_a_tls_1_2_minimum(tmp_path):
     cert, key = server_tls.ensure_self_signed(tmp_path, ['a.example.test'])
     assert server_tls.server_context(cert, key).minimum_version == ssl.TLSVersion.TLSv1_2
+
+
+def test_scope_ids_and_commas_never_reach_openssl(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_tls.subprocess, 'run', lambda *a, **k: pytest.fail('openssl ran'))
+    for bad in (['fe80::1%eth0'], ['::1%x,dns:evil.test'], ['a.test,DNS:evil.test']):
+        with pytest.raises(ValueError):
+            server_tls.ensure_self_signed(tmp_path, bad)
