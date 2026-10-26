@@ -66,6 +66,9 @@ STAGE_WRITES = {
     "dashboard": set(),
 }
 SHARED_FILE = "shared"
+# Sign-in accounts: deliberately in neither AGENT_FILES nor SHARED, so no stage's
+# docstore can open them. Only tools/account_store.py reads this file.
+ACCOUNTS_FILE = "accounts"
 
 
 def _private_file(path: Path) -> None:
@@ -100,6 +103,9 @@ class Workspace:
         except KeyError:
             raise KeyError(f"unknown collection: {collection}") from None
 
+    def accounts_path(self) -> Path:
+        return self._path(ACCOUNTS_FILE)
+
     def init(self) -> None:
         """Create the directory, every file and its tables. Safe to repeat."""
         self._init()
@@ -125,6 +131,8 @@ class Workspace:
             finally:
                 conn.close()
         self._move_old_layout_approvals()
+        from tools.account_store import AccountStore  # creates the file 0600 and its tables
+        AccountStore(self.accounts_path())
         return SQLiteStore(self._path(SHARED_FILE))  # creates the journal tables
 
     def _move_old_layout_approvals(self) -> None:

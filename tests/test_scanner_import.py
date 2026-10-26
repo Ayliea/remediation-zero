@@ -97,6 +97,8 @@ def everything(ws):
     """Every stored row in every workspace file, journal included, with revisions."""
     out = {}
     for path in sorted(ws.root.glob("*.sqlite3")):
+        if path.name == "accounts.sqlite3":  # not a docs file; no stage can reach it
+            continue
         conn = sqlite3.connect(path)
         try:
             out[path.name] = sorted(conn.execute(

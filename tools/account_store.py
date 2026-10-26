@@ -1,0 +1,175 @@
+# Copyright 2026 Daviyon Daniels
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+"""Local sign-in accounts, in their own SQLite file.
+
+`accounts.sqlite3` is in neither `AGENT_FILES` nor `SHARED` of
+`tools.local_layout`, so no agent stage's docstore can open it. This is a thin
+storage layer over plain `sqlite3`: the rules (password policy, lockout, roles)
+live in `tools/accounts.py` and call these methods. No clock is read here;
+every timestamp is supplied by the caller.
+
+Every write runs inside `transaction()` (`BEGIN IMMEDIATE`). The two `spend_*`
+methods are a single conditional UPDATE judged by `rowcount`, so a token or
+code can be spent once even when two requests race. Standard library only.
+"""
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator, Optional
+
+_SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS accounts (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+        role TEXT CHECK(role IN ('owner','tech')),
+        status TEXT CHECK(status IN ('invited','active','removed')),
+        password_hash TEXT,
+        totp_secret TEXT,
+        last_totp_step INTEGER,
+        failed_count INTEGER DEFAULT 0,
+        first_failed_at REAL,
+        locked_until REAL,
+        real_ts REAL,
+        sim_ts REAL,
+        updated_real_ts REAL,
+        updated_sim_ts REAL)""",
+    """CREATE TABLE IF NOT EXISTS recovery_codes (
+        account_id TEXT,
+        code_hash TEXT,
+        spent INTEGER DEFAULT 0,
+        PRIMARY KEY (account_id, code_hash))""",
+    """CREATE TABLE IF NOT EXISTS invites (
+        token_hash TEXT PRIMARY KEY,
+        kind TEXT CHECK(kind IN ('join','reset_password','reset_mfa','recover')),
+        email TEXT,
+        role TEXT,
+        account_id TEXT,
+        created_by TEXT,
+        totp_secret TEXT,
+        expires_at REAL,
+        used INTEGER DEFAULT 0,
+        revoked INTEGER DEFAULT 0,
+        real_ts REAL,
+        sim_ts REAL)""",
+    """CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        account_id TEXT,
+        csrf TEXT,
+        created_at REAL,
+        last_seen REAL,
+        confirmed_until REAL)""",
+    """CREATE TABLE IF NOT EXISTS account_events (
+        id INTEGER PRIMARY KEY,
+        event TEXT,
+        actor_id TEXT,
+        subject_id TEXT,
+        via TEXT,
+        source TEXT,
+        detail TEXT,
+        real_ts REAL,
+        sim_ts REAL)""",
+)
+
+# Keys an event's `detail` may carry. Anything else is refused, and a key that
+# contains one of the words in _SECRET_WORDS is refused even if added here.
+ALLOWED_DETAIL_KEYS = frozenset({
+    "from", "to", "role", "kind", "reason", "email", "count", "outcome",
+    "locked_until", "invite_kind", "mfa", "method",
+})
+_SECRET_WORDS = ("password", "code", "token", "secret", "totp", "session", "csrf", "hash")
+
+
+class AccountStore:
+    def __init__(self, path: Path) -> None:
+        from tools.local_layout import _private_file  # file is 0600 before SQLite opens it
+        self.path = Path(path)
+        _private_file(self.path)
+        conn = self._connect()
+        try:
+            for ddl in _SCHEMA:
+                conn.execute(ddl)
+        finally:
+            conn.close()
+
+    def _connect(self) -> sqlite3.Connection:
+        # isolation_level=None: transactions are explicit (BEGIN IMMEDIATE).
+        conn = sqlite3.connect(self.path, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=10000")
+        return conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Cursor]:
+        """A cursor inside BEGIN IMMEDIATE: COMMIT on exit, ROLLBACK on error."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn.cursor()
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
+
+    def _one(self, sql: str, args: tuple = ()) -> Optional[sqlite3.Row]:
+        conn = self._connect()
+        try:
+            return conn.execute(sql, args).fetchone()
+        finally:
+            conn.close()
+
+    def account_by_email(self, email: str) -> Optional[sqlite3.Row]:
+        return self._one("SELECT * FROM accounts WHERE email = ?", (email.strip().lower(),))
+
+    def account_by_id(self, account_id: str) -> Optional[sqlite3.Row]:
+        return self._one("SELECT * FROM accounts WHERE id = ?", (account_id,))
+
+    def active_owner_count(self) -> int:
+        return self._one("SELECT COUNT(*) FROM accounts WHERE role = 'owner' "
+                         "AND status = 'active'")[0]
+
+    def count_accounts(self) -> int:
+        return self._one("SELECT COUNT(*) FROM accounts")[0]
+
+    def insert_event(self, event: str, actor_id: Optional[str], subject_id: Optional[str],
+                     via: Optional[str], source: Optional[str],
+                     detail: Optional[dict[str, Any]], *, real_ts: float, sim_ts: float) -> None:
+        """Append an audit row. `detail` keys are checked before anything is written."""
+        for key in (detail or {}):
+            low = str(key).lower()
+            if key not in ALLOWED_DETAIL_KEYS or any(w in low for w in _SECRET_WORDS):
+                raise ValueError(f"event detail key not allowed: {key!r}")
+        text = json.dumps(detail, sort_keys=True) if detail else None
+        with self.transaction() as cur:
+            cur.execute("INSERT INTO account_events (event, actor_id, subject_id, via, source, "
+                        "detail, real_ts, sim_ts) VALUES (?,?,?,?,?,?,?,?)",
+                        (event, actor_id, subject_id, via, source, text, real_ts, sim_ts))
+
+    def events(self, limit: int = 200) -> list[sqlite3.Row]:
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT * FROM account_events ORDER BY id DESC LIMIT ?",
+                                (int(limit),)).fetchall()
+        finally:
+            conn.close()
+
+    def spend_invite(self, token_hash: str, now: float) -> Optional[sqlite3.Row]:
+        """Mark an unused, unrevoked, unexpired invite used and return it; else None."""
+        with self.transaction() as cur:
+            cur.execute("UPDATE invites SET used = 1 WHERE token_hash = ? AND used = 0 "
+                        "AND revoked = 0 AND expires_at > ?", (token_hash, now))
+            if cur.rowcount != 1:
+                return None
+            return cur.execute("SELECT * FROM invites WHERE token_hash = ?",
+                               (token_hash,)).fetchone()
+
+    def spend_recovery_code(self, account_id: str, code_hash: str) -> bool:
+        with self.transaction() as cur:
+            cur.execute("UPDATE recovery_codes SET spent = 1 WHERE account_id = ? "
+                        "AND code_hash = ? AND spent = 0", (account_id, code_hash))
+            return cur.rowcount == 1
