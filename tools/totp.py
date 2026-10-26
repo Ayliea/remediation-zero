@@ -38,6 +38,8 @@ def match(secret: str, code: str, now: float, last_step: int | None) -> int | No
     """Return the step `code` matches within +-1 step, if later than `last_step`."""
     current = step_for(now)
     code = (code or '').strip().replace(' ', '')
+    if not (code.isascii() and code.isdigit() and len(code) == 6):
+        return None   # also keeps compare_digest from raising on non-ASCII text
     found = None
     for step in (current - 1, current, current + 1):
         # constant-time compare, and no early exit on the first hit

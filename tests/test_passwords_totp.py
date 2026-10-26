@@ -89,3 +89,8 @@ def test_recovery_codes_are_ten_distinct_and_hash_ignores_format():
     assert len(set(codes)) == 10 and all(re.fullmatch(r'[a-z2-7]{5}-[a-z2-7]{5}', c) for c in codes)
     assert passwords.recovery_hash(codes[0].upper().replace('-', ' ')) == passwords.recovery_hash(codes[0])
     assert re.fullmatch(r'[0-9a-f]{64}', passwords.recovery_hash(codes[0]))
+
+
+@pytest.mark.parametrize('bad', ['12345é', '１２３４５６', '12345', '1234567', 'abcdef', '', None])
+def test_malformed_codes_never_match_or_raise(bad):
+    assert totp.match(RFC_SECRET, bad, 1_000_000, None) is None
