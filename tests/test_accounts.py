@@ -797,3 +797,112 @@ def test_a_locked_account_cannot_use_a_reset_link(accounts, store, now):
     accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
     row = store.account_by_id(tech_id)
     assert row["locked_until"] is None and row["failed_count"] == 0
+
+
+def _counting(monkeypatch, module, name, watched):
+    """Wrap module.name so calls whose first argument is in `watched` are counted."""
+    real = getattr(module, name)
+    calls = []
+    guard = threading.Lock()
+
+    def wrapper(first, *args, **kwargs):
+        if first in watched:
+            with guard:
+                calls.append(first)
+        return real(first, *args, **kwargs)
+
+    monkeypatch.setattr(module, name, wrapper)
+    return calls
+
+
+def test_concurrent_reset_guesses_cannot_exceed_the_cap(tmp_path, clock, now, monkeypatch):
+    from tools import passwords
+    from tools.accounts import LOCK_AFTER, LOCK_SECONDS
+    path = tmp_path / "accounts.sqlite3"
+    accounts = Accounts(AccountStore(path), clock, now=now)
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    other_id, _, _ = join(accounts, now, owner_id, "other@msp.example", "tech")
+    code_link = accounts.reset_link(owner_id, tech_id, "reset_password")
+    pw_link = accounts.reset_link(owner_id, other_id, "reset_mfa")
+    new_secret = accounts.invite_view(pw_link).totp_secret
+    other_hash = AccountStore(path).account_by_id(other_id)["password_hash"]
+    now.tick()
+    code_checks = _counting(monkeypatch, totp, "match", {secret})
+    password_checks = _counting(monkeypatch, passwords, "verify", {"wrong guess, in parallel"})
+
+    def burst(attempt, n=20):
+        barrier = threading.Barrier(n)
+        outcomes = []
+        guard = threading.Lock()
+
+        def run():
+            mine = Accounts(AccountStore(path), clock, now=now)
+            barrier.wait()
+            try:
+                attempt(mine)
+                result = "accepted"
+            except AccountRefused as exc:
+                result = exc.code
+            with guard:
+                outcomes.append(result)
+
+        threads = [threading.Thread(target=run) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return outcomes
+
+    outcomes = burst(lambda acc: acc.accept_invite(
+        code_link, PW_NEW, None, current_code=wrong_code(secret, now)))
+    assert len(code_checks) == LOCK_AFTER                 # verified at most the cap
+    assert sorted(set(outcomes)) == ["bad_code", "locked"]
+    assert outcomes.count("bad_code") == LOCK_AFTER
+    assert outcomes.count("locked") == 20 - LOCK_AFTER
+    store = AccountStore(path)
+    assert store.account_by_id(tech_id)["locked_until"] == now() + LOCK_SECONDS
+    assert [e["subject_id"] for e in store.events(limit=10_000)
+            if e["event"] == "locked"] == [tech_id]
+
+    assert password_checks == []
+    outcomes = burst(lambda acc: acc.accept_invite(
+        pw_link, None, code_for(new_secret, now), current_password="wrong guess, in parallel"))
+    assert len(password_checks) == LOCK_AFTER
+    assert outcomes.count("password") == LOCK_AFTER and outcomes.count("locked") == 15
+    assert store.account_by_id(other_id)["locked_until"] == now() + LOCK_SECONDS
+    assert store.account_by_id(other_id)["password_hash"] == other_hash
+    inv = invite_row(store, code_link)
+    assert (inv["used"], inv["revoked"]) == (0, 0)
+
+
+def test_a_correct_guess_after_the_cap_is_refused(accounts, store, now, monkeypatch):
+    from tools import passwords
+    from tools.accounts import LOCK_AFTER
+    owner_id, _, _ = setup_owner(accounts, now)
+    tech_id, secret, _ = join(accounts, now, owner_id, "tech@msp.example", "tech")
+    token = accounts.reset_link(owner_id, tech_id, "reset_password")
+    mfa = accounts.reset_link(owner_id, tech_id, "reset_mfa")
+    new_secret = accounts.invite_view(mfa).totp_secret
+    for _ in range(LOCK_AFTER):
+        with refused("bad_code"):
+            accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    now.tick()
+    code_checks = _counting(monkeypatch, totp, "match", {secret})
+    password_checks = _counting(monkeypatch, passwords, "verify", {PW_TECH})
+    with refused("locked"):
+        accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    with refused("locked"):
+        accounts.accept_invite(mfa, None, code_for(new_secret, now), current_password=PW_TECH)
+    assert code_checks == [] and password_checks == []     # never verified while locked
+    row = store.account_by_id(tech_id)
+    assert row["totp_secret"] == secret
+    assert passwords.verify(PW_TECH, row["password_hash"])
+    # the fifth reservation is itself verified: a right guess there succeeds
+    now.tick(15 * 60)
+    for _ in range(LOCK_AFTER - 1):
+        with refused("bad_code"):
+            accounts.accept_invite(token, PW_NEW, None, current_code=wrong_code(secret, now))
+    accounts.accept_invite(token, PW_NEW, None, current_code=code_for(secret, now))
+    row = store.account_by_id(tech_id)
+    assert row["locked_until"] is None and row["failed_count"] == 0

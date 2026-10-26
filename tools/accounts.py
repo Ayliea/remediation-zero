@@ -302,10 +302,11 @@ class Accounts:
         with the account change, so a refused attempt leaves the link usable.
         Two exceptions, both deliberate: a link whose maker has lost the
         authority to issue it (removed, demoted, or a tech's owner invite once
-        an owner has joined) is revoked and refused `invalid_link`; and a wrong
-        current code or password on a reset link counts towards the account's
-        lockout exactly as a failed sign-in does. A locked account's reset
-        links are refused `locked` without checking anything else.
+        an owner has joined) is revoked and refused `invalid_link`; and every
+        guess at a reset link's existing factor (current code or password) is
+        reserved against the account's lockout before it is verified, as
+        sign-in's will be. A locked account's reset links are refused `locked`
+        and the guess is never verified.
         """
         if not isinstance(token, str) or not token:
             raise AccountRefused("invalid_link")
@@ -324,24 +325,33 @@ class Accounts:
         if kind in RESET_KINDS and _is_locked(acct, now):
             raise AccountRefused("locked")
 
+        # Checks that guess at no existing factor come first and are not counted:
+        # the new password's policy and, for enrolling links, the code from the
+        # link's own new secret.
         clean = (self._new_password(password)
                  if kind in ("join", "recover", "reset_password") else None)
-        if kind == "reset_mfa":
-            if not isinstance(current_password, str) or not passwords.verify(
-                    current_password, acct["password_hash"]):
-                self._count_failure(acct["id"], now, via, source)
-                raise AccountRefused("password", "incorrect")
         if kind == "reset_password":
             secret = acct["totp_secret"]
-            step = (totp.match(secret, current_code, now, acct["last_totp_step"])
-                    if secret else None)
-            if step is None:
-                self._count_failure(acct["id"], now, via, source)
         else:
             secret = inv["totp_secret"]          # set on first view
             step = totp.match(secret, code, now, None) if secret else None
-        if step is None:
-            raise AccountRefused("bad_code")
+            if step is None:
+                raise AccountRefused("bad_code")
+        if kind in RESET_KINDS:
+            # Reserve-then-verify: the attempt is counted (and the account
+            # locked at the cap) in a committed transaction before the existing
+            # factor is checked, so parallel guesses cannot exceed LOCK_AFTER.
+            if not self._reserve_attempt(acct["id"], now, via, source):
+                raise AccountRefused("locked")
+            if kind == "reset_mfa":
+                if not isinstance(current_password, str) or not passwords.verify(
+                        current_password, acct["password_hash"]):
+                    raise AccountRefused("password", "incorrect")
+            else:
+                step = (totp.match(secret, current_code, now, acct["last_totp_step"])
+                        if secret else None)
+                if step is None:
+                    raise AccountRefused("bad_code")
         pw_hash = passwords.hash_password(clean) if clean is not None else None
         codes = passwords.new_recovery_codes() if kind in _ENROLS else None
 
@@ -371,8 +381,9 @@ class Accounts:
         account_id = fresh["id"]
         if self.store.spend_invite(th, now, cur=cur) is None:
             raise AccountRefused("invalid_link")
-        if kind in RESET_KINDS and _is_locked(fresh, now):
-            raise AccountRefused("locked")
+        # No lock check here: this attempt was reserved (and so is within the
+        # cap) before its factor was verified. A lock set meanwhile by other,
+        # later reservations is cleared by this success, as sign-in will do.
         if kind == "reset_password" and (
                 fresh["totp_secret"] != secret or (fresh["last_totp_step"] is not None
                                                    and step <= fresh["last_totp_step"])):
@@ -382,19 +393,17 @@ class Accounts:
         touch = (stamp.real_ts, stamp.sim_ts, account_id)
         if kind in ("join", "recover"):
             cur.execute("UPDATE accounts SET status = 'active', password_hash = ?, "
-                        "totp_secret = ?, last_totp_step = ?, failed_count = 0, "
-                        "first_failed_at = NULL, locked_until = NULL, updated_real_ts = ?, "
+                        "totp_secret = ?, last_totp_step = ?, updated_real_ts = ?, "
                         "updated_sim_ts = ? WHERE id = ?", (pw_hash, secret, step, *touch))
         elif kind == "reset_password":
             cur.execute("UPDATE accounts SET password_hash = ?, last_totp_step = ?, "
-                        "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
                         "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
                         (pw_hash, step, *touch))
         else:
             cur.execute("UPDATE accounts SET totp_secret = ?, last_totp_step = ?, "
-                        "failed_count = 0, first_failed_at = NULL, locked_until = NULL, "
                         "updated_real_ts = ?, updated_sim_ts = ? WHERE id = ?",
                         (secret, step, *touch))
+        self._clear_attempts(cur, account_id)
         if codes is not None:
             self._replace_codes(cur, account_id, codes)
         self._end_sessions(cur, account_id)
@@ -593,18 +602,25 @@ class Accounts:
         self._event(cur, "invite_revoked", None, inv["account_id"], None, None, detail, stamp)
         return detail
 
-    def _count_failure(self, account_id: str, now: float, via: Optional[str],
-                       source: Optional[str]) -> None:
-        """A wrong current code or password on a reset link: counted exactly as
-        a failed sign-in, in its own committed transaction so the refusal that
-        follows cannot roll it back. The fifth failure in LOCK_WINDOW locks the
-        account for LOCK_SECONDS and writes one `locked` event."""
+    def _reserve_attempt(self, account_id: str, now: float, via: Optional[str],
+                         source: Optional[str], method: str = "reset_link") -> bool:
+        """Count one guess before it is verified; False if locked. Shared with sign-in (Task 5).
+
+        One BEGIN IMMEDIATE transaction, committed before the caller verifies
+        anything, so N parallel guesses are serialised here and at most
+        LOCK_AFTER of them per LOCK_WINDOW are ever verified. The reservation
+        that reaches LOCK_AFTER sets `locked_until` and writes the one `locked`
+        event; it is itself still verified. A guess while locked is not
+        counted, does not extend the lock, and is never verified. On success
+        the caller clears the count with `_clear_attempts` in the transaction
+        that applies the change; on failure there is nothing more to write.
+        """
         stamp = self.clock.now()
         detail = None
         with self.store.transaction() as cur:
             row = self._account(cur, account_id)
-            if row is None:
-                return
+            if row is None or _is_locked(row, now):
+                return False
             first = row["first_failed_at"]
             if first is None or now - first >= LOCK_WINDOW:
                 count, first = 1, now
@@ -614,13 +630,20 @@ class Accounts:
                 until = now + LOCK_SECONDS
                 cur.execute("UPDATE accounts SET failed_count = 0, first_failed_at = NULL, "
                             "locked_until = ? WHERE id = ?", (until, account_id))
-                detail = {"count": count, "locked_until": until, "method": "reset_link"}
+                detail = {"count": count, "locked_until": until, "method": method}
                 self._event(cur, "locked", None, account_id, via, source, detail, stamp)
             else:
                 cur.execute("UPDATE accounts SET failed_count = ?, first_failed_at = ? "
                             "WHERE id = ?", (count, first, account_id))
         if detail is not None:
             _log("locked", None, account_id, via, detail)
+        return True
+
+    @staticmethod
+    def _clear_attempts(cur: sqlite3.Cursor, account_id: str) -> None:
+        """Clear the guess count and any lock after a verified success. Shared with sign-in."""
+        cur.execute("UPDATE accounts SET failed_count = 0, first_failed_at = NULL, "
+                    "locked_until = NULL WHERE id = ?", (account_id,))
 
     @staticmethod
     def _end_sessions(cur: sqlite3.Cursor, account_id: str) -> None:
