@@ -187,6 +187,34 @@ class AccountStore:
         finally:
             conn.close()
 
+    # Read-only views for the owners' Accounts page. They carry no credential column:
+    # no password hash, TOTP secret, token hash or lockout counter leaves this module.
+
+    def account_list(self) -> list[sqlite3.Row]:
+        """Every account, removed ones included (so old events still name them)."""
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT id, email, role, status FROM accounts "
+                                "ORDER BY status = 'removed', email").fetchall()
+        finally:
+            conn.close()
+
+    def live_invites(self, now: float) -> list[sqlite3.Row]:
+        """Unused, unrevoked, unexpired links, soonest to expire first. `id` is the row's
+        SQLite rowid: the page names a link by it, never by its token hash."""
+        conn = self._connect()
+        try:
+            return conn.execute("SELECT rowid AS id, kind, email, role, expires_at FROM invites "
+                                "WHERE used = 0 AND revoked = 0 AND expires_at > ? "
+                                "ORDER BY expires_at, rowid", (now,)).fetchall()
+        finally:
+            conn.close()
+
+    def invite_hash(self, invite_id: int) -> Optional[str]:
+        """The token hash of the link with this rowid, for `Accounts.revoke_invite`; None if none."""
+        row = self._one("SELECT token_hash FROM invites WHERE rowid = ?", (int(invite_id),))
+        return row[0] if row is not None else None
+
     def spend_invite(self, token_hash: str, now: float,
                      cur: Optional[sqlite3.Cursor] = None) -> Optional[sqlite3.Row]:
         """Mark an unused, unrevoked, unexpired invite used and return it; else None.

@@ -41,7 +41,7 @@ from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, r
 from scripts import local_auth
 from tools import access, local_settings
 from tools.account_store import AccountStore
-from tools.accounts import Accounts, RateLimiter
+from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
 from tools.adjudication import RetryStateError
 from tools.clock import SimClock
 from tools.delivery import GitHubDelivery
@@ -715,10 +715,20 @@ def _read_upload_form(content_type, body):
     return {'token': found['token'], 'report': found['report'], 'add_task': 'add_task' in found}
 
 
-#: Each existing dashboard route and the one permission it needs (tools.access).
-#: The Accounts page and its invite form are Task 8's; until then a permitted owner gets 404.
+#: Each existing dashboard route and the one permission it needs (tools.access). The one
+#: widening is /accounts/invite: a tech may post it while no owner has joined (_may_post), and
+#: Accounts.invite then allows only an owner invite.
 GET_ACTIONS = dict({view: 'view' for view in VIEWS}, settings='settings', accounts='manage_accounts')
-POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts'}
+POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts',
+                '/accounts/revoke': 'manage_accounts', '/accounts/role': 'manage_accounts',
+                '/accounts/remove': 'manage_accounts', '/accounts/reset': 'manage_accounts'}
+#: The fields each account form carries besides `token`: (required, optional). Anything else is a 400.
+ACCOUNT_FORMS = {'/accounts/invite': ({'email'}, {'role'}), '/accounts/revoke': ({'invite'}, set()),
+                 '/accounts/role': ({'account', 'role'}, set()), '/accounts/remove': ({'account'}, set()),
+                 '/accounts/reset': ({'account', 'kind'}, set())}
+#: An account id is 32 hex characters (tools.accounts); a listed link id is a rowid.
+_ACCOUNT_ID = re.compile(r'[0-9a-f]{32}')
+_INVITE_ID = re.compile(r'[1-9][0-9]{0,17}')
 SETTINGS_BODY_LIMIT = 65536
 #: One deadline for a whole POST body, plus a second per BODY_MIN_RATE bytes for a large upload.
 BODY_SECONDS = 15
@@ -1017,10 +1027,11 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 self.send_error(403)
                 return
             if view == 'accounts':
-                self.send_error(404)  # Task 8: the Accounts page
+                self._send_html(self._accounts_html(session), 200)
                 return
             self.csrf = session.csrf
-            account = {'email': session.email, 'role': session.role, 'token': session.csrf}
+            owner_missing = not accounts.owner_exists()
+            account = self._account(session, owner_missing)
             try:
                 settings_html = None
                 chosen = None
@@ -1035,7 +1046,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                               upload_token=session.csrf if upload and not demo else None,
                               upload_code=query.get('upload', [None])[0],
                               chosen_tasks=chosen, records=records() if records and not demo else 'synthetic',
-                              account=account, owner_missing=not accounts.owner_exists())
+                              account=account, owner_missing=owner_missing)
                 status = 200
             except Exception:
                 body, status = render({}, view, unavailable=True, settings_html="" if config_path else None,
@@ -1048,6 +1059,102 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 return (access.allowed(session.role, action)
                         or access.may_invite(session.role, 'owner', accounts.owner_exists()))
             return access.allowed(session.role, action)
+
+        @staticmethod
+        def _account(session, owner_missing):
+            """The signed-in header's values for render(), with the two flags it may show."""
+            return {'email': session.email, 'role': session.role, 'token': session.csrf,
+                    'manage_accounts': access.allowed(session.role, 'manage_accounts'),
+                    'invite_owner': (not access.allowed(session.role, 'manage_accounts')
+                                     and access.may_invite(session.role, 'owner', not owner_missing))}
+
+        def _accounts_html(self, session, message=''):
+            # GET_ACTIONS already required manage_accounts; the audit trail needs view_audit too.
+            overview = accounts.overview(200)
+            if not access.allowed(session.role, 'view_audit'):
+                overview = dict(overview, events=[])
+            return account_views.accounts_page(overview, session.csrf, email=session.email, message=message)
+
+        def _account_form(self, path):
+            """The body of an account form as one value per field; ValueError if it is not one."""
+            length = self.headers.get('Content-Length')
+            if (length is None or not (length.isascii() and length.isdigit())
+                    or not 0 < int(length) <= local_auth.FORM_LIMIT or self.headers.get('Transfer-Encoding')
+                    or self.headers.get('Content-Type') != 'application/x-www-form-urlencoded'):
+                raise ValueError()
+            raw = self._take_body()
+            if len(raw) != int(length):
+                raise ValueError()
+            fields = parse_qs(raw.decode('utf-8'), keep_blank_values=True, strict_parsing=True,
+                              max_num_fields=local_auth.FORM_FIELDS)
+            if any(len(v) != 1 for v in fields.values()):
+                raise ValueError()
+            fields = {k: v[0] for k, v in fields.items()}
+            required, optional = ACCOUNT_FORMS[path]
+            if not required | {'token'} <= set(fields) <= required | optional | {'token'}:
+                raise ValueError()
+            return fields
+
+        def _accounts_post(self, req, session, path):
+            """POST /accounts/*, under `serial`, after the route's permission was checked. The form
+            token, then a recent re-confirm, then Accounts itself, which is the authority on who
+            may do what. A link is shown once, on this response, and never logged."""
+            manager = access.allowed(session.role, 'manage_accounts')
+            back = '/?view=accounts' if manager else '/'
+            try:
+                fields = self._account_form(path)
+            except (ValueError, UnicodeError):
+                self.send_error(400, account_views.INVALID_FORM)
+                return
+            if not secrets.compare_digest(fields.pop('token').encode(), session.csrf.encode()):
+                self.send_error(403)
+                return
+            if not session.confirmed:
+                # Nothing is done; after re-confirm the person comes back and submits again.
+                self.redirect(local_auth.confirm_location(back))
+                return
+            by = dict(via='dashboard', source=req.client)
+            link = kind = None
+            try:
+                if path == '/accounts/invite':
+                    # The installing tech's form sends no role: theirs is fixed to owner here, and
+                    # Accounts.invite refuses anything else from a tech.
+                    role = fields.get('role', None if manager else 'owner')
+                    if role is None:
+                        raise ValueError()
+                    link, kind = accounts.invite(session.account_id, fields['email'], role, **by), 'join'
+                elif path == '/accounts/reset':
+                    if not _ACCOUNT_ID.fullmatch(fields['account']) or fields['kind'] not in RESET_KINDS:
+                        raise ValueError()
+                    kind = fields['kind']
+                    link = accounts.reset_link(session.account_id, fields['account'], kind, **by)
+                elif path == '/accounts/revoke':
+                    if not _INVITE_ID.fullmatch(fields['invite']):
+                        raise ValueError()
+                    accounts.revoke_listed_invite(session.account_id, int(fields['invite']), **by)
+                elif not _ACCOUNT_ID.fullmatch(fields['account']):
+                    raise ValueError()
+                elif path == '/accounts/role':
+                    accounts.set_role(session.account_id, fields['account'], fields['role'], **by)
+                else:
+                    accounts.remove(session.account_id, fields['account'], **by)
+            except AccountRefused as refusal:
+                message = account_views.refusal_sentence(refusal.code)
+                status = 403 if refusal.code == 'not_allowed' else 400
+                # The page is drawn for the account as it is now: a refusal may follow a change.
+                now = accounts.session(req.token)
+                if now is not None and access.allowed(now.role, 'manage_accounts'):
+                    self._send_html(self._accounts_html(now, message), status)
+                else:
+                    self._send_html(account_views.refusal_page(message, back), status)
+                return
+            except ValueError:
+                self.send_error(400, account_views.INVALID_FORM)
+                return
+            if link is not None:
+                self._send_html(account_views.link_page(f'{req.origin}/invite/{link}', kind, back), 200)
+                return
+            self.redirect('/?view=accounts')
 
         def _settings_html(self, values, section, *, message='', scanner=None):
             return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, config_path),
@@ -1130,8 +1237,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     or not self._may_post(session, path, action)):
                 self.send_error(403)
                 return
-            if path == '/accounts/invite':
-                self.send_error(404)  # Task 8: the invite form
+            if path in ACCOUNT_FORMS:
+                self._accounts_post(req, session, path)
                 return
             if path == '/upload':
                 self._upload(session)
@@ -1165,7 +1272,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                                            settings_html=self._settings_html(values, 'scanner', scanner=scanner_probe(values, test=True)),
                                            approve_command=None if demo else approve_command,
                                            records=records() if records and not demo else 'synthetic',
-                                           account={'email': session.email, 'role': session.role, 'token': session.csrf},
+                                           account=self._account(session, not accounts.owner_exists()),
                                            owner_missing=not accounts.owner_exists()), 200)
                     return
                 if not session.confirmed:

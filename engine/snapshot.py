@@ -8,8 +8,9 @@ The same keys and the same collection limits as the cloud console's
 
 Two local additions ride on existing keys rather than new ones:
 - each decision row shown carries `person_approval` when a person approved
-  it (`approvals/<decision_id>`). This is a view of two records side by side;
-  the stored decision is not changed.
+  it (`approvals/<decision_id>`), with the approval's `actor` only when it
+  has one. This is a view of two records side by side; the stored decision
+  is not changed.
 - `counts` covers the collections this store holds. The local idempotency
   journal is not a document collection, so it has no count here.
 
@@ -60,6 +61,10 @@ def snapshot(docs: DocStore) -> dict:
             approval = found.to_dict()
             row["person_approval"] = {key: approval.get(key)
                                       for key in ("approved_by", "real_ts", "sim_ts")}
+            if "actor" in approval:
+                # Who acted, as sign-in recorded it. An approval made before sign-in has
+                # no actor, and the dashboard says so rather than guess.
+                row["person_approval"]["actor"] = approval["actor"]
 
     sim_now = max(
         0.0,

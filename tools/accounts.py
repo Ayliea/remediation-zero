@@ -172,6 +172,23 @@ class Accounts:
         """True when at least one *active* owner exists; an invite does not count."""
         return self.store.active_owner_count() > 0
 
+    def overview(self, limit: int = 200) -> dict[str, list[sqlite3.Row]]:
+        """What the owners' Accounts page lists: every account (id, email, role,
+        status), the live links (rowid id, kind, email, role, expires_at) and the
+        newest `limit` events. Read only; no credential column is included. The
+        caller checks `manage_accounts` / `view_audit` before showing any of it."""
+        return {"accounts": self.store.account_list(),
+                "invites": self.store.live_invites(self._now()),
+                "events": self.store.events(limit)}
+
+    def revoke_listed_invite(self, by_id: str, invite_id: int, *,
+                             via: Optional[str] = None, source: Optional[str] = None) -> None:
+        """`revoke_invite` for a link named by its row id, as the Accounts page lists it."""
+        token_hash = self.store.invite_hash(invite_id)
+        if token_hash is None:
+            raise AccountRefused("invalid_link")
+        self.revoke_invite(by_id, token_hash, via=via, source=source)
+
     def invite_view(self, token: str) -> Optional[InviteView]:
         """What a live link is for, without spending it. An enrolling link
         (join, reset_mfa, recover) gets its TOTP secret on first view, kept so

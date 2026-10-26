@@ -69,7 +69,7 @@ _SECRET_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')
 _TOKEN_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_')
 
 #: Where re-confirm may send someone back to: a closed set, never a client-supplied URL.
-NEXT_PATHS = frozenset({'/'} | {f'/?view={view}' for view in VIEWS}
+NEXT_PATHS = frozenset({'/', '/?view=accounts'} | {f'/?view={view}' for view in VIEWS}
                        | {f'/?view=settings&section={section}' for section in SECTIONS})
 
 SIGN_IN_FAILED = 'That did not work. Check your email, password and code, and try again.'

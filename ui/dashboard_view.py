@@ -18,16 +18,22 @@ def branding():
     return (root / "theme.css").read_text(), logo
 
 
+def utc_time(value):
+    """One timestamp as the dashboard shows it."""
+    return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if value is not None else "Not recorded"
+
+
 def stamp(real_ts, sim_ts):
-    def show(value):
-        return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if value is not None else "Not recorded"
-    result = "Wall time: " + show(real_ts)
+    result = "Wall time: " + utc_time(real_ts)
     if sim_ts != real_ts:
-        result += " · Scenario time: " + show(sim_ts)
+        result += " · Scenario time: " + utc_time(sim_ts)
     return result
 
 
 OWNER_MISSING = "No owner has joined yet, so risks cannot be accepted."
+#: Shown beside a person named on a record made before sign-in existed (one with no `actor`):
+#: the name is kept as it was recorded, and nothing claims who acted.
+BEFORE_SIGN_IN = "recorded before sign-in"
 
 VIEWS = {"overview": "Overview", "infrastructure": "My infrastructure",
          "actions": "Action list", "activity": "Activity"}
@@ -109,6 +115,8 @@ def decision_card(row, approve_command=None):
     if person:
         # A person's approval, never shown as a ratification or an independent review.
         label = PERSON_APPROVABLE[outcome] + " · approved by " + str(person.get("approved_by") or "Not recorded")
+        if "actor" not in person:
+            label += " · " + BEFORE_SIGN_IN
     next_step = (row.get("proposed_remediation") or "No remediation instructions recorded.") if approved or person else (
         "Ask a trusted IT provider to review this before making changes.")
     evidence = "".join(f"<li>{text(item)}</li>" for item in row.get("cited_evidence", []))
@@ -342,6 +350,8 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
            chosen_tasks=None, records="synthetic", account=None, owner_missing=False):
     # account: {"email", "role", "token"} for the signed-in local edition, which shows who is
     # signed in and a sign-out form carrying the session's form token; the cloud passes none.
+    # Two optional flags, decided by the server from tools.access: "manage_accounts" links to
+    # the Accounts page, "invite_owner" puts the owner-invite form in the no-owner notice.
     # owner_missing: no owner has joined yet, so the page says risks cannot be accepted.
     # records: "saved" when the records are the install's own (imported or awaiting
     # their first import), so the banner does not call them synthetic.
@@ -403,8 +413,17 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
         signed = (f'<form class="row" method="post" action="{base}signout"><span>Signed in as <strong>{text(account["email"])}</strong>'
                   f' ({text(account["role"])})</span><input type="hidden" name="token" value="{text(account["token"])}">'
                   '<button type="submit">Sign out</button></form>')
+        if account.get("manage_accounts"):
+            signed += f'<p><a href="{base}?view=accounts">Accounts and audit trail</a></p>'
     if owner_missing:
-        signed += f'<section class="notice" role="status"><p>{OWNER_MISSING}</p></section>'
+        invite = ""
+        if account is not None and account.get("invite_owner"):
+            # The installing tech's one account action: invite the owner. The role is fixed
+            # server-side; the form sends only the email.
+            invite = (f'<form method="post" action="{base}accounts/invite"><input type="hidden" name="token" value="{text(account["token"])}">'
+                      '<label>Invite the owner: their email <input name="email" type="email" required maxlength="254"></label> '
+                      '<button type="submit">Invite the owner</button></form>')
+        signed += f'<section class="notice" role="status"><p>{OWNER_MISSING}</p>{invite}</section>'
     theme, logo = branding()
     title = 'Your next security step' if view == 'overview' else views[view]
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

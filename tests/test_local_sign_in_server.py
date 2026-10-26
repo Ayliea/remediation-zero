@@ -7,10 +7,13 @@ Every page and form needs a session; the role decides what each request may
 do; setup is offered only to a local visit with no accounts; the Origin a POST
 must carry is the way the request came in. Synthetic data only."""
 import http.client
+import json
+import logging
 import re
 import select
 import shutil
 import socket
+import sqlite3
 import ssl
 import threading
 from types import SimpleNamespace
@@ -147,7 +150,8 @@ def events(accounts, name):
 
 PAGES = [('GET', f'/?view={view}') for view in ('overview', 'infrastructure', 'actions', 'activity')] + [
     ('GET', '/'), ('GET', '/?view=settings&section=model'), ('GET', '/?view=settings&section=scanner'),
-    ('POST', '/settings'), ('POST', '/upload')]
+    ('POST', '/settings'), ('POST', '/upload'), ('GET', '/?view=accounts')] + [
+    ('POST', f'/accounts/{name}') for name in ('invite', 'revoke', 'role', 'remove', 'reset')]
 
 
 @pytest.mark.parametrize('method, path', PAGES)
@@ -803,3 +807,298 @@ def test_an_unreadable_accounts_file_gives_503_on_every_route(start, signed_in):
                                             ('POST', '/settings', cookie, scanner_save(token))):
         response, _ = server.request(method, path, cookie=sent_cookie, body=body)
         assert response.status == 503, (method, path, sent_cookie)
+
+
+# --- the Accounts page ---------------------------------------------------------
+
+ACCOUNT_POSTS = ('/accounts/invite', '/accounts/revoke', '/accounts/role', '/accounts/remove', '/accounts/reset')
+LINK_RE = r'(https?://[^"<\s]+/invite/([A-Za-z0-9_-]{43}))'
+
+
+def account_id(accounts, email):
+    return accounts.store.account_by_email(email)['id']
+
+
+def accounts_page(server, cookie):
+    response, body = server.request('GET', '/?view=accounts', cookie=cookie)
+    assert response.status == 200, body
+    return body
+
+
+def section_of(body, name):
+    return body.split(f'id="{name}"', 1)[1].split('</section>', 1)[0]
+
+
+def table_rows(section):
+    return re.findall(r'<tr>(.*?)</tr>', section, re.S)[1:]      # the first row is the header
+
+
+def all_values(accounts, sql):
+    conn = sqlite3.connect(accounts.store.path)
+    try:
+        return [row[0] for row in conn.execute(sql)]
+    finally:
+        conn.close()
+
+
+def test_owner_sees_accounts_invites_and_events(start, signed_in):
+    accounts = signed_in.accounts
+    link = accounts.invite(account_id(accounts, OWNER), 'pending@client.example', 'tech')
+    # A well-formed unknown email leaves an email_hmac in the event's detail: never shown.
+    assert accounts.sign_in('nobody@client.example', 'not the password', '000000', '192.0.2.20') is None
+    hmac_value = json.loads(events(accounts, 'sign_in_failed')[-1]['detail'])['email_hmac']
+    server = start(accounts)
+    response, body = server.request('GET', '/?view=accounts', cookie=signed_in.cookie())
+    assert response.status == 200, body
+    assert response.getheader('Cache-Control') == 'no-store'
+    listed = section_of(body, 'accounts')
+    for email, role, status in ((OWNER, 'owner', 'active'), (TECH, 'tech', 'active'),
+                                ('pending@client.example', 'tech', 'invited')):
+        row = next(r for r in table_rows(listed) if email in r)
+        assert role in row and status in row
+    invites = table_rows(section_of(body, 'invites'))
+    assert len(invites) == 1 and 'pending@client.example' in invites[0]
+    assert re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC', invites[0])
+    rows = table_rows(section_of(body, 'events'))
+    assert len(rows) == len(accounts.store.events(200))
+    assert 'Sign-in failed' in rows[0]                                # newest first
+    invite_row = next(r for r in rows if 'Invite created' in r)
+    assert OWNER in invite_row and 'pending@client.example' in invite_row and 'dashboard' not in invite_row
+    assert re.search(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC', invite_row)
+    # Nothing secret, or derived from a secret, reaches the page.
+    assert hmac_value not in body and 'email_hmac' not in body and link not in body
+    assert not any(value in body for value in all_values(accounts, 'SELECT token_hash FROM invites'))
+    # The dashboard links an owner to the page.
+    _, home = server.request('GET', '/', cookie=signed_in.cookie())
+    assert 'href="/?view=accounts"' in home
+
+
+def test_events_table_shows_the_newest_200(start, signed_in):
+    accounts = signed_in.accounts
+    for _ in range(205):
+        accounts.store.insert_event('sign_out', None, None, 'dashboard', None, None,
+                                    real_ts=signed_in.now(), sim_ts=signed_in.now())
+    accounts.store.insert_event('locked', None, account_id(accounts, TECH), None, None, None,
+                                real_ts=signed_in.now(), sim_ts=signed_in.now())
+    rows = table_rows(section_of(accounts_page(start(accounts), signed_in.cookie()), 'events'))
+    assert len(rows) == 200
+    assert 'Locked out' in rows[0] and TECH in rows[0]
+
+
+def test_invite_link_is_shown_once_and_works(start, signed_in, caplog):
+    caplog.set_level(logging.DEBUG)
+    accounts = signed_in.accounts
+    server = start(accounts)
+    # Inviting re-confirms: an unconfirmed session is sent to confirm, and nothing is created.
+    unconfirmed = signed_in.cookie('unconfirmed')
+    token = page_token(server, unconfirmed, path='/?view=accounts')
+    fields = urlencode({'token': token, 'email': 'new@client.example', 'role': 'tech'})
+    response, _ = server.request('POST', '/accounts/invite', cookie=unconfirmed, body=fields)
+    assert response.status == 303
+    confirm_at = '/confirm?next=' + quote('/?view=accounts', safe='')
+    assert response.getheader('Location') == confirm_at
+    assert accounts.store.account_by_email('new@client.example') is None
+    # After re-confirm the person lands back on the Accounts page (and submits again).
+    pre, value, _ = open_form(server, confirm_at, cookie=unconfirmed)
+    response, _ = server.request('POST', confirm_at, cookie=unconfirmed + '; ' + pre,
+                                 body=urlencode({'pre': value, 'password': PW_OWNER, 'code': ''}))
+    assert response.status == 303 and response.getheader('Location') == '/?view=accounts'
+
+    cookie = signed_in.cookie()
+    token = page_token(server, cookie, path='/?view=accounts')
+    forged = urlencode({'token': 'x' * len(token), 'email': 'new@client.example', 'role': 'tech'})
+    assert server.request('POST', '/accounts/invite', cookie=cookie, body=forged)[0].status == 403
+    assert accounts.store.account_by_email('new@client.example') is None
+    fields = urlencode({'token': token, 'email': 'new@client.example', 'role': 'tech'})
+    response, body = server.request('POST', '/accounts/invite', cookie=cookie, body=fields)
+    assert response.status == 200, body
+    assert response.getheader('Cache-Control') == 'no-store'
+    found = re.search(LINK_RE, body)
+    assert found and found.group(1) == f'http://{server.local_host}/invite/{found.group(2)}'
+    assert 'shown only now' in body
+    link = found.group(2)
+    # Shown once: the Accounts page lists the invite, never the link.
+    page = accounts_page(server, cookie)
+    assert 'new@client.example' in section_of(page, 'invites') and link not in page
+    # And the link works.
+    response, invite = server.request('GET', f'/invite/{link}')
+    assert response.status == 200 and 'new@client.example' in invite and 'Join Remediation Zero' in invite
+
+    # A reset link, the same way.
+    fields = urlencode({'token': token, 'account': account_id(accounts, TECH), 'kind': 'reset_password'})
+    response, body = server.request('POST', '/accounts/reset', cookie=cookie, body=fields)
+    assert response.status == 200, body
+    reset = re.search(LINK_RE, body).group(2)
+    assert reset not in accounts_page(server, cookie)
+    response, page = server.request('GET', f'/invite/{reset}')
+    assert response.status == 200 and 'Set a new password' in page and TECH in page
+    # Neither link reached a log line or the audit trail.
+    trail = ' '.join(str(dict(row)) for row in accounts.store.events(1000))
+    for value in (link, reset):
+        assert value not in caplog.text and value not in trail
+
+
+def test_owner_can_revoke_change_role_and_remove(start, signed_in):
+    accounts = signed_in.accounts
+    owner_id = account_id(accounts, OWNER)
+    link = accounts.invite(owner_id, 'pending@client.example', 'tech')
+    server = start(accounts)
+    cookie = signed_in.cookie()
+    page = accounts_page(server, cookie)
+    token = form_value(page, 'token')
+    invite = re.search(r'action="/accounts/revoke".*?name="invite" value="([^"]+)"', page, re.S).group(1)
+    response, _ = server.request('POST', '/accounts/revoke', cookie=cookie,
+                                 body=urlencode({'token': token, 'invite': invite}))
+    assert response.status == 303 and response.getheader('Location') == '/?view=accounts'
+    assert accounts.invite_view(link) is None
+    # Revoking it again is refused with a sentence, never the bare code.
+    response, body = server.request('POST', '/accounts/revoke', cookie=cookie,
+                                    body=urlencode({'token': token, 'invite': invite}))
+    assert response.status == 400 and 'invalid_link' not in body
+    from ui.account_views import REFUSALS
+    assert REFUSALS['invalid_link'] in body
+    tech_id = account_id(accounts, TECH)
+    response, _ = server.request('POST', '/accounts/role', cookie=cookie,
+                                 body=urlencode({'token': token, 'account': tech_id, 'role': 'owner'}))
+    assert response.status == 303 and accounts.store.account_by_id(tech_id)['role'] == 'owner'
+    response, _ = server.request('POST', '/accounts/remove', cookie=cookie,
+                                 body=urlencode({'token': token, 'account': tech_id}))
+    assert response.status == 303 and accounts.store.account_by_id(tech_id)['status'] == 'removed'
+    removed = events(accounts, 'removed')
+    assert [(e['actor_id'], e['via']) for e in removed] == [(owner_id, 'dashboard')]
+    # Malformed forms are a 400 and change nothing.
+    for path, fields in (('/accounts/role', {'account': owner_id, 'role': 'admin'}),
+                         ('/accounts/reset', {'account': owner_id, 'kind': 'recover'}),
+                         ('/accounts/invite', {'email': 'not an email', 'role': 'tech'}),
+                         ('/accounts/invite', {'email': 'x@client.example', 'role': 'tech', 'extra': '1'}),
+                         ('/accounts/revoke', {'invite': 'abc'}),
+                         ('/accounts/remove', {})):
+        response, _ = server.request('POST', path, cookie=cookie, body=urlencode(dict(fields, token=token)))
+        assert response.status == 400, (path, fields)
+    assert accounts.store.account_by_id(owner_id)['role'] == 'owner'
+    assert accounts.store.account_by_email('x@client.example') is None
+
+
+def test_tech_gets_403_on_the_accounts_page_and_every_accounts_post_but_the_bootstrap_invite(start, signed_in):
+    accounts = signed_in.accounts
+    server = start(accounts)
+    tech = signed_in.cookie('tech')
+    token = page_token(server, tech, path='/')
+    assert server.request('GET', '/?view=accounts', cookie=tech)[0].status == 403
+    before = len(accounts.store.events(1000))
+    fields = urlencode({'token': token, 'email': 'new@client.example', 'role': 'owner',
+                        'account': account_id(accounts, OWNER), 'kind': 'reset_password', 'invite': '1'})
+    for path in ACCOUNT_POSTS:
+        assert server.request('POST', path, cookie=tech, body=fields)[0].status == 403, path
+    # An owner has joined, so even the owner invite is closed to a tech, and nothing was recorded.
+    assert len(accounts.store.events(1000)) == before
+    assert accounts.store.account_by_email('new@client.example') is None
+    _, home = server.request('GET', '/', cookie=tech)
+    assert 'action="/accounts/invite"' not in home and 'href="/?view=accounts"' not in home
+
+
+def test_tech_can_invite_the_owner_only_while_no_owner_exists(start, tmp_path):
+    accounts, now = empty(tmp_path)
+    secret = totp.new_secret()
+    accounts.setup_first(TECH, 'tech', PW_TECH, secret, code_for(secret, now))
+    now.tick()
+    session = accounts.sign_in(TECH, PW_TECH, code_for(secret, now), '192.0.2.10')
+    cookie = f'rz_session={session}'
+    server = start(accounts)
+    _, home = server.request('GET', '/', cookie=cookie)
+    assert 'No owner has joined yet, so risks cannot be accepted.' in home and 'Invite the owner' in home
+    form = home.split('action="/accounts/invite"', 1)[1].split('</form>', 1)[0]
+    assert 'name="email"' in form and 'name="role"' not in form
+    token = form_value(home, 'token')
+    # It re-confirms, and comes back to the dashboard.
+    owner_invite = urlencode({'token': token, 'email': 'boss@client.example'})
+    response, _ = server.request('POST', '/accounts/invite', cookie=cookie, body=owner_invite)
+    assert response.status == 303 and response.getheader('Location') == '/confirm?next=%2F'
+    assert accounts.store.account_by_email('boss@client.example') is None
+    assert accounts.confirm(session, password=PW_TECH)
+    # A tech cannot invite another tech, even now: Accounts.invite refuses it.
+    response, body = server.request('POST', '/accounts/invite', cookie=cookie,
+                                    body=urlencode({'token': token, 'email': 'other@client.example', 'role': 'tech'}))
+    assert response.status == 403 and 'not_allowed' not in body
+    assert accounts.store.account_by_email('other@client.example') is None
+    # The owner invite works, and its link is shown once.
+    response, body = server.request('POST', '/accounts/invite', cookie=cookie, body=owner_invite)
+    assert response.status == 200, body
+    link = re.search(LINK_RE, body).group(2)
+    view = accounts.invite_view(link)
+    assert (view.email, view.role) == ('boss@client.example', 'owner')
+    # Every other accounts route stays closed to the tech.
+    assert server.request('GET', '/?view=accounts', cookie=cookie)[0].status == 403
+    fields = urlencode({'token': token, 'account': account_id(accounts, TECH), 'role': 'owner',
+                        'kind': 'reset_password', 'invite': '1'})
+    for path in ACCOUNT_POSTS[1:]:
+        assert server.request('POST', path, cookie=cookie, body=fields)[0].status == 403, path
+    # Once the owner has joined, the tech's owner invite is gone.
+    now.tick()
+    accounts.accept_invite(link, PW_OWNER, code_for(view.totp_secret, now))
+    assert accounts.owner_exists()
+    response, _ = server.request('POST', '/accounts/invite', cookie=cookie,
+                                 body=urlencode({'token': token, 'email': 'second@client.example'}))
+    assert response.status == 403
+    assert accounts.store.account_by_email('second@client.example') is None
+    _, home = server.request('GET', '/', cookie=cookie)
+    assert 'action="/accounts/invite"' not in home
+
+
+def test_last_owner_refusal_is_explained(start, signed_in):
+    from ui.account_views import REFUSALS
+    accounts = signed_in.accounts
+    server = start(accounts)
+    cookie = signed_in.cookie()
+    token = page_token(server, cookie, path='/?view=accounts')
+    owner_id = account_id(accounts, OWNER)
+    for path, fields in (('/accounts/role', {'role': 'tech'}), ('/accounts/remove', {})):
+        response, body = server.request('POST', path, cookie=cookie,
+                                        body=urlencode(dict(fields, token=token, account=owner_id)))
+        assert response.status == 400, body
+        assert REFUSALS['last_owner'] in body and 'last_owner' not in body
+    row = accounts.store.account_by_id(owner_id)
+    assert (row['role'], row['status']) == ('owner', 'active')
+    # A reset link for oneself is the service's refusal too, explained.
+    response, body = server.request('POST', '/accounts/reset', cookie=cookie,
+                                    body=urlencode({'token': token, 'account': owner_id, 'kind': 'reset_mfa'}))
+    assert response.status == 403 and REFUSALS['not_allowed'] in body
+
+
+def test_every_refusal_code_has_a_sentence():
+    from ui.account_views import REFUSALS, refusal_sentence
+    for code in ('accounts_exist', 'not_allowed', 'last_owner', 'no_such_account', 'invalid_link', 'bad_code',
+                 'password', 'email_taken', 'locked'):
+        assert refusal_sentence(code) == REFUSALS[code] and REFUSALS[code].endswith('.') and '_' not in REFUSALS[code]
+    assert refusal_sentence('something_new') == REFUSALS[None]
+    assert 'something_new' not in refusal_sentence('something_new')
+
+
+def test_records_without_actor_say_recorded_before_sign_in(start, signed_in, tmp_path):
+    before = {'finding_id': 'SYN-001', 'outcome': 'held_for_approval', 'cycle': 1, 'proposed_severity': 'high',
+              'person_approval': {'approved_by': 'Synthetic Approver', 'real_ts': 1.0, 'sim_ts': 1.0}}
+    after = {'finding_id': 'SYN-002', 'outcome': 'held_for_approval', 'cycle': 1, 'proposed_severity': 'high',
+             'person_approval': {'approved_by': OWNER, 'real_ts': 2.0, 'sim_ts': 2.0,
+                                 'actor': {'via': 'command_line', 'account_id': 'x', 'verified': False}}}
+    server = start(signed_in.accounts, snapshot=lambda: {'scanner_state': [], 'decisions': [before, after]})
+    _, body = server.request('GET', '/?view=activity', cookie=signed_in.cookie())
+    cards = {c.split('<h3>', 1)[1].split('</h3>', 1)[0]: c for c in body.split('</article>') if '<h3>' in c}
+    assert 'approved by Synthetic Approver' in cards['SYN-001'] and 'recorded before sign-in' in cards['SYN-001']
+    assert f'approved by {OWNER}' in cards['SYN-002'] and 'recorded before sign-in' not in cards['SYN-002']
+    # The local snapshot carries an approval's actor when it has one, and only then.
+    from engine.snapshot import snapshot
+    from tools.sqlite_docstore import SQLiteDocStore
+    names = ('human_queue', 'sla_clocks', 'decisions', 'tickets', 'exceptions', 'cycles', 'scans', 'reports',
+             'failed_runs', 'approvals', 'findings', 'assets', 'owners')
+    docs = SQLiteDocStore({name: tmp_path / 'records.sqlite3' for name in names})
+    for row in (before, after):
+        decision_id = f"{row['finding_id']}-c001"
+        docs.collection('decisions').document(decision_id).set(
+            dict({k: v for k, v in row.items() if k != 'person_approval'}, real_ts=1.0))
+        docs.collection('approvals').document(decision_id).set(row['person_approval'])
+    shown = {r['finding_id']: r['person_approval'] for r in snapshot(docs)['decisions']}
+    docs.close()
+    assert 'actor' not in shown['SYN-001'] and shown['SYN-002']['actor']['via'] == 'command_line'
+    # The cloud console passes no account and its records carry no person_approval: unchanged.
+    from ui.dashboard_view import render
+    assert 'recorded before sign-in' not in render({'decisions': [dict(before, person_approval=None)]}, 'activity')

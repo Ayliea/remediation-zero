@@ -1,15 +1,17 @@
 # Copyright 2026 Daviyon Daniels
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Pure rendering for the pages that work without a session: sign-in, the first
-account, invite links, re-confirm, and the first-account-only page.
+"""Pure rendering for the account pages: sign-in, the first account, invite
+links, re-confirm, the first-account-only page, and the owners' Accounts page
+with its one-time link page.
 
 Standard library only; no request handling, no reads. Every value is escaped.
 The QR code arrives as an inline <svg> string made by tools.qr_svg, which holds
 no script, link or external reference, so the page CSP needs nothing new."""
+import json
 from html import escape
 
-from ui.dashboard_view import branding
+from ui.dashboard_view import branding, utc_time
 
 
 def _e(value):
@@ -22,6 +24,7 @@ def page(title, body):
 <title>{_e(title)} · Remediation Zero</title><style>
 {theme}
 .account-card{{max-width:34rem}}.account-card label{{display:block;margin:.8rem 0}}.account-card input,.account-card select{{display:block;width:100%;max-width:28rem;padding:.5rem;margin-top:.25rem}}
+.inline-form{{display:inline-block;margin:.15rem .3rem .15rem 0}}table{{border-collapse:collapse;width:100%}}td,th{{text-align:left;padding:.3rem .5rem;vertical-align:top}}
 .qr svg{{width:12rem;height:12rem}}.codes{{columns:2;font-size:1.1rem}}.totp-key{{word-break:break-all}}
 </style></head><body><div class="shell"><aside><div class="brand"><img src="data:image/png;base64,{logo}" alt="Remediation Zero by Ayliea"></div></aside><main><h1>{_e(title)}</h1>{body}<footer>Remediation Zero by Ayliea</footer></main></div></body></html>'''
 
@@ -126,3 +129,133 @@ def confirm_page(pre, next_path, message=''):
 def too_many_page(seconds):
     return page('Too many attempts', f'<section class="card account-card"><p>Too many attempts from this address. '
                                      f'Wait {_e(seconds)} seconds, then try again.</p></section>')
+
+
+# --- the owners' Accounts page ---------------------------------------------------
+
+#: One fixed sentence per tools.accounts.AccountRefused code. A page never shows the code
+#: itself; a code not listed here gets the sentence under None.
+REFUSALS = {
+    'accounts_exist': 'An account already exists, so the first account cannot be created again.',
+    'not_allowed': 'Your account is not allowed to do that. Nothing was changed.',
+    'last_owner': 'This is the last owner. Make another account an owner first. Nothing was changed.',
+    'no_such_account': 'That account no longer exists or is not active. Nothing was changed.',
+    'invalid_link': 'That link has already been used, has expired, or was revoked. Nothing was changed.',
+    'bad_code': 'That authenticator code did not match. Nothing was changed.',
+    'password': 'That password cannot be used. Nothing was changed.',
+    'email_taken': 'That email already has an account or a live invite. Nothing was changed.',
+    'locked': 'That account is locked after too many attempts. Wait 15 minutes. Nothing was changed.',
+    None: 'That could not be done. Nothing was changed.',
+}
+#: A form that is not one of this page's own: an unknown role or link kind, a malformed email.
+INVALID_FORM = 'Check the email address and the choices, then try again. Nothing was changed.'
+
+_ROLE_NAMES = {'owner': 'owner', 'tech': 'tech'}
+_STATUS_NAMES = {'active': 'active', 'invited': 'invited', 'removed': 'removed'}
+_LINK_KINDS = {'join': 'Invite', 'reset_password': 'Password reset', 'reset_mfa': 'Authenticator reset',
+               'recover': 'Owner recovery'}
+_EVENT_NAMES = {
+    'setup': 'First account created', 'sign_in': 'Signed in', 'sign_in_failed': 'Sign-in failed',
+    'locked': 'Locked out', 'sign_out': 'Signed out', 'invite_created': 'Invite created',
+    'invite_accepted': 'Invite accepted', 'invite_revoked': 'Link revoked',
+    'reset_link_created': 'Reset link created', 'password_reset': 'Password reset',
+    'mfa_reset': 'Authenticator reset', 'role_changed': 'Role changed', 'removed': 'Account removed',
+    'recover_owner': 'Owner recovery link made on the server',
+}
+#: The only part of an event's detail a page shows: a reason from this closed set. Nothing
+#: else in detail (never email_hmac) is read.
+_REASONS = {'malformed': 'what was typed as the email was not an address',
+            'maker_not_allowed': 'whoever made it can no longer issue it'}
+
+
+def refusal_sentence(code):
+    return REFUSALS[code] if code in REFUSALS else REFUSALS[None]
+
+
+def _hidden(name, value):
+    return f'<input type="hidden" name="{name}" value="{_e(value)}">'
+
+
+def _form(action, token, fields, button):
+    return (f'<form class="inline-form" method="post" action="{action}">{_hidden("token", token)}{fields}'
+            f'<button type="submit">{_e(button)}</button></form>')
+
+
+def _account_actions(row, token):
+    if row['status'] == 'removed':
+        return ''
+    who = _hidden('account', row['id'])
+    remove = _form('/accounts/remove', token, who, 'Remove')
+    if row['status'] != 'active':
+        return remove
+    other = 'tech' if row['role'] == 'owner' else 'owner'
+    return (_form('/accounts/role', token, who + _hidden('role', other), f'Make {other}')
+            + _form('/accounts/reset', token, who + _hidden('kind', 'reset_password'), 'Password reset link')
+            + _form('/accounts/reset', token, who + _hidden('kind', 'reset_mfa'), 'Authenticator reset link')
+            + remove)
+
+
+def _reason(detail):
+    try:
+        found = json.loads(detail) if detail else None
+    except ValueError:
+        return ''
+    reason = found.get('reason') if isinstance(found, dict) else None
+    return _REASONS.get(reason, '') if isinstance(reason, str) else ''
+
+
+def _event_row(row, emails):
+    def person(account_id):
+        return _e(emails.get(account_id, 'unknown account')) if account_id else '—'
+    subject = person(row['subject_id'])
+    if row['event'] == 'sign_in_failed' and not row['subject_id']:
+        subject = 'no such account'
+    return (f'<tr><td>{_e(utc_time(row["real_ts"]))}</td><td>{_e(_EVENT_NAMES.get(row["event"], row["event"]))}</td>'
+            f'<td>{person(row["actor_id"])}</td><td>{subject}</td><td>{_e(row["via"] or "—")}</td>'
+            f'<td>{_e(_reason(row["detail"]))}</td></tr>')
+
+
+def accounts_page(overview, token, *, email, message=''):
+    """The owners' page: accounts, live links and the newest events. `overview` is
+    tools.accounts.Accounts.overview(); `token` is the session's form token."""
+    emails = {row['id']: row['email'] for row in overview['accounts']}
+    accounts = ''.join(
+        f'<tr><td>{_e(row["email"])}</td><td>{_e(_ROLE_NAMES.get(row["role"], "unknown"))}</td>'
+        f'<td>{_e(_STATUS_NAMES.get(row["status"], "unknown"))}</td><td>{_account_actions(row, token)}</td></tr>'
+        for row in overview['accounts'])
+    invites = ''.join(
+        f'<tr><td>{_e(row["email"])}</td><td>{_e(_LINK_KINDS.get(row["kind"], "Link"))}</td>'
+        f'<td>{_e(_ROLE_NAMES.get(row["role"], "unknown"))}</td><td>{_e(utc_time(row["expires_at"]))}</td>'
+        f'<td>{_form("/accounts/revoke", token, _hidden("invite", row["id"]), "Revoke")}</td></tr>'
+        for row in overview['invites'])
+    events = ''.join(_event_row(row, emails) for row in overview['events'])
+    invite_form = _form('/accounts/invite', token,
+                        '<label>Email <input name="email" type="email" required maxlength="254"></label>'
+                        '<label>Role <select name="role"><option value="tech">tech</option>'
+                        '<option value="owner">owner</option></select></label>', 'Make an invite link')
+    body = (f'<p>Signed in as <strong>{_e(email)}</strong>. <a href="/">Back to the dashboard</a></p>{_message(message)}'
+            '<p class="muted">Inviting, changing a role, making a reset link and removing someone ask you to confirm '
+            'it is you first. A link is shown once, when it is made.</p>'
+            '<section class="card" id="accounts"><h2>Accounts</h2><table><tr><th>Email</th><th>Role</th><th>Status</th>'
+            f'<th>Actions</th></tr>{accounts}</table></section>'
+            f'<section class="card account-card" id="invite"><h2>Invite someone</h2>{invite_form}</section>'
+            '<section class="card" id="invites"><h2>Links not yet used</h2><table><tr><th>Email</th><th>Link</th>'
+            f'<th>Role</th><th>Expires</th><th>Revoke</th></tr>{invites}</table></section>'
+            '<section class="card" id="events"><h2>Audit trail</h2><p class="muted">The newest 200 events, newest '
+            'first. Times are wall time.</p><table><tr><th>Time</th><th>Event</th><th>By</th><th>Account</th>'
+            f'<th>Via</th><th>Note</th></tr>{events}</table></section>')
+    return page('Accounts', body)
+
+
+def link_page(link, kind, back):
+    """The one-time link, on the response to the POST that made it (served no-store)."""
+    what = 'invite' if kind == 'join' else 'reset'
+    body = (f'<section class="card account-card"><p>Send this {what} link to the person it is for. It works once '
+            'and expires after 7 days. It is shown only now: only its hash is stored, so it cannot be shown again.</p>'
+            f'<p><code class="totp-key">{_e(link)}</code></p><p><a class="button" href="{_e(back)}">Done</a></p></section>')
+    return page('Invite link' if kind == 'join' else 'Reset link', body)
+
+
+def refusal_page(message, back):
+    """A refused account form for someone without the Accounts page (the installing tech)."""
+    return page('Not done', f'{_message(message)}<p><a href="{_e(back)}">Back</a></p>')
