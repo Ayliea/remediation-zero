@@ -556,3 +556,53 @@ def test_no_hsts_with_the_self_signed_certificate_or_on_loopback(served):
     assert https_get(server, ws).getheader('Strict-Transport-Security') is None
     plain, _, _ = served(exposed=False)
     assert _plain_get(plain.server_port).getheader('Strict-Transport-Security') is None
+
+
+# --- follow-up: no one peer can take every connection ------------------------------------
+
+
+def test_one_peer_cannot_take_every_connection():
+    # The offline guard allows only 127.0.0.1, so the accounting is driven with fake peers.
+    slots = local._ConnectionSlots(total=64, loopback_reserved=16, per_peer=16)
+    assert all(slots.take('192.0.2.10') for _ in range(16))
+    assert not slots.take('192.0.2.10')                       # the 17th from that peer
+    assert not slots.take('::ffff:192.0.2.10')                # the same peer, IPv4-mapped
+    assert slots.take('192.0.2.11')                           # another peer is still served
+    slots.give('192.0.2.10')
+    assert slots.take('::ffff:192.0.2.10')                    # a freed slot comes back to it
+
+
+def test_loopback_keeps_reserved_slots():
+    slots = local._ConnectionSlots(total=64, loopback_reserved=16, per_peer=16)
+    peers = [f'198.51.100.{n}' for n in range(1, 4)]
+    taken = sum(slots.take(peer) for peer in peers for _ in range(16))
+    assert taken == 48 and not slots.take('203.0.113.9')      # remote peers together: 48 at most
+    # Loopback (the server itself, or a proxy funnelling everyone) has the other 16, and no
+    # per-peer cap of 16 applies to it on top.
+    assert all(slots.take('127.0.0.1') for _ in range(16))
+    assert not slots.take('127.0.0.1') and not slots.take('::1')   # 64 in all
+    slots.give('127.0.0.1')
+    assert not slots.take('203.0.113.9') and slots.take('::1')
+    # With no remote peer, loopback may use every slot.
+    alone = local._ConnectionSlots(total=64, loopback_reserved=16, per_peer=16)
+    assert all(alone.take('127.0.0.1') for _ in range(64)) and not alone.take('127.0.0.1')
+
+
+def test_a_peer_over_its_cap_is_closed_on_the_listener_and_logged_without_its_address(
+        served, monkeypatch, caplog):
+    monkeypatch.setattr(local, 'MAX_PEER_CONNECTIONS', 1, raising=False)
+    monkeypatch.setattr(local, '_is_loopback_peer', lambda peer: False, raising=False)  # count 127.0.0.1 as remote
+    caplog.set_level(logging.INFO, logger='remediation_zero.local')
+    server, _, _ = served(exposed=False)
+    held = socket.create_connection(('127.0.0.1', server.server_port), timeout=5)
+    try:
+        time.sleep(0.3)
+        with socket.create_connection(('127.0.0.1', server.server_port), timeout=5) as extra:
+            try:
+                assert extra.recv(1) == b''
+            except ConnectionResetError:
+                pass
+    finally:
+        held.close()
+    refused = [r.getMessage() for r in caplog.records if 'connection_refused' in r.getMessage()]
+    assert refused and all('too_many_from_one_address' in m and '127.0.0.1' not in m for m in refused)

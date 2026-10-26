@@ -244,7 +244,12 @@ from being accepted to the end of its request headers, the TLS handshake
 included, however slowly the bytes arrive; a client that connects and sends
 nothing, or trickles a byte at a time, is cut off then and does not hold up
 anyone else. At most 64 connections are served at once, on every listener
-(loopback too); one more is closed as soon as it is accepted. A failed
+(loopback too). Of those, 16 are kept for loopback (the server itself and a
+proxy such as Tailscale Serve), so other machines together hold at most 48,
+and any one other address at most 16; loopback has no per-address cap,
+since a proxy brings everyone in through 127.0.0.1. A connection over a cap
+is closed as soon as it is accepted and logged as `connection_refused` with
+the reason only, never the address. Each connection carries one request. A failed
 handshake is logged as `tls_handshake_failed` with its error class only.
 
 ## Sign-in and remote access

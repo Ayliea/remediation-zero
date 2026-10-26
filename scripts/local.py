@@ -312,8 +312,79 @@ HEADER_SECONDS = 15
 #: Sent on the TLS listener with your own certificate: a year, no includeSubDomains, no preload.
 HSTS_VALUE = 'max-age=31536000'
 #: Connections served at once, on every listener (loopback too: a proxy brings everyone
-#: through loopback). One over the cap is closed as soon as it is accepted.
+#: through loopback). One over a cap is closed as soon as it is accepted.
 MAX_CONNECTIONS = 64
+#: Of those, kept for loopback peers (the server itself, and a proxy such as Tailscale Serve),
+#: so peers on the network together hold at most MAX_CONNECTIONS - LOOPBACK_RESERVED.
+LOOPBACK_RESERVED = 16
+#: At once from any one non-loopback address. Loopback has no per-address cap: a proxy funnels
+#: everyone through 127.0.0.1. Each connection carries one request (the handler speaks
+#: HTTP/1.0, so the server closes after each response): there is no keep-alive to bound.
+MAX_PEER_CONNECTIONS = 16
+
+
+def _peer_key(address):
+    """The address a connection is counted under: IPv4-mapped IPv6 as IPv4, no scope ID."""
+    text = str(address).split('%', 1)[0]
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return text
+    mapped = getattr(ip, 'ipv4_mapped', None)
+    return str(mapped or ip)
+
+
+def _is_loopback_peer(peer):
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return False
+
+
+class _ConnectionSlots:
+    """Who holds the server's connections: at most `total` at once, at most
+    `total - loopback_reserved` from non-loopback peers together, and at most `per_peer` from
+    any one non-loopback peer. Every count changes under one lock. `take` answers False, and
+    counts nothing, when a cap is reached; `give` returns exactly what one `take` counted."""
+
+    def __init__(self, total, loopback_reserved, per_peer):
+        self.total, self.remote_limit, self.per_peer = total, max(total - loopback_reserved, 0), per_peer
+        self._lock = threading.Lock()
+        self._all = self._remote = 0
+        self._by_peer = {}
+        self.refusal = None     # why the last take failed: a reason, never an address
+
+    def take(self, peer):
+        peer = _peer_key(peer)
+        remote = not _is_loopback_peer(peer)
+        with self._lock:
+            if self._all >= self.total:
+                self.refusal = 'too_many_connections'
+                return False
+            if remote and self._remote >= self.remote_limit:
+                self.refusal = 'too_many_connections'
+                return False
+            if remote and self._by_peer.get(peer, 0) >= self.per_peer:
+                self.refusal = 'too_many_from_one_address'
+                return False
+            self._all += 1
+            if remote:
+                self._remote += 1
+                self._by_peer[peer] = self._by_peer.get(peer, 0) + 1
+            return True
+
+    def give(self, peer):
+        peer = _peer_key(peer)
+        remote = not _is_loopback_peer(peer)
+        with self._lock:
+            self._all -= 1
+            if remote:
+                self._remote -= 1
+                left = self._by_peer.get(peer, 1) - 1
+                if left:
+                    self._by_peer[peer] = left
+                else:
+                    self._by_peer.pop(peer, None)
 
 
 class _DeadlineReader(io.RawIOBase):
@@ -340,8 +411,10 @@ class DashboardServer(ThreadingHTTPServer):
     """One thread per connection, so an idle connection holds only its own thread.
     The handler still runs requests one at a time.
 
-    At most MAX_CONNECTIONS connections at once: a slot is taken when a connection is accepted
-    and given back when it is shut down; one over the cap is closed at once, unread. Each
+    At most MAX_CONNECTIONS connections at once, LOOPBACK_RESERVED of them kept for loopback
+    peers, and at most MAX_PEER_CONNECTIONS from any one network address: a slot is taken when
+    a connection is accepted and given back when it is shut down; one over a cap is closed at
+    once, unread. Each
     connection has HEADER_SECONDS from accept to the end of its request headers, the TLS
     handshake included (`connection_deadline`).
 
@@ -353,7 +426,8 @@ class DashboardServer(ThreadingHTTPServer):
 
     def __init__(self, address, handler_class, tls_context=None):
         self.tls_context = tls_context
-        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        self._slots = _ConnectionSlots(MAX_CONNECTIONS, LOOPBACK_RESERVED, MAX_PEER_CONNECTIONS)
+        self._held, self._held_lock = {}, threading.Lock()   # socket fd -> peer counted for it
         self._connection = threading.local()   # each connection has its own thread
         try:
             if ipaddress.ip_address(address[0]).version == 6:
@@ -363,17 +437,31 @@ class DashboardServer(ThreadingHTTPServer):
         super().__init__(address, handler_class)
 
     def process_request(self, request, client_address):
-        if not self._slots.acquire(blocking=False):
-            _log('connection_refused', reason='too_many_connections')
+        peer = client_address[0] if client_address else ''
+        # The global cap, the loopback reserve and the per-address cap (_ConnectionSlots).
+        if not self._slots.take(peer):
+            _log('connection_refused', reason=self._slots.refusal)   # the reason only, never the address
             self.close_request(request)          # never counted, so nothing is given back
             return
+        with self._held_lock:
+            self._held[request.fileno()] = peer
         super().process_request(request, client_address)
 
     def shutdown_request(self, request):
+        """Every way a counted connection ends comes here (a finished request, a failed
+        handshake, a thread that would not start), so its slot is given back once. The entry is
+        removed before the socket closes, so its descriptor cannot be reused meanwhile."""
+        try:
+            fd = request.fileno()
+        except (OSError, ValueError):
+            fd = -1
+        with self._held_lock:
+            peer = self._held.pop(fd, None)
         try:
             super().shutdown_request(request)
         finally:
-            self._slots.release()
+            if peer is not None:
+                self._slots.give(peer)
 
     def connection_deadline(self):
         """The monotonic time this thread's connection must have sent its headers by; None once
