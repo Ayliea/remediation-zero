@@ -55,6 +55,14 @@ class CertificateFileUnreadable(CertificateProblem):
     """The role's CA file is missing or holds no certificate."""
 
 
+class TLSRefused(CertificateProblem):
+    """The server ended the TLS handshake itself, e.g. it serves no certificate for this name."""
+
+
+class ModelTimedOut(CapacityError):
+    """No answer within the role's timeout. Load, or a model still loading: retried as before."""
+
+
 _EXPIRED = {9, 10}           # X509_V_ERR_CERT_NOT_YET_VALID, _CERT_HAS_EXPIRED
 _NAME_MISMATCH = {62, 64}    # X509_V_ERR_HOSTNAME_MISMATCH, _IP_ADDRESS_MISMATCH
 
@@ -72,6 +80,14 @@ def tls_context(ca_file):
 
 def _certificate_problem(reason):
     """The CertificateProblem for a urlopen failure reason, or None if it is not one."""
+    if isinstance(reason, ssl.SSLError) and not isinstance(reason, ssl.SSLCertVerificationError):
+        # An alert from the server (handshake failure, unrecognised name, internal error).
+        # Our own EOF or a reset mid-handshake are not refusals: they stay "could not be reached".
+        # OpenSSL's reason code, e.g. TLSV1_ALERT_INTERNAL_ERROR or SSLV3_ALERT_HANDSHAKE_FAILURE.
+        if (isinstance(reason, (ssl.SSLEOFError, ssl.SSLZeroReturnError))
+                or '_ALERT_' not in (getattr(reason, 'reason', None) or '')):
+            return None
+        return TLSRefused('The server refused the TLS connection')
     if not isinstance(reason, ssl.SSLCertVerificationError):
         return None
     if reason.verify_code in _EXPIRED:
@@ -115,12 +131,14 @@ def _open(request, timeout, ca_file=None):
     return _build_opener(ca_file).open(request, timeout=timeout)
 
 
-def post_json(url, body, headers, *, ca_file=None):
+def post_json(url, body, headers, *, ca_file=None, timeout=None):
+    """`timeout`: the role's seconds (Settings, 5-600); None is TIMEOUT_SECONDS."""
     if ca_file and urlsplit(url).scheme != 'https':
         raise ValueError('A CA file applies only to an HTTPS endpoint')
+    seconds = TIMEOUT_SECONDS if timeout is None else timeout
     data = json.dumps(body).encode()
     try:
-        with _open(Request(url, data=data, headers=headers), timeout=TIMEOUT_SECONDS, ca_file=ca_file) as response:
+        with _open(Request(url, data=data, headers=headers), timeout=seconds, ca_file=ca_file) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         if _is_capacity_code(exc.code):
@@ -129,12 +147,14 @@ def post_json(url, body, headers, *, ca_file=None):
     except ssl.SSLCertVerificationError as exc:  # raised during the read on some paths
         raise _certificate_problem(exc) from None
     except URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise ModelTimedOut(f'No answer within {seconds:g} s') from None
         problem = _certificate_problem(exc.reason)
         if problem is not None:
             raise problem from None
         raise CapacityError('Model endpoint could not be reached') from None
-    except TimeoutError:
-        raise CapacityError('Model endpoint could not be reached') from None
+    except TimeoutError:  # socket.timeout is TimeoutError: the read, after connecting
+        raise ModelTimedOut(f'No answer within {seconds:g} s') from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise ValueError('Model response exceeds limit')
     try:

@@ -11,7 +11,7 @@ class ChatAdapter(Protocol):
     def complete(self, system: str, user: str, *, json_output: bool) -> str: ...
 
 
-def build_adapter(format, endpoint, model, api_key, ca_file=None):
+def build_adapter(format, endpoint, model, api_key, ca_file=None, timeout_seconds=None):
     if format == 'openai_chat':
         from tools.models.openai_chat import OpenAIChatAdapter as adapter
     elif format == 'anthropic_messages':
@@ -20,4 +20,4 @@ def build_adapter(format, endpoint, model, api_key, ca_file=None):
         from tools.models.gemini_api import GeminiApiAdapter as adapter
     else:
         raise ValueError('Unknown model format')
-    return adapter(endpoint, model, api_key, ca_file)
+    return adapter(endpoint, model, api_key, ca_file, timeout_seconds)

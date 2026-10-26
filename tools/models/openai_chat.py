@@ -7,9 +7,10 @@ from tools.models._common import check_input
 
 
 class OpenAIChatAdapter:
-    def __init__(self, endpoint, model, api_key, ca_file=None):
+    def __init__(self, endpoint, model, api_key, ca_file=None, timeout_seconds=None):
         self.endpoint = validate_endpoint(endpoint)
         self.ca_file = ca_file or None
+        self.timeout_seconds = timeout_seconds
         self.model = model
         self.api_key = api_key
 
@@ -22,7 +23,7 @@ class OpenAIChatAdapter:
         headers = {'Content-Type': 'application/json'}
         if self.api_key:
             headers['Authorization'] = f'Bearer {self.api_key}'
-        reply = post_json(self.endpoint, body, headers, ca_file=self.ca_file)
+        reply = post_json(self.endpoint, body, headers, ca_file=self.ca_file, timeout=self.timeout_seconds)
         try:
             choice = reply['choices'][0]
             message = choice['message']

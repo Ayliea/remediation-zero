@@ -62,8 +62,11 @@ def _run(role, adapter):
     return 'GuardBlockedBenign' if verdict.blocked else None
 
 
-#: Fixed advice per certificate failure; the line still carries no exception text.
-CERTIFICATE_HINTS = {
+#: Fixed advice per failure the user can act on; the line still carries no exception text.
+PROBLEM_HINTS = {
+    'ModelTimedOut': "no answer within this role's timeout; raise this role's timeout in Settings "
+                     '(a CPU-only or just-loaded local model can need minutes)',
+    'TLSRefused': 'the server refused the TLS connection; check the host name and port in the endpoint URL',
     'CertificateNotTrusted': "set this role's CA certificate file to the model server's certificate "
                              "or the CA that signed it",
     'CertificateNameMismatch': 'the certificate does not name the host in the endpoint URL; '
@@ -86,8 +89,8 @@ def check_models(roles, only=None, *, out=print):
             problem = _run(role, roles.adapter(role))
         except Exception as exc:
             problem = type(exc).__name__
-            if problem in CERTIFICATE_HINTS:
-                problem = f'{problem}: {CERTIFICATE_HINTS[problem]}'
+            if problem in PROBLEM_HINTS:
+                problem = f'{problem}: {PROBLEM_HINTS[problem]}'
         if problem:
             failed = True
             out('%s: failed (%s)' % (role, problem))

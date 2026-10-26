@@ -14,6 +14,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -24,8 +25,9 @@ from scripts import local
 from tools import inference, local_settings, model_check
 from tools.adjudication import CapacityError
 from tools.model_roles import ModelRoles, RoleConfig
+from tools import model_transport
 from tools.model_transport import (CertificateExpired, CertificateFileUnreadable, CertificateNameMismatch,
-                                   CertificateNotTrusted, CertificateProblem)
+                                   CertificateNotTrusted, CertificateProblem, ModelTimedOut, TLSRefused)
 from tools.models import build_adapter
 
 pytestmark = pytest.mark.skipif(shutil.which('openssl') is None, reason='needs the openssl command')
@@ -56,11 +58,14 @@ def certs(tmp_path_factory):
 
 
 class _Chat(BaseHTTPRequestHandler):
+    delay = 0.0  # seconds before answering, for the timeout tests
+
     def log_message(self, *args):
         pass
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        time.sleep(self.delay)
         body = json.dumps({'choices': [{'message': {'content': 'ok'}, 'finish_reason': 'stop'}]}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -79,10 +84,14 @@ def https_model(certs, fake_endpoints):
     """Start an HTTPS model server presenting `<name>.pem`; returns its port."""
     servers = []
 
-    def start(name):
-        httpd = ThreadingHTTPServer(('127.0.0.1', 0), _Chat)
+    def start(name, *, delay=0.0, refuse_unknown_names=False):
+        httpd = ThreadingHTTPServer(('127.0.0.1', 0), type('Chat', (_Chat,), {'delay': delay}))
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certs / f'{name}.pem', certs / f'{name}.key')
+        if refuse_unknown_names:
+            # As Caddy does: no certificate for the requested name, so the handshake is refused.
+            context.sni_callback = lambda sock, server_name, ctx: (
+                None if server_name == 'localhost' else ssl.ALERT_DESCRIPTION_INTERNAL_ERROR)
         httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
         fake_endpoints.tcp(httpd.socket)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -157,17 +166,20 @@ def test_the_model_check_says_what_to_do_about_a_certificate(https_model, certs)
 # -- settings ------------------------------------------------------------------------------
 
 def role(endpoint='https://models.example.test/v1/chat/completions', ca_file=''):
-    return {'format': 'openai_chat', 'endpoint': endpoint, 'model': 'qwen2.5:3b', 'family': 'qwen', 'ca_file': ca_file}
+    return {'format': 'openai_chat', 'endpoint': endpoint, 'model': 'qwen2.5:3b', 'family': 'qwen', 'ca_file': ca_file,
+            'timeout_seconds': 60}
 
 
-def test_version_3_settings_upgrade_with_an_empty_ca_file(tmp_path):
+def test_version_3_settings_upgrade_with_an_empty_ca_file_and_the_default_timeout(tmp_path):
     path = tmp_path / 'db.settings.json'
     old = dict(local_settings.DEFAULTS, version=3)
-    old['roles'] = dict(old['roles'], proposer={k: v for k, v in role().items() if k != 'ca_file'})
+    old['roles'] = dict(old['roles'], proposer={k: v for k, v in role().items()
+                                                if k not in ('ca_file', 'timeout_seconds')})
     path.write_text(json.dumps(old))
     loaded = local_settings.load(path)
     assert loaded['version'] == 4
     assert loaded['roles']['proposer']['ca_file'] == ''
+    assert loaded['roles']['proposer']['timeout_seconds'] == 60
     assert loaded['roles']['reviewer'] is None
 
 
@@ -211,18 +223,18 @@ def settings_server(tmp_path, fake_endpoints):
     httpd.server_close()
 
 
-def save_model(port, ca_file):
+def save_model(port, ca_file, timeout='60'):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
     conn.request('GET', '/?view=settings&section=model', headers={'Host': f'127.0.0.1:{port}'})
     page = conn.getresponse().read().decode()
     token = re.search(r'name="token" value="([^"]+)"', page).group(1)
-    assert 'name="proposer_ca_file"' in page
+    assert 'name="proposer_ca_file"' in page and 'name="proposer_timeout_seconds"' in page
     fields = {'token': token, 'section': 'model', 'same_family_policy': 'wait'}
     for name in local.ROLES:
         fields.update({f'{name}_format': 'openai_chat', f'{name}_endpoint': '', f'{name}_model': '',
-                       f'{name}_family': '', f'{name}_ca_file': ''})
+                       f'{name}_family': '', f'{name}_ca_file': '', f'{name}_timeout_seconds': ''})
     fields.update(proposer_endpoint='https://models.example.test/v1/chat/completions', proposer_model='qwen2.5:3b',
-                  proposer_ca_file=ca_file)
+                  proposer_ca_file=ca_file, proposer_timeout_seconds=timeout)
     conn.request('POST', '/settings', body=urlencode(fields), headers={
         'Host': f'127.0.0.1:{port}', 'Origin': f'http://127.0.0.1:{port}', 'Sec-Fetch-Site': 'same-origin',
         'Content-Type': 'application/x-www-form-urlencoded'})
@@ -244,3 +256,69 @@ def test_an_unreadable_ca_file_is_refused_and_nothing_is_saved(settings_server, 
     assert status == 400
     assert 'CA certificate file' in text
     assert local_settings.load(config_path)['roles']['proposer'] is None
+
+
+# -- timeouts and a refused handshake ------------------------------------------------------
+
+def test_a_slow_model_times_out_with_its_own_message(https_model, certs):
+    port = https_model('good', delay=2.0)
+    adapter = build_adapter('openai_chat', f'https://localhost:{port}/v1/chat/completions', 'm', None,
+                            ca_file=str(certs / 'ca.pem'), timeout_seconds=0.5)
+    with pytest.raises(ModelTimedOut, match='0.5'):
+        adapter.complete('system', 'user', json_output=False)
+    assert issubclass(ModelTimedOut, CapacityError) and not issubclass(ModelTimedOut, CertificateProblem)
+
+
+def test_a_role_timeout_gives_a_slow_model_time_to_answer(https_model, certs):
+    port = https_model('good', delay=1.0)
+    adapter = build_adapter('openai_chat', f'https://localhost:{port}/v1/chat/completions', 'm', None,
+                            ca_file=str(certs / 'ca.pem'), timeout_seconds=5)
+    assert adapter.complete('system', 'user', json_output=False) == 'ok'
+
+
+def test_the_default_timeout_is_unchanged():
+    assert model_transport.TIMEOUT_SECONDS == 60
+    assert RoleConfig('proposer', 'openai_chat', 'https://m.example.test/v1', 'm', 'qwen').timeout_seconds == 60
+
+
+def test_a_refused_handshake_is_named_and_not_retried(https_model, certs):
+    port = https_model('good', refuse_unknown_names=True)
+    assert ask(port, str(certs / 'ca.pem')) == 'ok'          # the name it serves
+    with pytest.raises(TLSRefused):
+        ask(port, str(certs / 'ca.pem'), host='127.0.0.1')   # a name it does not serve
+    assert issubclass(TLSRefused, CertificateProblem)
+
+
+@pytest.mark.parametrize('problem, hint', [
+    ('ModelTimedOut', "raise this role's timeout"),
+    ('TLSRefused', 'check the host name and port'),
+])
+def test_the_model_check_explains_timeouts_and_refusals(problem, hint):
+    assert hint in model_check.PROBLEM_HINTS[problem]
+
+
+@pytest.mark.parametrize('bad', [0, 4, 601, True, '60', 60.5])
+def test_a_timeout_outside_5_to_600_seconds_is_refused(bad):
+    with pytest.raises(ValueError):
+        RoleConfig('proposer', 'openai_chat', 'https://m.example.test/v1', 'm', 'qwen', timeout_seconds=bad)
+
+
+def test_the_timeout_is_saved_from_the_settings_page_and_reaches_the_adapter(settings_server):
+    port, config_path = settings_server
+    assert save_model(port, '', timeout='300')[0] == 303
+    saved = local_settings.load(config_path)
+    assert saved['roles']['proposer']['timeout_seconds'] == 300
+    assert ModelRoles.from_settings(saved, {}).adapter('proposer').timeout_seconds == 300
+
+
+@pytest.mark.parametrize('bad', ['4', '601', 'abc', '60.5', '٣٠٠'])
+def test_a_bad_timeout_on_the_settings_page_saves_nothing(settings_server, bad):
+    port, config_path = settings_server
+    assert save_model(port, '', timeout=bad)[0] == 400
+    assert local_settings.load(config_path)['roles']['proposer'] is None
+
+
+def test_a_blank_timeout_means_the_default(settings_server):
+    port, config_path = settings_server
+    assert save_model(port, '', timeout='')[0] == 303
+    assert local_settings.load(config_path)['roles']['proposer']['timeout_seconds'] == 60

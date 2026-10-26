@@ -117,7 +117,7 @@ def test_check_models_reports_each_role(tmp_path, monkeypatch, capsys):
     from tools.model_check import SAMPLE_PROPOSAL
     from tools.model_roles import ModelRoles
     database = tmp_path / 'w.sqlite3'
-    roles = {r: dict(format='openai_chat', endpoint='http://localhost:1/v1/chat/completions', model='m-' + r, family='other', ca_file='')
+    roles = {r: dict(format='openai_chat', endpoint='http://localhost:1/v1/chat/completions', model='m-' + r, family='other', ca_file='', timeout_seconds=60)
              for r in ('proposer', 'reviewer', 'summarizer')}
     roles['guard'] = None
     local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, roles=roles))

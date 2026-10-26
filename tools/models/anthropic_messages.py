@@ -7,9 +7,10 @@ from tools.models._common import check_input
 
 
 class AnthropicMessagesAdapter:
-    def __init__(self, endpoint, model, api_key, ca_file=None):
+    def __init__(self, endpoint, model, api_key, ca_file=None, timeout_seconds=None):
         self.endpoint = validate_endpoint(endpoint)
         self.ca_file = ca_file or None
+        self.timeout_seconds = timeout_seconds
         self.model = model
         self.api_key = api_key
 
@@ -20,7 +21,7 @@ class AnthropicMessagesAdapter:
         headers = {'Content-Type': 'application/json', 'anthropic-version': '2023-06-01'}
         if self.api_key:
             headers['x-api-key'] = self.api_key
-        reply = post_json(self.endpoint, body, headers, ca_file=self.ca_file)
+        reply = post_json(self.endpoint, body, headers, ca_file=self.ca_file, timeout=self.timeout_seconds)
         try:
             complete = reply['stop_reason'] == 'end_turn'
             text = ''.join(block['text'] for block in reply['content'] if block.get('type') == 'text')

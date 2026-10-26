@@ -107,7 +107,7 @@ OTHER = 'https://models.example.invalid/v1/chat/completions'
 
 def saved(model='llama3.1', family='llama', endpoint=URL):
     return {'roles': {'proposer': {'format': 'openai_chat', 'endpoint': endpoint,
-                                   'model': model, 'family': family, 'ca_file': ''},
+                                   'model': model, 'family': family, 'ca_file': '', 'timeout_seconds': 60},
                       'reviewer': None, 'summarizer': None, 'guard': None},
             'same_family_policy': 'wait'}
 
@@ -162,7 +162,7 @@ def test_adapter_uses_the_environ_from_settings_not_the_process(monkeypatch):
     import tools.model_roles as model_roles
     seen = []
     monkeypatch.setattr(model_roles, 'build_adapter',
-                        lambda fmt, url, model, key, ca_file=None: seen.append(key) or object())
+                        lambda fmt, url, model, key, ca_file=None, timeout_seconds=None: seen.append(key) or object())
     monkeypatch.setenv('RZ_PROPOSER_API_KEY', 'process-key')
     monkeypatch.delenv('RZ_MODEL_API_KEY', raising=False)
     built = ModelRoles.from_settings(saved(), {'RZ_PROPOSER_API_KEY': 'passed-key'})
@@ -179,7 +179,7 @@ def test_adapter_without_an_environ_reads_the_process(monkeypatch):
     import tools.model_roles as model_roles
     seen = []
     monkeypatch.setattr(model_roles, 'build_adapter',
-                        lambda fmt, url, model, key, ca_file=None: seen.append(key) or object())
+                        lambda fmt, url, model, key, ca_file=None, timeout_seconds=None: seen.append(key) or object())
     monkeypatch.setenv('RZ_PROPOSER_API_KEY', 'process-key')
     ModelRoles(proposer=role('proposer', 'p', 'gpt')).adapter('proposer')
     assert seen == ['process-key']
@@ -194,7 +194,7 @@ def test_run_local_cycle_builds_adapters_from_its_environ(tmp_path, monkeypatch)
     local_settings.save(local_settings.settings_path(ws.root), dict(local_settings.DEFAULTS, **saved()))
     seen = []
 
-    def stop(fmt, url, model, key, ca_file=None):
+    def stop(fmt, url, model, key, ca_file=None, timeout_seconds=None):
         seen.append(key)
         raise RuntimeError('stop before any model call')
 

@@ -18,7 +18,7 @@ LOCAL = 'http://localhost:11434/v1/chat/completions'
 
 
 def proposer(**change):
-    return dict(dict(format='openai_chat', endpoint=LOCAL, model='test', family='other', ca_file=''), **change)
+    return dict(dict(format='openai_chat', endpoint=LOCAL, model='test', family='other', ca_file='', timeout_seconds=60), **change)
 
 
 def with_proposer(**fields):
@@ -79,7 +79,7 @@ def test_v1_settings_upgrade_to_proposer_role(tmp_path):
     loaded = config.load(path)
     assert loaded['version'] == 4
     assert loaded['roles']['proposer'] == dict(format='openai_chat', model='llama3.1', family='llama',
-        endpoint='http://127.0.0.1:11434/v1/chat/completions', ca_file='')
+        endpoint='http://127.0.0.1:11434/v1/chat/completions', ca_file='', timeout_seconds=60)
     assert [loaded['roles'][r] for r in ('reviewer', 'summarizer', 'guard')] == [None] * 3
     assert loaded['same_family_policy'] == 'wait'
     assert (loaded['mode'], loaded['open_browser'], loaded['port']) == ('saved', False, 8083)
@@ -109,7 +109,7 @@ def model_form(token, **given):
     fields = {'token': token, 'section': 'model', 'same_family_policy': 'wait'}
     for role in ROLES:
         fields.update({role + '_format': 'openai_chat', role + '_endpoint': '', role + '_model': '', role + '_family': '',
-                       role + '_ca_file': ''})
+                       role + '_ca_file': '', role + '_timeout_seconds': ''})
     fields.update(given)
     return fields
 
@@ -199,7 +199,7 @@ def test_cli_uses_saved_connection_with_environment_precedence(tmp_path, monkeyp
     # suggest-demo is retired; the cycle command now builds the proposer the same way.
     monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'cycle', '--cycle', '1'])
     import tools.model_roles as model_roles
-    monkeypatch.setattr(model_roles, 'build_adapter', lambda fmt, url, model, key, ca_file=None: SimpleNamespace(
+    monkeypatch.setattr(model_roles, 'build_adapter', lambda fmt, url, model, key, ca_file=None, timeout_seconds=None: SimpleNamespace(
         url=url, model=model, api_key=key))
     seen = []
     def inspect_endpoint(ws, cycle, *, roles):
@@ -223,7 +223,7 @@ def test_settings_renders_four_role_blocks(app):
     _, request = app
     body = request()[1]
     for role in ROLES:
-        for part in ('format', 'endpoint', 'model', 'family', 'ca_file'):
+        for part in ('format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds'):
             assert f'name="{role}_{part}"' in body
     assert 'name="same_family_policy"' in body
     assert 'Same-family reviews' in body
@@ -255,7 +255,7 @@ def test_post_saves_roles_and_policy(app):
     assert saved['same_family_policy'] == 'proceed'
     assert saved['roles']['proposer']['family'] == 'gemini'  # blank family is suggested from the model
     assert saved['roles']['reviewer'] == dict(format='anthropic_messages', endpoint='https://example.invalid/v1/messages',
-                                              model='claude-x', family='claude', ca_file='')
+                                              model='claude-x', family='claude', ca_file='', timeout_seconds=60)
     assert saved['roles']['summarizer'] is None and saved['roles']['guard'] is None
 
 
@@ -291,9 +291,9 @@ def test_post_rejects_unknown_format(app):
 def test_post_rejects_extra_fields(app):
     path, request = app
     fields = model_form(_token(request))
-    assert len(fields) == 23
+    assert len(fields) == 27
     fields.update(extra_a='1', extra_b='2')
-    assert len(fields) == 25
+    assert len(fields) == 29
     assert request('POST', '/settings', fields)[0] == 400
     assert not path.exists()
 
@@ -450,7 +450,7 @@ def test_v2_settings_upgrade_to_v4_with_scanner_defaults(tmp_path):
     path = tmp_path / 'prefs.json'
     v2 = _v2_file(port=8090, mode='saved')
     # v2 roles had no ca_file; the upgrade adds an empty one.
-    v2['roles']['proposer'] = {k: v for k, v in proposer(model='kept').items() if k != 'ca_file'}
+    v2['roles']['proposer'] = {k: v for k, v in proposer(model='kept').items() if k not in ('ca_file', 'timeout_seconds')}
     path.write_text(json.dumps(v2))
     loaded = config.load(path)
     assert loaded['version'] == 4

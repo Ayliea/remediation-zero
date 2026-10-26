@@ -177,8 +177,10 @@ settings file, the workspace, a record or a log. `RZ_MODEL_ENDPOINT` and
 `RZ_MODEL` override the saved proposer connection (an overridden endpoint does
 not inherit the saved CA file). HTTP is allowed only on loopback; a hosted
 endpoint must use HTTPS (see "A model on another machine"). Redirects and inherited proxies are
-disabled. Requests are capped at 32 KiB in, 64 KiB back and 2048 output tokens,
-with a 60-second socket timeout. `check-models` sends the bundled synthetic
+disabled. Requests are capped at 32 KiB in, 64 KiB back and 2048 output tokens.
+Each role has a timeout, 60 seconds unless set in Settings (5 to 600): a local
+model on a CPU-only server, or one loading for its first request, can need
+several minutes (a 3B model here needed 63 seconds to review cold). `check-models` sends the bundled synthetic
 example to each configured role. No real provider was called during validation.
 
 With no summarizer, the report stores the metrics and a marker saying no
@@ -222,10 +224,13 @@ resolves the name (DNS or `/etc/hosts`).
 | `failed (CertificateNameMismatch: ...)` | The certificate is for another name than the URL's host |
 | `failed (CertificateExpired: ...)` | Expired or not yet valid |
 | `failed (CertificateFileUnreadable: ...)` | The CA file is gone or holds no certificate |
+| `failed (TLSRefused: ...)` | The server ended the handshake, often because it serves no certificate for that name |
+| `failed (ModelTimedOut: ...)` | No answer within the role's timeout; raise it |
 
-During a cycle a certificate problem counts as an outage: the finding is recorded
-unavailable and retried next cycle, never read as a reviewer's verdict, and it
-is not retried in place, because waiting cannot fix a certificate.
+During a cycle a certificate problem or a refused handshake counts as an outage:
+the finding is recorded unavailable and retried next cycle, never read as a
+reviewer's verdict, and it is not retried in place, because waiting cannot fix
+a certificate. A timeout is retried with backoff, like any other load.
 
 ## Review
 

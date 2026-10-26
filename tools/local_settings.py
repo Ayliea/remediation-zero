@@ -22,8 +22,8 @@ _V2_FIELDS = set(DEFAULTS) - {'scanner'}
 TASK_ID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _HOSTNAME_RE = re.compile(r'[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?')
 _V1_FIELDS = {'endpoint', 'model', 'mode', 'open_browser', 'port'}
-_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family', 'ca_file'}
-_V3_ROLE_FIELDS = _ROLE_FIELDS - {'ca_file'}
+_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds'}
+_V3_ROLE_FIELDS = _ROLE_FIELDS - {'ca_file', 'timeout_seconds'}
 
 
 def settings_path(database):
@@ -116,7 +116,7 @@ def check_ca_file(path):
 
 
 def _upgrade_v3(value):
-    """v3 had no per-role CA file: each configured role gains an empty one."""
+    """v3 had no per-role CA file or timeout: each configured role gains none and 60 s."""
     if not isinstance(value, dict) or set(value) != set(DEFAULTS) or not isinstance(value.get('roles'), dict):
         raise ValueError('Unexpected settings fields')
     upgraded = dict(copy.deepcopy(value), version=4)
@@ -125,6 +125,7 @@ def _upgrade_v3(value):
             if not isinstance(raw, dict) or set(raw) != _V3_ROLE_FIELDS:
                 raise ValueError('Unexpected settings fields')
             raw['ca_file'] = ''
+            raw['timeout_seconds'] = 60
     return validate(upgraded)
 
 
@@ -145,7 +146,7 @@ def _upgrade_v1(value):
     if value['endpoint'] or value['model']:
         upgraded['roles']['proposer'] = {'format': 'openai_chat', 'endpoint': value['endpoint'],
                                          'model': value['model'], 'family': suggest_family(value['model']),
-                                         'ca_file': ''}
+                                         'ca_file': '', 'timeout_seconds': 60}
     return upgraded
 
 

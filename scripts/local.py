@@ -60,7 +60,8 @@ DEFAULT_CORPUS = ROOT / 'data'
 CORPUS_FILES = ('findings.json', 'assets.json', 'owners.json')
 NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)'
 MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES
-                                         for part in ('format', 'endpoint', 'model', 'family', 'ca_file')}
+                                         for part in ('format', 'endpoint', 'model', 'family', 'ca_file',
+                                                      'timeout_seconds')}
 # mode and port are required; the checkbox and the interval may be absent.
 APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes'}
 SCANNER_REQUIRED = {'transport', 'socket_path', 'host', 'port', 'ca_file', 'task_ids', 'qod_floor'}
@@ -889,9 +890,13 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                                 self.send_error(400, f'The {role} CA certificate file could not be read as a PEM '
                                                      'certificate. Nothing was saved.')
                                 return
+                        timeout = fields[role + '_timeout_seconds'].strip() or '60'
+                        if not (timeout.isascii() and timeout.isdigit()):
+                            raise ValueError()  # 5-600 is checked by local_settings on save
                         values['roles'][role] = None if not (endpoint or model) else {
                             'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
-                            'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file}
+                            'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file,
+                            'timeout_seconds': int(timeout)}
                     values['same_family_policy'] = fields['same_family_policy']
                 elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
                     if fields.get('open_browser', 'yes') != 'yes':

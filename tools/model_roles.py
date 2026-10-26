@@ -39,6 +39,8 @@ class RoleConfig:
     #: Absolute path of a PEM file to trust for this HTTPS endpoint instead of the
     #: system's list (a self-signed certificate, or the private CA that signed it).
     ca_file: str = ''
+    #: Seconds to wait for an answer: a CPU-only or just-loaded local model can need minutes.
+    timeout_seconds: int = 60
 
     def __post_init__(self):
         if self.role not in ROLES:
@@ -61,10 +63,12 @@ class RoleConfig:
                 raise ValueError('The CA certificate file must be an absolute path')
             if self.format == 'vertex' or not self.endpoint.lower().startswith('https://'):
                 raise ValueError('A CA certificate file applies only to an HTTPS endpoint')
+        if type(self.timeout_seconds) is not int or not 5 <= self.timeout_seconds <= 600:
+            raise ValueError('Choose a model timeout from 5 to 600 seconds')
 
     def as_settings(self):
         return {'format': self.format, 'endpoint': self.endpoint, 'model': self.model, 'family': self.family,
-                'ca_file': self.ca_file}
+                'ca_file': self.ca_file, 'timeout_seconds': self.timeout_seconds}
 
 
 def _key_names(role):
@@ -118,7 +122,8 @@ class ModelRoles:
         key = next((environ[n] for n in _key_names(role) if environ.get(n)), None)
         if key and ('\n' in key or '\r' in key):
             raise ValueError('Invalid API key')
-        return build_adapter(config.format, config.endpoint, config.model, key, config.ca_file or None)
+        return build_adapter(config.format, config.endpoint, config.model, key, config.ca_file or None,
+                             config.timeout_seconds)
 
     @classmethod
     def from_env(cls, environ):
@@ -157,6 +162,7 @@ class ModelRoles:
                 'proposer', saved.format if saved else 'openai_chat', use_endpoint, use_model,
                 saved.family if same else suggest_family(use_model),
                 # The saved CA file belongs to the saved server; another endpoint gets none.
-                saved.ca_file if saved and use_endpoint == saved.endpoint else '')
+                saved.ca_file if saved and use_endpoint == saved.endpoint else '',
+                saved.timeout_seconds if saved else 60)
         return cls(**built, same_family_policy=settings.get('same_family_policy', 'wait'),
                    environ=environ)
