@@ -222,3 +222,35 @@ def test_the_asset_heading_agrees_with_its_count(assets, heading):
     from ui import dashboard_view
     page = dashboard_view.render({"counts": {"assets": assets}, "scans": []}, "infrastructure")
     assert f"<h2>{heading}</h2>" in page
+
+
+# --- a report that reached no host says so -------------------------------------------
+
+
+def test_a_done_report_with_no_hosts_says_it_confirmed_nothing(ws, ports):
+    from scripts.local import pull_line
+    import_scan(ports, 1, normalise_greenbone(report(1)), chosen_task_ids=[TASK])
+    # gvmd's alive test found nothing: a Done report with no hosts and no results.
+    result = import_scan(ports, 2, normalise_greenbone(report(2, hosts=(), results=())),
+                         chosen_task_ids=[TASK])
+    assert result["counts"]["resolved"] == 0 and result["hosts_in_report"] == 0
+    state = docs(ws, "scanner_state")[TASK]
+    assert (state["last_hosts_in_report"], state["last_hosts_covered"]) == (0, 0)
+    assert "This report scanned no hosts, so nothing could be confirmed" in card(ws, [TASK])
+    line = pull_line({"task_id": TASK, "result": "imported", "counts": result["counts"],
+                      "skipped": result["skipped"], "hosts_in_report": 0, "hosts_covered": 0})
+    assert line.endswith("; the report scanned no hosts, so nothing could be confirmed")
+
+
+def test_a_report_whose_hosts_all_did_not_finish_says_so(ws, ports):
+    unfinished = tuple(dataclasses.replace(h, finished=False) for h in report(1).hosts)
+    import_scan(ports, 1, normalise_greenbone(report(1, hosts=unfinished)), chosen_task_ids=[TASK])
+    page = card(ws, [TASK])
+    assert "No host in this report finished its scan, so nothing could be confirmed" in page
+    assert "scanned no hosts" not in page
+
+
+def test_a_report_that_covered_hosts_adds_no_such_line(ws, ports):
+    import_scan(ports, 1, normalise_greenbone(report(1)), chosen_task_ids=[TASK])
+    page = card(ws, [TASK])
+    assert "nothing could be confirmed" not in page

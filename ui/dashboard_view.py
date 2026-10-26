@@ -241,6 +241,12 @@ def _task_card_body(state, task_id):
                  + '.</p>')
         if state.get("last_uncovered_all"):
             body += '<p>This report could not be trusted for coverage, so it closed nothing.</p>'
+        elif state.get("last_hosts_in_report") == 0:
+            # e.g. gvmd's alive test reached nothing: a Done report that looked at no host.
+            body += ('<p>This report scanned no hosts, so nothing could be confirmed. Check in Greenbone '
+                     'that the scan could reach its targets.</p>')
+        elif state.get("last_hosts_covered") == 0:
+            body += '<p>No host in this report finished its scan, so nothing could be confirmed.</p>'
         skipped = state.get("last_skipped") or {}
         body += ('<p>Skipped: ' + ", ".join(f'{text(skipped.get(key, 0))} {label}' for key, label in (
             ("log", "log-level"), ("below_qod", "below the quality floor"), ("rejected", "rejected"),

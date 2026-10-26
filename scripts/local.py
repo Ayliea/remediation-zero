@@ -439,6 +439,10 @@ def pull_line(outcome):
     missing = outcome.get('results_not_returned') or 0
     if missing:
         line += f'; {int(missing)} results counted in the report are missing from it, so it closed nothing'
+    if not outcome.get('uncovered_all') and outcome.get('hosts_in_report') == 0:
+        line += '; the report scanned no hosts, so nothing could be confirmed'
+    elif not outcome.get('uncovered_all') and outcome.get('hosts_covered') == 0:
+        line += '; no host in the report finished its scan, so nothing could be confirmed'
     unfinished = outcome.get('unfinished_checks') or 0
     if unfinished:
         line += f'; {int(unfinished)} checks did not finish; findings from them on those hosts stay open'

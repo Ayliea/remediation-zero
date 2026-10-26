@@ -377,6 +377,8 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "last_host_uncovered_hosts": scan.host_uncovered_hosts,
             "last_unfinished_checks": scan.unfinished_check_count,
             "last_results_not_returned": scan.results_not_returned,
+            "last_hosts_in_report": len(scan.assets),
+            "last_hosts_covered": len(scan.covered_asset_ids),
             "last_uncovered_all": uncovered_all,
             "skipped": notes.get("skipped", []),
             "skipped_not_listed": notes.get("skipped_not_listed", 0),
@@ -397,6 +399,7 @@ def import_scan(ports: Ports, cycle: int, scan: NormalisedScan, *,
             "host_uncovered_hosts": scan.host_uncovered_hosts,
             "unfinished_checks": scan.unfinished_check_count,
             "results_not_returned": scan.results_not_returned,
+            "hosts_in_report": len(scan.assets), "hosts_covered": len(scan.covered_asset_ids),
             "new_cves": new_cves, "scan_cves": scan_cves}
 
 
@@ -561,6 +564,8 @@ def _pull_task(ports: Ports, cycle: int, source: Any, task_id: str,
                     "host_uncovered_hosts": result["host_uncovered_hosts"],
                     "unfinished_checks": result["unfinished_checks"],
                     "results_not_returned": result["results_not_returned"],
+                    "hosts_in_report": result["hosts_in_report"],
+                    "hosts_covered": result["hosts_covered"],
                     "listing_refused": notes["refused_reports"],
                     "skipped_tasks": notes["skipped_tasks"]}
         tried = {r["report_id"] for r in refused_now}
