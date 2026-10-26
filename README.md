@@ -679,4 +679,6 @@ This project was built entirely within the hackathon submission period. Implemen
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
 
+Third-party: the local edition bundles the QR code generator by Project Nayuki (MIT) and a breached-password list derived from SecLists (MIT); see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 The architecture diagram and documentation in this repository may be reused with attribution.
