@@ -49,8 +49,14 @@ class ExceptionWriter:
         in_kev: Optional[bool],
         approved_by_human: bool = False,
         no_cve_severity: Optional[str] = None,
+        actor: Optional[dict] = None,
     ) -> str:
         """Record a risk acceptance.
+
+        `actor` names the account that asked (the local edition's sign-in or
+        `--as`). It is written as `actor` on the acceptance, and on a refusal's
+        human-queue entry, only when given: without it both records are
+        exactly what they have always been.
 
         Refuses before writing anything if the acceptance is one the fleet is
         not permitted to make. A refused acceptance goes to a person rather
@@ -85,6 +91,7 @@ class ExceptionWriter:
                         "requested_ttl_days": ttl_days,
                         "real_ts": stamp.real_ts,
                         "sim_ts": stamp.sim_ts,
+                        **({"actor": dict(actor)} if actor is not None else {}),
                     }
                 )
                 return f"refused:{finding_id}"
@@ -110,6 +117,7 @@ class ExceptionWriter:
                     "in_kev": in_kev,
                     "reopened": False,
                     "status": "active",
+                    **({"actor": dict(actor)} if actor is not None else {}),
                 }
             )
             # Chase must not pursue an accepted finding, so the clock is

@@ -146,7 +146,20 @@ python3 -m venv .venv
 # local edition (no pip packages, no cloud account)
 python3 -S start-remediation-zero.py                                       # launcher; opens http://127.0.0.1:8081
 python3 -S start-remediation-zero.py --saved --public-url https://NAME:PORT  # also reachable through an HTTPS proxy (Tailscale Serve); every page needs sign-in
-python3 -S -m scripts.local --help                                         # init | seed | cycle | rescan | exception | approve | serve | check-models | update-enrichment | greenbone
+python3 -S -m scripts.local --help                                         # init | seed | cycle | rescan | exception | approve | serve | check-models | update-enrichment | greenbone | account | settings
+python3 -S -m scripts.local approve FINDING --cycle N --as EMAIL                         # approve a held or unreviewed decision as an active account
+python3 -S -m scripts.local exception accept FINDING --ttl D --reason T --cycle N --as OWNER_EMAIL [--approved-by-person]  # only an owner
+python3 -S -m scripts.local account setup                                  # the first account, on the server only; asks for the password and a code
+python3 -S -m scripts.local account invite --email E --role owner|tech --as EMAIL   # prints a one-time invite link
+python3 -S -m scripts.local account list                                   # email, role, status
+python3 -S -m scripts.local account set-role EMAIL owner|tech --as EMAIL
+python3 -S -m scripts.local account remove EMAIL --as EMAIL
+python3 -S -m scripts.local account reset-password EMAIL --as EMAIL        # prints a one-time link
+python3 -S -m scripts.local account reset-mfa EMAIL --as EMAIL             # prints a one-time link
+python3 -S -m scripts.local account events [--limit N]                     # the audit trail, newest first
+python3 -S -m scripts.local account recover-owner --email E [--promote]    # last resort when no owner can sign in
+python3 -S -m scripts.local settings show                                  # the settings file as JSON
+python3 -S -m scripts.local settings set SECTION FIELD=VALUE...            # validated as the Settings page; e.g. application server_names=a.example
 python3 -S -m scripts.local update-enrichment                              # fetch CISA KEV, EPSS and NVD into the workspace cache; reaches the internet
 python3 -S -m scripts.local greenbone tasks                                # list the account's Greenbone tasks: task_id  name
 python3 -S -m scripts.local greenbone test                                 # connect / sign in / list tasks, one line each

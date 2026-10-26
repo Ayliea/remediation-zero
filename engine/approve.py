@@ -18,6 +18,7 @@ Standard library only.
 """
 import json
 import logging
+from typing import Optional
 
 from engine.ports import Ports
 from engine.triage_cycle import assign_if_ratified
@@ -41,15 +42,19 @@ class InvalidFindingId(ApprovalRefused):
     """The finding id is malformed; its message is printed as is."""
 
 
-def approve(ports: Ports, finding_id: str, cycle: int, by: str) -> str:
+def approve(ports: Ports, finding_id: str, cycle: int, by: str, *,
+            actor: Optional[dict] = None) -> str:
     """Record `by`'s approval of the decision for `finding_id` in `cycle`.
 
     Returns the approval id, which is the decision id. A repeat returns the
     same id and writes nothing; the first approval is the one kept.
+    `actor` (the local edition's signed-in or `--as` account) is written as
+    the record's `actor` only when given; without it the record is exactly
+    what it has always been.
     """
     if (not isinstance(by, str) or not by.strip() or len(by) > MAX_NAME
             or any(ch in by for ch in "\r\n")):
-        raise ApprovalRefused("give the approver's name with --by (one line, at most 200 characters)")
+        raise ApprovalRefused("give the approver's name (one line, at most 200 characters)")
     try:
         key = derive_record(finding_id, "approval", cycle)  # validates both
     except ValueError:
@@ -76,10 +81,12 @@ def approve(ports: Ports, finding_id: str, cycle: int, by: str) -> str:
     @IdempotencyGuard(ports.journal).protects(action="approval")
     def _write(*, finding_id: str, cycle: int) -> str:
         stamp = ports.clock.now()
+        record = {"finding_id": finding_id, "cycle": cycle, "decision_id": decision_id,
+                  "approved_by": by.strip(), "real_ts": stamp.real_ts, "sim_ts": stamp.sim_ts}
+        if actor is not None:
+            record["actor"] = dict(actor)
         try:
-            ports.docs.collection(COLLECTION).document(decision_id).create({
-                "finding_id": finding_id, "cycle": cycle, "decision_id": decision_id,
-                "approved_by": by.strip(), "real_ts": stamp.real_ts, "sim_ts": stamp.sim_ts})
+            ports.docs.collection(COLLECTION).document(decision_id).create(record)
         except AlreadyExists:
             pass  # a resumed call after the write: the first approval stands
         return decision_id

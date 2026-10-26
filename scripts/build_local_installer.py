@@ -11,7 +11,8 @@ from pathlib import Path
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-FILES = ('LICENSE', 'start-remediation-zero.py', 'scripts/local_launcher.py', 'scripts/__init__.py', 'scripts/local.py', 'scripts/local_auth.py', 'tools/__init__.py',
+FILES = ('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'start-remediation-zero.py', 'scripts/local_launcher.py', 'scripts/__init__.py',
+         'scripts/local.py', 'scripts/local_auth.py', 'scripts/local_accounts.py', 'tools/__init__.py',
          'tools/accounts.py', 'tools/access.py', 'tools/passwords.py', 'tools/totp.py', 'tools/qr_svg.py',
          'tools/vendor/__init__.py', 'tools/vendor/qrcodegen.py', 'tools/vendor/QRCODEGEN_LICENSE.txt',
          'tools/vendor/breached_passwords.txt', 'tools/vendor/BREACHED_PASSWORDS_SOURCE.md', 'ui/account_views.py',

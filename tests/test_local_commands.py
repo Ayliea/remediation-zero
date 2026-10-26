@@ -551,10 +551,10 @@ def test_approve_refuses_a_superseded_decision(ws):
     assert approve(approve_ports(ws), FINDING_ID, 2, "Synthetic Approver") == f"{FINDING_ID}-c002"
 
 
-def test_approve_with_a_malformed_finding_id_says_so(tmp_path):
-    result = _local("--database", str(tmp_path / "w"), "approve", "   ", "--cycle", "1")
-    assert result.returncode == 1
-    assert result.stderr == "invalid finding id:    \n"
+def test_approve_with_a_malformed_finding_id_says_so(ws, people, capsys):
+    from tests.signed_in import OWNER
+    assert _main(capsys, ws, "approve", "   ", "--cycle", "1", "--as", OWNER) == (
+        1, "", "invalid finding id:    \n")
 
 
 # --- the GitHub issue body states the review honestly (Ruling 34) ------------
@@ -763,7 +763,8 @@ def test_approve_allows_unreviewed_and_dashboard_shows_command(ws):
     store = ws.docs_for("report")
     page = render(snapshot(store), "actions", approve_command="python3 -S -m scripts.local --database '/w s'")
     store.close()
-    assert "approve RZ-0001 --cycle 1" in page
+    assert "approve RZ-0001 --cycle 1 --as you@example.com" in page
+    assert "--by" not in page
     assert "--database &#x27;/w s&#x27;" in page
     assert approve(approve_ports(ws), FINDING_ID, 1, "Synthetic Approver") == f"{FINDING_ID}-c001"
 
@@ -1001,18 +1002,20 @@ def test_cli_commands_work_without_models(tmp_path):
     listed = _local("--database", str(root), "exception", "list", env=env)
     assert listed.returncode == 0 and listed.stdout.strip() == ""
     missing = _local("--database", str(root), "exception", "accept", "RZ-9999", "--ttl", "7",
-                     "--by", "own-01", "--reason", "synthetic", "--cycle", "1", env=env)
+                     "--as", "owner@client.example", "--reason", "synthetic", "--cycle", "1", env=env)
     assert missing.returncode == 1
-    refused = _local("--database", str(root), "approve", "RZ-0001", "--cycle", "1", env=env)
+    refused = _local("--database", str(root), "approve", "RZ-0001", "--cycle", "1",
+                     "--as", "owner@client.example", env=env)
     assert refused.returncode == 1
-    assert "no decision" in refused.stderr
+    assert refused.stderr == AS_REFUSED  # no account exists yet
     cycle = _local("--database", str(root), "cycle", "--cycle", "1", env=env)
     assert cycle.returncode == 1
     assert NO_PROPOSER in cycle.stderr
 
 
 @pytest.mark.parametrize("command", [["init"], ["seed"], ["cycle", "--cycle", "1"],
-                                     ["exception", "list"], ["approve", "RZ-0001", "--cycle", "1"],
+                                     ["exception", "list"],
+                                     ["approve", "RZ-0001", "--cycle", "1", "--as", "owner@client.example"],
                                      ["serve", "--port", "0"], ["check-models"]])
 def test_old_single_file_database_is_refused_unchanged(tmp_path, command):
     old = tmp_path / "remediation-zero.sqlite3"
@@ -1142,3 +1145,126 @@ def test_update_enrichment_says_it_reaches_the_internet(ws, capsys, monkeypatch)
     assert out.startswith("This reaches the internet: CISA, FIRST EPSS and NVD.")
     assert "CVE-2021-44228" in " ".join(u for u, _ in calls)
     assert json.loads(out.splitlines()[-1])["kev"] == "ok"
+
+
+# --- --as and recorded actors --------------------------------------------------
+
+BY_REPLACED = "--by was replaced by --as EMAIL, which must name an account."
+AS_REFUSED = "--as must name an active account. Nothing was changed.\n"
+ACCEPT = ["exception", "accept", FINDING_ID, "--ttl", "7", "--reason", "Synthetic acceptance",
+          "--cycle", "1", "--approved-by-person"]
+
+
+def _main(capsys, ws, *argv):
+    from scripts import local
+    try:
+        local.main(["--database", str(ws.root), *argv])
+        code = 0
+    except SystemExit as exit_:
+        code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
+    out, err = capsys.readouterr()
+    return code, out, err
+
+
+@pytest.fixture
+def people(ws, tmp_path_factory):
+    """The workspace's accounts: an active owner and an active tech (tests/signed_in.py)."""
+    from tests.signed_in import site
+    return site(ws.root, tmp_path_factory.getbasetemp())
+
+
+def _account_id(ws, email):
+    from tools.account_store import AccountStore
+    return AccountStore(ws.accounts_path()).account_by_email(email)["id"]
+
+
+def test_by_is_refused_with_the_replacement_message(tmp_path):
+    root = str(tmp_path / "w")
+    for argv in (["approve", "RZ-0001", "--cycle", "1", "--by", "Synthetic Approver"],
+                 ["exception", "accept", "RZ-0001", "--ttl", "7", "--by", "own-01", "--reason", "x",
+                  "--cycle", "1"],
+                 ["exception", "accept", "RZ-0001", "--by", "own-01"]):
+        result = _local("--database", root, *argv)
+        assert result.returncode == 2
+        assert result.stderr == BY_REPLACED + "\n"
+        assert result.stdout == ""
+    assert not (tmp_path / "w").exists()  # refused before the workspace is opened
+    shown = _local("approve", "--help")
+    assert "--as EMAIL" in shown.stdout and "--by" not in shown.stdout
+
+
+def test_as_must_name_an_active_account(ws, people, capsys):
+    assert _main(capsys, ws, *ACCEPT)[0] == 2  # --as is required
+    assert _main(capsys, ws, *ACCEPT, "--as", "nobody@client.example") == (1, "", AS_REFUSED)
+    assert _main(capsys, ws, "approve", FINDING_ID, "--cycle", "1",
+                 "--as", "nobody@client.example") == (1, "", AS_REFUSED)
+    assert docs(ws, "exceptions") == {} and docs(ws, "approvals") == {}
+
+
+def test_a_tech_cannot_accept_a_risk_from_the_command_line(ws, people, capsys):
+    from tests.signed_in import TECH
+    code, out, err = _main(capsys, ws, *ACCEPT, "--as", TECH)
+    assert (code, out) == (1, "")
+    assert err == f"Only an owner can accept a risk; {TECH} is a tech.\n"
+    assert docs(ws, "exceptions") == {} and docs(ws, "human_queue") == {}
+
+
+def test_cli_actor_is_recorded_unverified(ws, people, capsys):
+    from engine.snapshot import snapshot
+    from scripts.local import run_local_cycle
+    from tests.signed_in import OWNER, TECH
+    from ui.dashboard_view import BEFORE_SIGN_IN, render
+    # A tech may approve a held decision; only accepting a risk needs an owner.
+    run_local_cycle(ws, 1, roles=same_family(), clock=clock(), environ={})
+    code, _, err = _main(capsys, ws, "approve", FINDING_ID, "--cycle", "1", "--as", TECH.upper())
+    assert code == 0, err
+    approval = docs(ws, "approvals")[f"{FINDING_ID}-c001"]
+    assert approval["approved_by"] == TECH
+    assert approval["actor"] == {"via": "command_line", "account_id": _account_id(ws, TECH), "verified": False}
+    store = ws.docs_for("report")
+    page = render(snapshot(store), "activity")
+    store.close()
+    card = next(c for c in page.split("</article>") if f"approved by {TECH}" in c)
+    assert BEFORE_SIGN_IN not in card
+
+    code, _, err = _main(capsys, ws, *ACCEPT, "--as", OWNER)
+    assert code == 0, err
+    accepted = docs(ws, "exceptions")[FINDING_ID]
+    assert accepted["accepted_by"] == OWNER
+    assert accepted["actor"] == {"via": "command_line", "account_id": _account_id(ws, OWNER), "verified": False}
+
+
+def test_engine_records_are_unchanged_without_an_actor(tmp_path):
+    """The cloud calls these without an actor: every record keeps exactly today's fields."""
+    from engine.approve import approve
+    from engine.sweep import accept
+    from scripts.local import _ports, run_local_cycle
+    from tools.enrichment import EnrichmentCache
+    workspace = Workspace(tmp_path / "w")
+    seed = workspace.docs_for("seed")
+    for n in (1, 2):
+        seed.collection("findings").document(f"RZ-000{n}").set({
+            "finding_id": f"RZ-000{n}", "asset_id": "ast-01", "cve_id": "CVE-2021-44228", "status": "open",
+            "scanner_comment": "Synthetic scanner note."})
+    seed.collection("assets").document("ast-01").set({
+        "asset_id": "ast-01", "hostname": "app.corp.invalid", "owner_id": "own-01"})
+    seed.close()
+    run_local_cycle(workspace, 1, roles=same_family(), clock=clock(), environ={})
+    approve(approve_ports(workspace), "RZ-0001", 1, "Synthetic Approver")
+    assert set(docs(workspace, "approvals")["RZ-0001-c001"]) == {
+        "finding_id", "cycle", "decision_id", "approved_by", "real_ts", "sim_ts"}
+    store = workspace.docs_for("exception_accept")
+    try:
+        ports = _ports(store, workspace.journal(), clock())
+        no_cache = EnrichmentCache(cache_dir=tmp_path / "no-cache")
+        assert accept(ports, "RZ-0001", 7, "own-01", "Synthetic", 1, approved_by_human=True,
+                      enrichment=no_cache) == "accepted:RZ-0001"
+        with pytest.raises(ValueError):
+            accept(ports, "RZ-0002", 7, "own-01", "Synthetic", 1, enrichment=no_cache)
+    finally:
+        store.close()
+    assert set(docs(workspace, "exceptions")["RZ-0001"]) == {
+        "finding_id", "accepted_by", "reason", "ttl_days", "accepted_cycle", "accepted_real_ts",
+        "accepted_sim_ts", "expires_sim_ts", "approved_by_human", "in_kev", "reopened", "status"}
+    assert set(docs(workspace, "human_queue")["acceptance-refused-RZ-0002-c001"]) == {
+        "finding_id", "cycle", "kind", "reason", "requested_by", "requested_ttl_days", "real_ts", "sim_ts"}

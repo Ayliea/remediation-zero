@@ -141,7 +141,8 @@ def check_bindable(address, port):
         try:
             probe.bind((address, port))
         except OSError:
-            raise ValueError(f'This machine cannot listen on {address}:{port}') from None
+            # port 0 checks the address alone, so the sentence names the address alone
+            raise ValueError(f'This machine cannot listen on {address}' + (f':{port}' if port else '')) from None
 
 
 def _absolute_path(value, what):

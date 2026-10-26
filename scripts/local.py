@@ -11,8 +11,16 @@ internet (CISA, EPSS, NVD); `greenbone` reads from your Greenbone server
 with no model configured. API keys come only from the environment
 (RZ_<ROLE>_API_KEY, or RZ_MODEL_API_KEY for the proposer) and are never
 printed, logged or written to settings.
+
+`account` (scripts/local_accounts.py) does on the server what the Accounts page
+does, and `settings show` / `settings set` what the Settings page does, through
+the page's own validation (apply_settings_form). `approve` and `exception accept`
+name the person with `--as EMAIL`, an active account (an owner, to accept a
+risk); the record carries `actor = {'via': 'command_line', 'account_id': ...,
+'verified': False}`.
 """
 import argparse
+import copy
 import errno
 import io
 import ipaddress
@@ -23,6 +31,7 @@ import re
 import secrets
 import shlex
 import socket
+import sqlite3
 import ssl
 import sys
 import unicodedata
@@ -42,7 +51,7 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
-from scripts import local_auth
+from scripts import local_accounts, local_auth
 from tools import access, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
@@ -700,6 +709,198 @@ def _scanner_values(fields, values):
                 ca_file=fields['ca_file'], task_ids=task_ids, auto_enrichment='auto_enrichment' in fields, **ints)
 
 
+TOO_MANY_TASKS = f'At most {MAX_CHOSEN_TASKS} scan tasks can be chosen. Nothing was saved.'
+
+
+class SettingsRefused(ValueError):
+    """A settings change refused with its own sentence (the message is shown as is)."""
+
+
+def apply_settings_form(values, section, fields, *, running_port=None):
+    """`values` (the saved settings) with one Settings section's form fields applied, validated
+    as for saving. The Settings page and `settings set` both call this, so a value one refuses
+    the other refuses too.
+
+    `fields` are the section's form fields as the page posts them (strings; a ticked checkbox is
+    'yes', an unticked one is absent). Raises SettingsRefused with the sentence to show,
+    TooManyTasks, or ValueError for anything else. `running_port`: the port this server already
+    holds on loopback, which makes a bind to the same port fail; then only the address is checked."""
+    values = copy.deepcopy(values)
+    if section == 'scanner':
+        # A credential is never accepted, whatever the field is called or how it is cased.
+        if any(k.lower() in {'username', 'password'} for k in fields) or not SCANNER_REQUIRED <= set(fields) <= SCANNER_FIELDS:
+            raise ValueError()
+        values['scanner'] = _scanner_values(fields, values)
+    elif section == 'model' and set(fields) == MODEL_FIELDS:
+        for role in ROLES:
+            endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
+            ca_file = fields[role + '_ca_file'].strip()
+            if ca_file and (endpoint or model):
+                try:
+                    local_settings.check_ca_file(ca_file)
+                except ValueError:
+                    raise SettingsRefused(f'The {role} CA certificate file could not be read as a PEM '
+                                          'certificate. Nothing was saved.') from None
+            timeout = fields[role + '_timeout_seconds'].strip() or '60'
+            if not (timeout.isascii() and timeout.isdigit()):
+                raise ValueError()  # 5-600 is checked by local_settings on save
+            values['roles'][role] = None if not (endpoint or model) else {
+                'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
+                'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file,
+                'timeout_seconds': int(timeout)}
+        values['same_family_policy'] = fields['same_family_policy']
+    elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
+        if fields.get('open_browser', 'yes') != 'yes':
+            raise ValueError()
+        try:
+            port = int(fields['port'])
+        except ValueError:
+            raise ValueError() from None  # no message: int()'s own is not a sentence for a person
+        values.update(mode=fields['mode'], port=port, open_browser='open_browser' in fields)
+        if 'cycle_interval_minutes' in fields:
+            # ASCII digits only; local_settings.validate checks 0-1440 on save.
+            minutes = fields['cycle_interval_minutes']
+            if not (minutes.isascii() and minutes.isdigit()):
+                raise ValueError()
+            values['cycle_interval_minutes'] = int(minutes)
+        if 'listen_address' in fields:
+            values['listen_address'] = fields['listen_address'].strip()
+        if 'server_names' in fields:
+            values['server_names'] = local_settings.parse_server_names(fields['server_names'])
+        if 'certificate_mode' in fields:
+            values['certificate'] = {'mode': fields['certificate_mode'], 'cert_file': fields.get('cert_file', '').strip(),
+                                     'key_file': fields.get('key_file', '').strip()}
+        values = local_settings.validate(values)
+        try:
+            if local_settings.exposed(values):
+                same_port = values['port'] == running_port
+                local_settings.check_bindable(values['listen_address'], 0 if same_port else values['port'])
+            if values['certificate']['mode'] == 'own':
+                local_settings.check_certificate(values['certificate']['cert_file'], values['certificate']['key_file'])
+        except ValueError as refusal:
+            raise SettingsRefused(f'{refusal}. Nothing was saved.') from None
+    else:
+        raise ValueError()
+    return values
+
+
+def settings_form(values, section):
+    """The form fields the Settings page shows for `section`, filled from `values`: what it
+    posts when nothing is changed (a ticked checkbox is 'yes'; an unticked one is absent)."""
+    if section == 'model':
+        fields = {'same_family_policy': values['same_family_policy']}
+        for role in ROLES:
+            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': '',
+                                            'ca_file': '', 'timeout_seconds': 60}
+            fields.update({f'{role}_{part}': str(cfg[part]) for part in
+                           ('format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds')})
+        return fields
+    if section == 'scanner':
+        cfg = values['scanner']
+        fields = {name: str(cfg[name]) for name in ('transport', 'socket_path', 'host', 'port', 'ca_file', 'qod_floor')}
+        fields['task_ids'] = '\n'.join(cfg['task_ids'])
+        if cfg['auto_enrichment']:
+            fields['auto_enrichment'] = 'yes'
+        return fields
+    if section == 'application':
+        cert = values['certificate']
+        fields = {'mode': values['mode'], 'port': str(values['port']),
+                  'cycle_interval_minutes': str(values['cycle_interval_minutes']),
+                  'listen_address': values['listen_address'], 'server_names': ', '.join(values['server_names']),
+                  'certificate_mode': cert['mode'], 'cert_file': cert['cert_file'], 'key_file': cert['key_file']}
+        if values['open_browser']:
+            fields['open_browser'] = 'yes'
+        return fields
+    raise ValueError(section)
+
+
+#: `settings set` field names that differ from the page's form names: nested values are dotted.
+_CLI_FIELD_NAMES = {
+    'application': {'certificate.mode': 'certificate_mode', 'certificate.cert_file': 'cert_file',
+                    'certificate.key_file': 'key_file'},
+    'model': {f'{role}.{part}': f'{role}_{part}' for role in ROLES
+              for part in ('format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds')},
+    'scanner': {},
+}
+_CLI_CHECKBOXES = {'application': 'open_browser', 'scanner': 'auto_enrichment'}
+#: Changes that take effect only when serve starts again.
+RESTART_FIELDS = ('listen_address', 'server_names', 'certificate')
+SAVED = 'Saved.'
+SAVED_RESTART = 'Saved. Restart Remediation Zero for listen address, names or certificate changes to take effect.'
+
+
+class SettingsCommandRefused(Exception):
+    """`settings set` was refused; the message is the one sentence printed."""
+
+
+def settings_set(config_path, section, assignments, *, running_port=None):
+    """Apply `FIELD=VALUE` assignments to one Settings section through the page's own validation
+    (apply_settings_form) and save. Returns the sentence to print; SettingsCommandRefused otherwise.
+
+    Field names are the page's, with nested values dotted (`certificate.mode`, `proposer.endpoint`);
+    lists are comma-separated (`server_names`, `task_ids`); a checkbox takes true or false."""
+    if section not in _CLI_FIELD_NAMES:
+        raise SettingsCommandRefused('The section must be application, model or scanner. Nothing was saved.')
+    saved = local_settings.load(config_path)
+    fields = settings_form(saved, section)
+    names = _CLI_FIELD_NAMES[section]
+    checkbox = _CLI_CHECKBOXES.get(section)
+    allowed = (set(fields) - set(names.values())) | set(names) | ({checkbox} if checkbox else set())
+    for assignment in assignments:
+        name, equals, value = assignment.partition('=')
+        if not equals or name not in allowed:
+            raise SettingsCommandRefused(f'{terminal_safe(name)} is not a field of the {section} section; '
+                                         'write FIELD=VALUE. Nothing was saved.')
+        if name == checkbox:
+            if value.lower() not in {'true', 'false', 'yes', 'no'}:
+                raise SettingsCommandRefused(f'{name} takes true or false. Nothing was saved.')
+            fields.pop(name, None)
+            if value.lower() in {'true', 'yes'}:
+                fields[name] = 'yes'
+            continue
+        if name == 'task_ids':
+            value = '\n'.join(part.strip() for part in value.split(','))
+        fields[names.get(name, name)] = value
+    if running_port is None:
+        # A dashboard may be running on the saved port (on loopback), and a bind to that port would
+        # then fail although the address is fine. As on the page, an unchanged port checks only the
+        # address; serve says so in one sentence at start if the port really cannot be used.
+        running_port = saved['port']
+    try:
+        values = apply_settings_form(saved, section, fields, running_port=running_port)
+        local_settings.save(config_path, values)
+    except SettingsRefused as refusal:
+        raise SettingsCommandRefused(str(refusal)) from None
+    except TooManyTasks:
+        raise SettingsCommandRefused(TOO_MANY_TASKS) from None
+    except (ValueError, TypeError, KeyError) as error:
+        # local_settings' own sentences say what is wrong; a bare parse error does not.
+        reason = str(error) if type(error) is ValueError and str(error) else 'A value is not valid'
+        raise SettingsCommandRefused(f'{terminal_safe(reason, 200)}. Nothing was saved.') from None
+    except OSError:
+        raise SettingsCommandRefused('The settings could not be saved. Check local file permissions.') from None
+    changed = any(values[name] != saved[name] for name in RESTART_FIELDS)
+    return SAVED_RESTART if changed else SAVED
+
+
+#: A field name that would hold a secret. No settings field does today (API keys and scanner
+#: credentials live only in the environment); `settings show` masks any that ever appears.
+#: A `*_file` field is a path to a file, not its contents, so it is shown.
+_SECRET_NAME = re.compile(r'key|secret|password|token', re.I)
+
+
+def settings_shown(config_path):
+    """The saved settings as `settings show` prints them."""
+    def masked(value):
+        if isinstance(value, dict):
+            return {k: '(hidden)' if _SECRET_NAME.search(k) and not k.endswith('_file') else masked(v)
+                    for k, v in value.items()}
+        if isinstance(value, list):
+            return [masked(v) for v in value]
+        return value
+    return masked(local_settings.load(config_path))
+
+
 _BCHARS = r"[0-9A-Za-z'()+_,\-./:=? ]"
 _UPLOAD_TYPE = re.compile(r'multipart/form-data; ?boundary=(?:"(%s{1,70})"|(%s{1,70}))' % (_BCHARS, _BCHARS), re.I | re.A)
 _UPLOAD_DISPOSITION = re.compile(rb'form-data; ?name="(token|report|add_task)"(; ?filename="[^"\r\n]*")?')
@@ -1330,64 +1531,14 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     shown = section if section in SECTIONS else 'model'
                     self.redirect(local_auth.confirm_location(f'/?view=settings&section={shown}'))
                     return
-                if section == 'scanner':
-                    # A credential is never accepted, whatever the field is called or how it is cased.
-                    if any(k.lower() in {'username', 'password'} for k in fields) or not SCANNER_REQUIRED <= set(fields) <= SCANNER_FIELDS:
-                        raise ValueError()
-                    values['scanner'] = _scanner_values(fields, values)
-                elif section == 'model' and set(fields) == MODEL_FIELDS:
-                    for role in ROLES:
-                        endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
-                        ca_file = fields[role + '_ca_file'].strip()
-                        if ca_file and (endpoint or model):
-                            try:
-                                local_settings.check_ca_file(ca_file)
-                            except ValueError:
-                                self.send_error(400, f'The {role} CA certificate file could not be read as a PEM '
-                                                     'certificate. Nothing was saved.')
-                                return
-                        timeout = fields[role + '_timeout_seconds'].strip() or '60'
-                        if not (timeout.isascii() and timeout.isdigit()):
-                            raise ValueError()  # 5-600 is checked by local_settings on save
-                        values['roles'][role] = None if not (endpoint or model) else {
-                            'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
-                            'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file,
-                            'timeout_seconds': int(timeout)}
-                    values['same_family_policy'] = fields['same_family_policy']
-                elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
-                    if fields.get('open_browser', 'yes') != 'yes':
-                        raise ValueError()
-                    values.update(mode=fields['mode'], port=int(fields['port']), open_browser='open_browser' in fields)
-                    if 'cycle_interval_minutes' in fields:
-                        # ASCII digits only; local_settings.validate checks 0-1440 on save.
-                        minutes = fields['cycle_interval_minutes']
-                        if not (minutes.isascii() and minutes.isdigit()):
-                            raise ValueError()
-                        values['cycle_interval_minutes'] = int(minutes)
-                    if 'listen_address' in fields:
-                        values['listen_address'] = fields['listen_address'].strip()
-                    if 'server_names' in fields:
-                        values['server_names'] = local_settings.parse_server_names(fields['server_names'])
-                    if 'certificate_mode' in fields:
-                        values['certificate'] = {'mode': fields['certificate_mode'], 'cert_file': fields.get('cert_file', '').strip(),
-                                                 'key_file': fields.get('key_file', '').strip()}
-                    values = local_settings.validate(values)
-                    try:
-                        if local_settings.exposed(values):
-                            # The running server may already hold this port on loopback, which makes a bind to
-                            # the same port fail; then only the address is checked.
-                            same_port = values['port'] == getattr(self.server, 'server_port', None)
-                            local_settings.check_bindable(values['listen_address'], 0 if same_port else values['port'])
-                        if values['certificate']['mode'] == 'own':
-                            local_settings.check_certificate(values['certificate']['cert_file'], values['certificate']['key_file'])
-                    except ValueError as refusal:
-                        self.send_error(400, f'{refusal}. Nothing was saved.')
-                        return
-                else:
-                    raise ValueError()
+                values = apply_settings_form(values, section, fields,
+                                             running_port=getattr(self.server, 'server_port', None))
                 local_settings.save(config_path, values)
+            except SettingsRefused as refusal:
+                self.send_error(400, str(refusal))
+                return
             except TooManyTasks:
-                self.send_error(400, 'At most 500 scan tasks can be chosen. Nothing was saved.')
+                self.send_error(400, TOO_MANY_TASKS)
                 return
             except (ValueError, UnicodeError):
                 self.send_error(400, 'Invalid preferences. Nothing was saved. Check the endpoint, model, port, and interval.')
@@ -1599,7 +1750,9 @@ def _parser():
     accepting = actions.add_parser('accept', help='Record a risk acceptance that expires')
     accepting.add_argument('finding')
     accepting.add_argument('--ttl', type=int, required=True, metavar='DAYS')
-    accepting.add_argument('--by', required=True, metavar='OWNER_ID')
+    accepting.add_argument('--as', dest='as_email', required=True, metavar='EMAIL',
+                           help='The owner accepting the risk: an active owner account')
+    accepting.add_argument('--by', action=_ByReplaced, help=argparse.SUPPRESS)
     accepting.add_argument('--reason', required=True, metavar='TEXT')
     accepting.add_argument('--cycle', type=_cycle, required=True)
     accepting.add_argument('--approved-by-person', action='store_true',
@@ -1609,7 +1762,9 @@ def _parser():
     approving = commands.add_parser('approve', help='Approve an unreviewed or held decision as a person')
     approving.add_argument('finding')
     approving.add_argument('--cycle', type=_cycle, required=True)
-    approving.add_argument('--by', default='local user', metavar='NAME')
+    approving.add_argument('--as', dest='as_email', required=True, metavar='EMAIL',
+                           help='The person approving: an active account')
+    approving.add_argument('--by', action=_ByReplaced, help=argparse.SUPPRESS)
     serve = commands.add_parser('serve', help='Serve the dashboard and preferences: on loopback, or over HTTPS '
                                               'on the saved listen address')
     serve.add_argument('--demo', action='store_true', help='Show illustrative fixtures instead of saved records')
@@ -1630,20 +1785,83 @@ def _parser():
     commands.add_parser('update-enrichment', help='Download CISA KEV, FIRST EPSS and NVD data into the workspace cache; reaches the internet')
     check = commands.add_parser('check-models', help='Explicitly send the bundled synthetic example to each configured model role')
     check.add_argument('--role', choices=ROLES, help='Check only this role')
+    local_accounts.add_parsers(commands)
+    settings = commands.add_parser('settings', help='Show or change the Settings page values from the server')
+    settings_actions = settings.add_subparsers(dest='settings_action', required=True)
+    settings_actions.add_parser('show', help='Print the settings file as JSON')
+    setting = settings_actions.add_parser(
+        'set', help='Change one section, validated as the Settings page does',
+        description='Nested fields are dotted (certificate.mode=own, proposer.endpoint=URL); lists are '
+                    'comma-separated (server_names=a.example,192.0.2.10); a checkbox takes true or false.')
+    setting.add_argument('section', metavar='SECTION', help='application, model or scanner')
+    setting.add_argument('assignments', nargs='+', metavar='FIELD=VALUE')
     return parser
+
+
+BY_REPLACED = '--by was replaced by --as EMAIL, which must name an account.'
+
+
+class _ByReplaced(argparse.Action):
+    """`--by` is gone from approve and exception accept: name an account with --as instead."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        kwargs.pop('nargs', None)
+        super().__init__(option_strings, dest, nargs='?', **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.exit(2, BY_REPLACED + '\n')
+
+
+def link_origin(preferences):
+    """Where the links the account commands print start: the first server name over HTTPS when
+    the saved listen address is a network one, else this machine's loopback address."""
+    port = preferences['port']
+    if local_settings.exposed(preferences):
+        names = default_server_names(preferences)
+        if names:
+            return f'https://{_host_port(names[0], port)}'
+    return f'http://127.0.0.1:{port}'
 
 
 def _print(value):
     print(json.dumps(value, sort_keys=True, default=str), flush=True)
 
 
-def main():
+ACCOUNTS_UNREADABLE = 'The accounts file could not be read or written. Nothing was changed.'
+
+
+def command_line_account(ws, email, action=None):
+    """The active account `--as` names, allowed `action` (tools.access), as (row, actor);
+    local_accounts.CommandRefused otherwise. Opens the accounts file, as serve does, never
+    through docs_for."""
+    try:
+        row = local_accounts.resolve_as(AccountStore(ws.accounts_path()), email)
+    except sqlite3.Error:
+        raise local_accounts.CommandRefused(ACCOUNTS_UNREADABLE) from None
+    if action == 'accept_risk' and not access.allowed(row['role'], action):
+        raise local_accounts.CommandRefused(f'Only an owner can accept a risk; {row["email"]} is a {row["role"]}.')
+    if action is not None and not access.allowed(row['role'], action):
+        raise local_accounts.CommandRefused(account_views.refusal_sentence('not_allowed'))
+    return row, local_accounts.command_line_actor(row)
+
+
+def main(argv=None):
     parser = _parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     os.umask(0o077)
     try:
         refuse_non_directory(args.database)
         config_path = local_settings.settings_path(args.database)
+        if args.command == 'settings':
+            # The settings file only: the workspace is neither opened nor created.
+            if args.settings_action == 'show':
+                print(json.dumps(settings_shown(config_path), indent=2, sort_keys=True), flush=True)
+                return
+            try:
+                print(settings_set(config_path, args.section, args.assignments), flush=True)
+            except SettingsCommandRefused as refusal:
+                parser.exit(1, f'{refusal}\n')
+            return
         preferences = local_settings.load(config_path)
         if args.command == 'check-models':
             # Reads settings only; writes nothing to the workspace.
@@ -1701,11 +1919,15 @@ def main():
             finally:
                 docs.close()
         elif args.command == 'exception' and args.action == 'accept':
+            try:
+                person, actor = command_line_account(ws, args.as_email, 'accept_risk')
+            except local_accounts.CommandRefused as refusal:
+                parser.exit(1, f'{refusal}\n')
             docs = ws.docs_for('exception_accept')
             try:
                 result = accept(_ports(docs, ws.journal(), clock), args.finding, args.ttl,
-                                args.by, args.reason, args.cycle,
-                                approved_by_human=args.approved_by_person)
+                                person['email'], args.reason, args.cycle,
+                                approved_by_human=args.approved_by_person, actor=actor)
             except NoSuchFinding:
                 parser.exit(1, f'No such finding: {args.finding}. Nothing was written.\n')
             except ValueError:
@@ -1722,9 +1944,13 @@ def main():
             finally:
                 docs.close()
         elif args.command == 'approve':
+            try:
+                person, actor = command_line_account(ws, args.as_email, 'approve')
+            except local_accounts.CommandRefused as refusal:
+                parser.exit(1, f'{refusal}\n')
             ports = approval_ports(ws, clock)
             try:
-                _print({'approval_id': approve(ports, args.finding, args.cycle, args.by),
+                _print({'approval_id': approve(ports, args.finding, args.cycle, person['email'], actor=actor),
                         'finding_id': args.finding, 'cycle': args.cycle})
             except InvalidFindingId as exc:
                 parser.exit(1, f'{exc}\n')
@@ -1740,6 +1966,19 @@ def main():
                 code = greenbone_upload(ws, preferences, os.environ, args.file, cycle, add_task=args.add_task)
             if code:
                 raise SystemExit(code)
+        elif args.command == 'account':
+            # Opened here, as serve opens it: never through docs_for, so no agent stage reaches it.
+            accounts = Accounts(AccountStore(ws.accounts_path()), clock)
+            try:
+                lines = local_accounts.run(args, accounts, link_origin(preferences))
+            except local_accounts.CommandRefused as refusal:
+                parser.exit(1, f'{refusal}\n')
+            except KeyboardInterrupt:
+                parser.exit(1, 'Cancelled. Nothing was changed.\n')
+            except sqlite3.Error:
+                parser.exit(1, ACCOUNTS_UNREADABLE + '\n')
+            for line in lines:
+                print(line, flush=True)
         elif args.command == 'update-enrichment':
             print('This reaches the internet: CISA, FIRST EPSS and NVD.', flush=True)
             result = update_enrichment(ws, os.environ)

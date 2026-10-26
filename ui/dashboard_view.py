@@ -78,7 +78,7 @@ def approve_hint(row, approve_command):
     if not approve_command or row.get("outcome") not in PERSON_APPROVABLE or row.get("person_approval"):
         return ""
     command = (f"{approve_command} approve {shlex.quote(str(row.get('finding_id')))} "
-               f"--cycle {shlex.quote(str(row.get('cycle')))} --by 'Your name'")
+               f"--cycle {shlex.quote(str(row.get('cycle')))} --as you@example.com")
     return (f'<h4>Approve this recommendation</h4><p>No model has independently confirmed it. '
             f'If you have checked it and accept it, run:</p><pre><code>{text(command)}</code></pre>'
             f'<p>The next cycle then assigns it. Your approval is recorded separately; the review record is not changed.</p>')

@@ -204,15 +204,26 @@ def _reason(detail):
     return _REASONS.get(reason, '') if isinstance(reason, str) else ''
 
 
-def _event_row(row, emails):
+#: The Audit trail's columns, in order; `account events` prints the same ones.
+EVENT_COLUMNS = ('time', 'event', 'by', 'account', 'via', 'note')
+
+
+def event_columns(row, emails):
+    """One audit event as the Audit trail shows it, in plain text: EVENT_COLUMNS to values.
+    `emails` maps account ids to emails. Only `_reason` reads the detail, so email_hmac never shows."""
     def person(account_id):
-        return _e(emails.get(account_id, 'unknown account')) if account_id else '—'
+        return emails.get(account_id, 'unknown account') if account_id else '—'
     subject = person(row['subject_id'])
     if row['event'] == 'sign_in_failed' and not row['subject_id']:
         subject = 'no such account'
-    return (f'<tr><td>{_e(utc_time(row["real_ts"]))}</td><td>{_e(_EVENT_NAMES.get(row["event"], row["event"]))}</td>'
-            f'<td>{person(row["actor_id"])}</td><td>{subject}</td><td>{_e(row["via"] or "—")}</td>'
-            f'<td>{_e(_reason(row["detail"]))}</td></tr>')
+    return {'time': utc_time(row['real_ts']), 'event': _EVENT_NAMES.get(row['event'], row['event']),
+            'by': person(row['actor_id']), 'account': subject, 'via': row['via'] or '—',
+            'note': _reason(row['detail'])}
+
+
+def _event_row(row, emails):
+    columns = event_columns(row, emails)
+    return '<tr>' + ''.join(f'<td>{_e(columns[name])}</td>' for name in EVENT_COLUMNS) + '</tr>'
 
 
 def accounts_page(overview, token, *, email, message=''):

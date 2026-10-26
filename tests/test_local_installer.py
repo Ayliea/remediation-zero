@@ -41,3 +41,42 @@ def test_checksums_before_writes_and_reproducible_build(tmp_path):
     import pytest
     with pytest.raises(ValueError, match='damaged'):
         module.unpack()
+
+
+def test_installer_bundle_runs_account_setup(tmp_path):
+    """The installed tree imports what sign-in needs with -S, carries the notices, and runs
+    `account setup` end to end with nothing but the standard library."""
+    import re
+    from tools.clock import ClockMode, SimClock
+    from tools import totp
+    installer = build(tmp_path / 'install.py')
+    destination = tmp_path / 'app'
+    installed = run(installer, destination, '--yes', '--no-start')
+    assert installed.returncode == 0, installed.stderr
+    for name in ('THIRD_PARTY_NOTICES.md', 'NOTICE', 'tools/vendor/QRCODEGEN_LICENSE.txt'):
+        assert (destination / name).is_file(), name
+    probe = subprocess.run([sys.executable, '-S', '-c',
+                            'import tools.accounts, tools.vendor.qrcodegen, tools.server_tls, scripts.local_accounts'],
+                           cwd=destination, capture_output=True, text=True, timeout=20)
+    assert probe.returncode == 0, probe.stderr
+    # No controlling terminal (a new session), so getpass reads the piped stdin.
+    setup = subprocess.Popen([sys.executable, '-S', '-m', 'scripts.local', '--database', str(tmp_path / 'w'),
+                              'account', 'setup'], cwd=destination, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        password = 'quiet orchard sundial lantern'  # synthetic
+        setup.stdin.write(f'owner@client.example\nowner\n{password}\n{password}\n')
+        setup.stdin.flush()
+        shown = ''
+        while 'Key: ' not in shown or not shown.endswith('\n'):
+            line = setup.stdout.readline()
+            assert line, setup.stderr.read()
+            shown += line
+        secret = re.search(r'Key: ([A-Z2-7]+)', shown)[1]
+        out, err = setup.communicate(totp.code_at(secret, totp.step_for(SimClock(ClockMode.REAL).now().real_ts)) + '\n', timeout=60)
+    finally:
+        if setup.poll() is None:
+            setup.kill()
+    assert setup.returncode == 0, err
+    assert len(set(re.findall(r'\b[a-z2-7]{5}-[a-z2-7]{5}\b', out))) == 10
+    assert password not in shown + out + err

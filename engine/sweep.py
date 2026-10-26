@@ -105,13 +105,15 @@ def _decided_severity(ports: Ports, finding_id: str) -> str:
 
 def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
            cycle: int, *, approved_by_human: bool = False,
-           enrichment: Optional[Any] = None) -> str:
+           enrichment: Optional[Any] = None, actor: Optional[dict] = None) -> str:
     """Record one risk acceptance and return the writer's result.
 
     Raises `NoSuchFinding` before anything is written when the finding is
     unknown. Raises `ValueError` when the acceptance is refused; the refusal
     has already been routed to the human queue under its own key.
     `enrichment` defaults to the on-disk cache; KEV membership comes from it.
+    `actor` (the local edition's account) is recorded only when given, so a
+    call without it writes exactly what it always has.
     """
     cycle_id = f"cycle-{cycle:03d}"
     # Typed by a person, so in whatever case: findings are filed under the folded id.
@@ -142,6 +144,7 @@ def accept(ports: Ports, finding_id: str, ttl_days: int, by: str, reason: str,
             reason=reason, ttl_days=ttl_days, in_kev=in_kev,
             approved_by_human=approved_by_human,
             no_cve_severity=no_cve_severity,
+            **({"actor": actor} if actor is not None else {}),
         )
         _log("risk_accepted", cycle_id, finding_id, ttl_days=ttl_days,
              in_kev=in_kev, approved_by_human=approved_by_human,

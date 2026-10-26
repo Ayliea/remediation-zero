@@ -56,10 +56,10 @@ python3 -S -m scripts.local seed --corpus DIR        # load findings, assets, ow
 python3 -S -m scripts.local cycle --cycle N          # triage, chase, sweep, report
 python3 -S -m scripts.local rescan --cycle N --scan PATH --dry-run   # what would close
 python3 -S -m scripts.local rescan --cycle N --scan PATH             # apply it
-python3 -S -m scripts.local exception accept FINDING --ttl DAYS --by OWNER_ID \
+python3 -S -m scripts.local exception accept FINDING --ttl DAYS --as OWNER_EMAIL \
     --reason TEXT --cycle N [--approved-by-person]
 python3 -S -m scripts.local exception list
-python3 -S -m scripts.local approve FINDING --cycle N [--by NAME]
+python3 -S -m scripts.local approve FINDING --cycle N --as EMAIL
 python3 -S -m scripts.local serve [--demo] [--port PORT]
 python3 -S -m scripts.local check-models [--role ROLE]
 python3 -S -m scripts.local update-enrichment
@@ -67,6 +67,17 @@ python3 -S -m scripts.local greenbone tasks
 python3 -S -m scripts.local greenbone test
 python3 -S -m scripts.local greenbone pull [--cycle N]
 python3 -S -m scripts.local greenbone upload FILE [--add-task] [--cycle N]
+python3 -S -m scripts.local account setup             # the first account, on this server
+python3 -S -m scripts.local account invite --email E --role owner|tech --as EMAIL
+python3 -S -m scripts.local account list
+python3 -S -m scripts.local account set-role EMAIL owner|tech --as EMAIL
+python3 -S -m scripts.local account remove EMAIL --as EMAIL
+python3 -S -m scripts.local account reset-password EMAIL --as EMAIL
+python3 -S -m scripts.local account reset-mfa EMAIL --as EMAIL
+python3 -S -m scripts.local account events [--limit N]
+python3 -S -m scripts.local account recover-owner --email E [--promote]
+python3 -S -m scripts.local settings show
+python3 -S -m scripts.local settings set SECTION FIELD=VALUE...
 ```
 
 Only `cycle` and `check-models` call a model, and a hosted endpoint may charge
@@ -94,9 +105,15 @@ before it creates or writes anything.
   resolves a finding.
 - **exception accept** records a risk acceptance that expires after `--ttl`
   days; the sweep in the next `cycle` past expiry reopens it. A KEV CVE needs
-  `--approved-by-person`.
+  `--approved-by-person`. `--as` must name an active owner account; a tech is
+  refused with `Only an owner can accept a risk; EMAIL is a tech.` and nothing
+  is written.
 - **approve** records a person's approval of an `unreviewed` or
-  `held_for_approval` decision. See "Review" below.
+  `held_for_approval` decision. `--as` names an active account, owner or
+  tech. See "Review" below.
+- `--by` is gone from both: using it exits 2 with
+  `--by was replaced by --as EMAIL, which must name an account.`
+- **account** and **settings**: see "Sign-in and remote access" below.
 - **serve** shows the dashboard and Settings on `http://127.0.0.1:8081` (the
   saved port; `--port` overrides it). With
   `--demo` it shows illustrative fixtures instead of saved records. Its first
@@ -216,6 +233,84 @@ a client that connects and sends nothing does not hold up anyone else; a
 failed handshake is logged as `tls_handshake_failed` with its error class
 only.
 
+## Sign-in and remote access
+
+Every dashboard page and form needs a signed-in account: an email, a
+password (12 to 128 characters, not on the bundled list of breached
+passwords) and a six-digit code from an authenticator app. Ten recovery codes
+are shown once, at setup; each signs in once in place of a code.
+
+- **First account.** Only while no account exists, and only on the server
+  itself: `account setup` asks for the email, whether you are the business
+  owner (`owner`) or an IT provider setting it up for a client (`tech`), and
+  the password twice (never echoed). It prints the authenticator key and an
+  `otpauth://` link, asks for a code, then prints the recovery codes. The
+  setup page does the same in a browser on `http://127.0.0.1:PORT`, but only
+  while the server listens on loopback with no `--public-url`. With any
+  account present, `account setup` refuses with
+  `An account already exists, so the first account cannot be created again.`
+- **Invites.** An owner invites people (`account invite --email E --role
+  owner|tech --as EMAIL`, or the Accounts page). Before any owner has joined,
+  the installing tech may invite the owner, and nothing else. The link is
+  shown once; it works once, expires after 7 days and can be revoked. The
+  person opening it sets a password and an authenticator.
+- **Roles.** An owner does everything, and is the only role that can accept a
+  risk, manage accounts or read the audit trail. A tech works the findings,
+  uploads reports, approves held decisions and changes Settings. The last
+  active owner cannot be removed or made a tech.
+- **Resets and recovery.** An owner can make a one-time link for someone else
+  to set a new password (`account reset-password EMAIL --as EMAIL`) or a new
+  authenticator (`account reset-mfa EMAIL --as EMAIL`), and can remove an
+  account. A tech cannot reset anyone. When no owner can sign in,
+  `account recover-owner --email E` on the server clears that owner's
+  password and authenticator, ends their sessions and prints a link to set new
+  ones; for a tech it does so only with `--promote`, which makes them owner.
+  It never creates an account. Every one of these is recorded in the audit
+  trail (`account events [--limit N]`, 1 to 1000, default 50, or the Accounts
+  page), which never holds passwords, codes, tokens or secrets.
+- **Links** printed by the commands start with `https://<first server
+  name>:<port>` when the saved listen address is a network one, and
+  `http://127.0.0.1:<port>` otherwise. Behind a proxy (`--public-url`), which
+  is not saved, replace that start with the proxy's address before sending
+  the link. Links go to the terminal only, never to a log.
+- **HTTPS.** A network listen address always serves HTTPS (see "HTTPS on a
+  network address"): a self-signed certificate whose SHA-256 fingerprint
+  `serve` prints and Settings shows, so people can check the browser warning
+  is for this server; or your own certificate and key; or keep listening on
+  loopback and put an HTTPS proxy in front with `--public-url`.
+- **Settings over SSH.** `settings show` prints the settings file as JSON
+  (it holds no secrets; API keys and Greenbone credentials live only in the
+  environment). `settings set SECTION FIELD=VALUE...` changes the
+  `application`, `model` or `scanner` section through the Settings page's own
+  validation, including the certificate pair check and the bind check for a
+  network listen address. Nested fields are dotted (`certificate.mode=own`,
+  `certificate.cert_file=/path`, `proposer.endpoint=URL`), lists are
+  comma-separated (`server_names=rz.example.test,192.0.2.10`, `task_ids=...`)
+  and a checkbox takes `true` or `false`. A change of listen address, names
+  or certificate prints
+  `Saved. Restart Remediation Zero for listen address, names or certificate changes to take effect.`
+  If a change leaves the dashboard unreachable, `settings set` on the server
+  is the way back.
+- **`--as` on the command line.** Commands that change records take
+  `--as EMAIL`, which must name an active account, and act with that
+  account's role (a tech cannot remove anyone; only an owner can accept a
+  risk). There is no password prompt, re-confirm or lockout there, because
+  shell access to the server already reaches every file in the workspace.
+  So the record says what is known: an approval or acceptance made this way
+  carries `actor = {"via": "command_line", "account_id": ..., "verified":
+  false}`, and account events say `via: command_line`. "Not verified" means
+  the command named that account; nobody signed in as it. The dashboard
+  records `{"via": "dashboard", ..., "verified": true}`. Records made before
+  sign-in have no `actor`, and the dashboard says "recorded before sign-in".
+- **Where accounts live.** `accounts.sqlite3` in the workspace (0600; the
+  folder is 0700) holds accounts, hashed passwords, hashed recovery codes,
+  hashed link and session tokens, and the audit trail. TOTP secrets are stored
+  as they are: the standard library has no encryption, and whoever can read
+  the file can already read every record. The file is outside every agent
+  stage's store by construction: only workspace creation, the dashboard server
+  and the `account` and `--as` commands open it, never through an agent's docstore, so no stage
+  can read or write it.
+
 ## Model roles
 
 There are four roles. Configure each in Settings with a format
@@ -307,7 +402,7 @@ Every decision records how independent its review was:
 A held or unreviewed decision is not assigned until a person approves it:
 
 ```bash
-python3 -S -m scripts.local approve RZ-0002 --cycle 2 --by "Your name"
+python3 -S -m scripts.local approve RZ-0002 --cycle 2 --as you@example.com
 ```
 
 The approval is its own record. The decision keeps its outcome, models and
@@ -427,8 +522,9 @@ model.
 
 Settings stores each role's connection, the same-family policy and the startup
 preferences in `<workspace>.settings.json` beside the workspace folder. Saving
-never contacts a provider. Saves require a valid Host, a matching Origin and a
-per-process form token. Writes are atomic and private (0600 on POSIX). There is
+never contacts a provider. Saves require a signed-in session confirmed in the
+last 5 minutes, a valid Host, a matching Origin and the session's form token;
+`settings set` on the server applies the same checks to the values. Writes are atomic and private (0600 on POSIX). There is
 no API key field and no database reset control. This is local access control,
 not authentication for public use.
 
