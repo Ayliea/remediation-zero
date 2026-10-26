@@ -77,7 +77,7 @@ _SCHEMA = (
 # contains one of the words in _SECRET_WORDS is refused even if added here.
 ALLOWED_DETAIL_KEYS = frozenset({
     "from", "to", "role", "kind", "reason", "email", "count", "outcome",
-    "locked_until", "invite_kind", "mfa", "method",
+    "locked_until", "invite_kind", "mfa", "method", "email_sha256",
 })
 _SECRET_WORDS = ("password", "code", "token", "secret", "totp", "session", "csrf", "hash")
 
@@ -188,8 +188,20 @@ class AccountStore:
         return cur.execute("SELECT * FROM invites WHERE token_hash = ?",
                            (token_hash,)).fetchone()
 
-    def spend_recovery_code(self, account_id: str, code_hash: str) -> bool:
-        with self.transaction() as cur:
-            cur.execute("UPDATE recovery_codes SET spent = 1 WHERE account_id = ? "
-                        "AND code_hash = ? AND spent = 0", (account_id, code_hash))
-            return cur.rowcount == 1
+    def spend_recovery_code(self, account_id: str, code_hash: str,
+                            cur: Optional[sqlite3.Cursor] = None) -> bool:
+        """Spend an unspent recovery code; True exactly once.
+
+        With `cur`, the spend happens inside the caller's transaction (as for
+        `spend_invite`), so a later failure there leaves the code unspent.
+        """
+        if cur is not None:
+            return self._spend_code(cur, account_id, code_hash)
+        with self.transaction() as own:
+            return self._spend_code(own, account_id, code_hash)
+
+    @staticmethod
+    def _spend_code(cur: sqlite3.Cursor, account_id: str, code_hash: str) -> bool:
+        cur.execute("UPDATE recovery_codes SET spent = 1 WHERE account_id = ? "
+                    "AND code_hash = ? AND spent = 0", (account_id, code_hash))
+        return cur.rowcount == 1

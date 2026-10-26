@@ -1,7 +1,8 @@
 # Copyright 2026 Daviyon Daniels
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
-"""Local accounts: the first account, invites, resets, roles and removal.
+"""Local accounts: the first account, invites, resets, roles, removal,
+sign-in, sessions, lockout and re-confirmation.
 
 The rules live here; `tools.account_store` only stores rows and
 `tools.access` holds the permission table. Every mutation reads what it checks
@@ -24,14 +25,33 @@ resolve; their email is not invited again (`email_taken`). An `invited`
 account whose links have all expired or been revoked may be invited again,
 reusing its row.
 
+Sign-in has one failure path. An unknown email, an invited or removed
+account, a locked account, a wrong password and a wrong code all return None,
+write one `sign_in_failed` event of the same shape, and run exactly one scrypt
+(`passwords.verify(pw, None)` when there is no hash to check against). For an
+email with no account the event names nobody and carries only
+`email_sha256`, the SHA-256 of the email as typed (stripped, lowercased).
+Every guess at a known, active account is reserved against the lockout before
+it is verified (`_reserve_attempt`, shared with reset links and re-confirm),
+so parallel guesses cannot exceed LOCK_AFTER and all three share one counter.
+
+Sessions: a 256-bit token, stored only as its SHA-256; a per-session CSRF
+token; idle IDLE_SECONDS and absolute ABSOLUTE_SECONDS. `session()` reads the
+account row on every call, so a removed account's sessions end and a changed
+role applies on the next request even if it was written by another path.
+
 Standard library only.
 """
 
 import hashlib
 import json
 import logging
+import math
 import secrets
 import sqlite3
+import threading
+import time
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -52,6 +72,11 @@ _MAX_EMAIL = 254
 LOCK_AFTER = 5
 LOCK_WINDOW = 15 * 60
 LOCK_SECONDS = 15 * 60
+# Sessions and re-confirmation, runtime security timers on the same wall clock.
+IDLE_SECONDS = 30 * 60
+ABSOLUTE_SECONDS = 12 * 3600
+CONFIRM_SECONDS = 5 * 60
+_VIA = "dashboard"
 
 
 def _is_locked(row: sqlite3.Row, now: float) -> bool:
@@ -70,6 +95,21 @@ class AccountRefused(Exception):
         super().__init__(code)
         self.code = code
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class Session:
+    """A live session. `role` is the account's role as of this request and
+    `confirmed` is True while a re-confirmation (CONFIRM_SECONDS) lasts."""
+    account_id: str
+    email: str
+    role: str
+    csrf: str
+    confirmed: bool
+
+
+class _Failed(Exception):
+    """Internal: roll back a sign-in or confirm transaction."""
 
 
 @dataclass(frozen=True)
@@ -498,6 +538,175 @@ class Accounts:
             self._event(cur, "removed", actor["id"], account_id, via, source, detail, stamp)
         _log("removed", actor["id"], account_id, via, detail)
 
+    # --- sign-in and sessions ---------------------------------------------
+
+    def sign_in(self, email: str, password: str, code: str,
+                source: Optional[str]) -> Optional[str]:
+        """Email, password and a TOTP code (or one unspent recovery code in its
+        place). Returns a new raw session token, or None for every failure
+        alike; see the module docstring for the single failure path."""
+        typed = email.strip().lower() if isinstance(email, str) else ""
+        pw = password if isinstance(password, str) else ""
+        now = self._now()
+        try:
+            row = self.store.account_by_email(normalise_email(email))
+        except ValueError:
+            row = None
+        account_id = row["id"] if row is not None else None
+        usable = (row is not None and row["status"] == "active"
+                  and row["password_hash"] is not None)
+        if not usable or not self._reserve_attempt(account_id, now, _VIA, source,
+                                                   method="sign_in"):
+            passwords.verify(pw, None)           # the same one scrypt
+            return self._sign_in_failed(account_id, typed, source)
+        pw_ok = passwords.verify(pw, row["password_hash"])
+        secret = row["totp_secret"]
+        step = (totp.match(secret, code, now, row["last_totp_step"])
+                if secret and isinstance(code, str) else None)
+        code_hash = None
+        if step is None and isinstance(code, str) and code.strip():
+            code_hash = passwords.recovery_hash(code)
+        if not pw_ok or (step is None and code_hash is None):
+            return self._sign_in_failed(account_id, typed, source)
+
+        token = secrets.token_urlsafe(32)            # 256 bits
+        csrf = secrets.token_urlsafe(32)
+        method = "totp" if step is not None else "recovery_code"
+        detail = {"method": method}
+        stamp = self.clock.now()
+        try:
+            with self.store.transaction() as cur:
+                fresh = self._account(cur, account_id)
+                if (fresh is None or fresh["status"] != "active"
+                        or fresh["password_hash"] != row["password_hash"]
+                        or fresh["totp_secret"] != secret):
+                    raise _Failed
+                if step is not None:
+                    if fresh["last_totp_step"] is not None and step <= fresh["last_totp_step"]:
+                        raise _Failed                 # the code was used meanwhile
+                    cur.execute("UPDATE accounts SET last_totp_step = ? WHERE id = ?",
+                                (step, account_id))
+                elif not self.store.spend_recovery_code(account_id, code_hash, cur=cur):
+                    raise _Failed
+                self._clear_attempts(cur, account_id)
+                cur.execute("INSERT INTO sessions (token_hash, account_id, csrf, created_at, "
+                            "last_seen, confirmed_until) VALUES (?,?,?,?,?,NULL)",
+                            (_token_hash(token), account_id, csrf, now, now))
+                self._event(cur, "sign_in", account_id, account_id, _VIA, source, detail,
+                            stamp)
+        except _Failed:
+            return self._sign_in_failed(account_id, typed, source)
+        _log("sign_in", account_id, account_id, _VIA, detail)
+        return token
+
+    def _sign_in_failed(self, account_id: Optional[str], typed: str,
+                        source: Optional[str]) -> None:
+        """The one failure record: names the account when one exists, else only
+        the SHA-256 of the email as typed."""
+        detail = (None if account_id is not None else
+                  {"email_sha256": hashlib.sha256(typed.encode("utf-8")).hexdigest()})
+        stamp = self.clock.now()
+        self.store.insert_event("sign_in_failed", None, account_id, _VIA, source, detail,
+                                real_ts=stamp.real_ts, sim_ts=stamp.sim_ts)
+        _log("sign_in_failed", None, account_id, _VIA, detail)
+        return None
+
+    def session(self, token: Optional[str]) -> Optional[Session]:
+        """The live session for `token`, touching `last_seen`; else None.
+
+        An idle, expired, or orphaned session (its account removed or no longer
+        active) is deleted. The role is read from the account row now."""
+        if not isinstance(token, str) or not token:
+            return None
+        th = _token_hash(token)
+        now = self._now()
+        with self.store.transaction() as cur:
+            row = cur.execute("SELECT * FROM sessions WHERE token_hash = ?", (th,)).fetchone()
+            if row is None:
+                return None
+            acct = self._account(cur, row["account_id"])
+            if (now - row["last_seen"] >= IDLE_SECONDS
+                    or now - row["created_at"] >= ABSOLUTE_SECONDS
+                    or acct is None or acct["status"] != "active"):
+                cur.execute("DELETE FROM sessions WHERE token_hash = ?", (th,))
+                return None
+            cur.execute("UPDATE sessions SET last_seen = ? WHERE token_hash = ?", (now, th))
+        until = row["confirmed_until"]
+        return Session(acct["id"], acct["email"], acct["role"], row["csrf"],
+                       until is not None and until > now)
+
+    def sign_out(self, token: Optional[str], *, source: Optional[str] = None) -> None:
+        """End this session. Unknown or already-ended tokens are ignored."""
+        if not isinstance(token, str) or not token:
+            return
+        th = _token_hash(token)
+        stamp = self.clock.now()
+        with self.store.transaction() as cur:
+            row = cur.execute("SELECT account_id FROM sessions WHERE token_hash = ?",
+                              (th,)).fetchone()
+            if row is None:
+                return
+            cur.execute("DELETE FROM sessions WHERE token_hash = ?", (th,))
+            account_id = row["account_id"]
+            self._event(cur, "sign_out", account_id, account_id, _VIA, source, None, stamp)
+        _log("sign_out", account_id, account_id, _VIA, None)
+
+    def confirm(self, token: Optional[str], password: Optional[str] = None,
+                code: Optional[str] = None, *, source: Optional[str] = None) -> bool:
+        """Re-confirm a live session with its password or a fresh TOTP code
+        (exactly one); on success it is confirmed for CONFIRM_SECONDS.
+
+        Each attempt is reserved against the account's lockout before it is
+        verified, as sign-in's are; a locked account cannot confirm."""
+        if (password is None) == (code is None):
+            return False
+        live = self.session(token)
+        if live is None:
+            return False
+        now = self._now()
+        row = self.store.account_by_id(live.account_id)
+        if row is None or not self._reserve_attempt(row["id"], now, _VIA, source,
+                                                    method="confirm"):
+            if password is not None:
+                passwords.verify(password if isinstance(password, str) else "", None)
+            return False
+        step = None
+        if password is not None:
+            ok = isinstance(password, str) and passwords.verify(password, row["password_hash"])
+        else:
+            step = (totp.match(row["totp_secret"], code, now, row["last_totp_step"])
+                    if row["totp_secret"] and isinstance(code, str) else None)
+            ok = step is not None
+        if not ok:
+            return False
+        th = _token_hash(token)
+        try:
+            with self.store.transaction() as cur:
+                sess = cur.execute("SELECT account_id FROM sessions WHERE token_hash = ?",
+                                   (th,)).fetchone()
+                fresh = self._account(cur, row["id"])
+                if (sess is None or sess["account_id"] != row["id"] or fresh is None
+                        or fresh["status"] != "active"
+                        or fresh["password_hash"] != row["password_hash"]
+                        or fresh["totp_secret"] != row["totp_secret"]):
+                    raise _Failed
+                if step is not None:
+                    if fresh["last_totp_step"] is not None and step <= fresh["last_totp_step"]:
+                        raise _Failed
+                    cur.execute("UPDATE accounts SET last_totp_step = ? WHERE id = ?",
+                                (step, row["id"]))
+                self._clear_attempts(cur, row["id"])
+                cur.execute("UPDATE sessions SET confirmed_until = ? WHERE token_hash = ?",
+                            (now + CONFIRM_SECONDS, th))
+        except _Failed:
+            return False
+        return True
+
+    @staticmethod
+    def actor_for(session: Session) -> dict[str, Any]:
+        """The `actor` a browser action records: verified, via the dashboard."""
+        return {"via": _VIA, "account_id": session.account_id, "verified": True}
+
     # --- helpers (all take the transaction's cursor) ---------------------
 
     @staticmethod
@@ -660,3 +869,41 @@ class Accounts:
                detail: Optional[dict[str, Any]], stamp: Stamp) -> None:
         self.store.insert_event(event, actor_id, subject_id, via, source, detail,
                                 real_ts=stamp.real_ts, sim_ts=stamp.sim_ts, cur=cur)
+
+
+class RateLimiter:
+    """Per-source sign-in attempts, in memory: `per_minute` in any sliding
+    60 seconds. `hit(source)` returns None when allowed, else the Retry-After
+    seconds. A refused hit is not counted. At most `max_sources` sources are
+    kept; the least recently seen is evicted first. Thread-safe. `now` is a
+    monotonic clock: this is a runtime timer and is never persisted."""
+
+    WINDOW = 60.0
+
+    def __init__(self, per_minute: int = 10, now: Callable[[], float] = time.monotonic,
+                 max_sources: int = 10_000) -> None:
+        self.per_minute = per_minute
+        self.max_sources = max_sources
+        self._now = now
+        self._hits: "OrderedDict[str, deque[float]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._hits)
+
+    def hit(self, source: str) -> Optional[int]:
+        with self._lock:
+            t = self._now()
+            q = self._hits.get(source)
+            if q is None:
+                q = self._hits[source] = deque()
+                while len(self._hits) > self.max_sources:
+                    self._hits.popitem(last=False)
+            else:
+                self._hits.move_to_end(source)
+            while q and t - q[0] >= self.WINDOW:
+                q.popleft()
+            if len(q) >= self.per_minute:
+                return max(1, math.ceil(q[0] + self.WINDOW - t))
+            q.append(t)
+            return None
