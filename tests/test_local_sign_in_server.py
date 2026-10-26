@@ -1132,11 +1132,37 @@ def test_a_tampered_invite_secret_is_refused(start, signed_in):
     mine = totp.new_secret()          # a secret the attacker knows, with the page's MAC
     signed_in.now.tick()
     base = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(mine, signed_in.now)}
+    # A well-formed secret and MAC that do not verify read as an expired page; nothing says why.
     for extra in ({'secret': mine, 'secret_mac': form_value(body, 'secret_mac')},
-                  {'secret': mine},
                   {'secret': _secret_of(body), 'secret_mac': '0' * 64}):
         response, text = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode({**base, **extra}))
+        assert response.status == 400 and EXPIRED in text and 'Invalid form.' not in text
+    # A missing or malformed one is an invalid form.
+    for extra in ({'secret': mine}, {'secret': 'short', 'secret_mac': '0' * 64},
+                  {'secret': mine, 'secret_mac': 'not hex'}):
+        response, text = server.request('POST', f'/invite/{link}', cookie=pre, body=urlencode({**base, **extra}))
         assert response.status == 400 and 'Invalid form.' in text
+    assert accounts.store.account_by_email('new@client.example')['status'] == 'invited'
+
+
+EXPIRED = 'This page has expired. Open the link again.'
+
+
+def test_a_page_from_before_a_restart_says_it_has_expired(start, signed_in):
+    accounts = signed_in.accounts
+    link = accounts.invite(account_id(accounts, OWNER), 'new@client.example', 'tech')
+    before = start(accounts)
+    pre, value, body = open_form(before, f'/invite/{link}')
+    after = start(accounts)                       # a new process key: the old page's MAC is stale
+    secret = _secret_of(body)
+    signed_in.now.tick()
+    fields = {'pre': value, 'password': 'amber pelican lighthouse', 'code': code_for(secret, signed_in.now),
+              'secret': secret, 'secret_mac': form_value(body, 'secret_mac')}
+    # The pre-session cookie is also per process, so carry a fresh one from the new server.
+    fresh_pre, fresh_value, _ = open_form(after, f'/invite/{link}')
+    fields['pre'] = fresh_value
+    response, text = after.request('POST', f'/invite/{link}', cookie=fresh_pre, body=urlencode(fields))
+    assert response.status == 400 and EXPIRED in text
     assert accounts.store.account_by_email('new@client.example')['status'] == 'invited'
 
 

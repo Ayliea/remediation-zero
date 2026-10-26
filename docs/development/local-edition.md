@@ -246,7 +246,8 @@ nothing, or trickles a byte at a time, is cut off then and does not hold up
 anyone else. At most 64 connections are served at once, on every listener
 (loopback too). Of those, 16 are kept for loopback (the server itself and a
 proxy such as Tailscale Serve), so other machines together hold at most 48,
-and any one other address at most 16; loopback has no per-address cap,
+and any one other address at most 16 (an IPv6 address counts under its
+/64, since one host can rotate through those); loopback has no per-address cap,
 since a proxy brings everyone in through 127.0.0.1. A connection over a cap
 is closed as soon as it is accepted and logged as `connection_refused` with
 the reason only, never the address. Each connection carries one request. A failed
@@ -276,7 +277,9 @@ are shown once, at setup; each signs in once in place of a code.
   is opened it shows a new authenticator key, and the one on the page that is
   submitted is the one set up; no key is stored for a link, so something that
   fetched the link first (a mail scanner, a chat preview) never holds the
-  account's second factor. A removed person can be invited again: their
+  account's second factor. A page opened before the server restarted no
+  longer saves; it says "This page has expired. Open the link again." A
+  removed person can be invited again: their
   account comes back with the same id, so older records still name them, and
   the audit trail says "invited again after being removed".
 - **Roles.** An owner does everything, and is the only role that can accept a

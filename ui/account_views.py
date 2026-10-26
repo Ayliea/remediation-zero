@@ -114,6 +114,12 @@ def invite_page(pre, kind, email, role, secret, uri, qr, message='', secret_mac=
     return page(_INVITE_TITLES.get(kind, 'Join Remediation Zero'), body)
 
 
+def expired_page():
+    """A link page's form that no longer verifies, most often after a restart."""
+    return page('This page has expired', '<section class="card account-card"><p>This page has expired. '
+                                          'Open the link again.</p></section>')
+
+
 def invalid_link_page():
     return page('This link does not work', '<section class="card account-card"><p>The link has been used, has expired, '
                                            'or was revoked. Ask the person who sent it for a new one.</p></section>')

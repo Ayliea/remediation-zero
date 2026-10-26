@@ -75,6 +75,7 @@ COOKIE_LIMIT = 4096
 #: page, so it names no workspace path: DIR stands for the --database the server was started with.
 SETUP_COMMAND = 'python3 -S -m scripts.local --database DIR account setup'
 _SECRET_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZ234567')
+_HEX_CHARS = frozenset('0123456789abcdef')
 _TOKEN_CHARS = frozenset('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_')
 
 #: Where re-confirm may send someone back to: a closed set, never a client-supplied URL.
@@ -182,9 +183,14 @@ class SecretSeals:
         body = hashlib.sha256(token.encode()).hexdigest() + secret   # token hash || secret
         return hmac.new(self._key, body.encode(), hashlib.sha256).hexdigest()
 
+    @staticmethod
+    def well_formed(secret, mac):
+        """A secret as totp.new_secret makes them and a MAC of 64 lower-case hex digits."""
+        return (isinstance(secret, str) and len(secret) == 32 and set(secret) <= _SECRET_CHARS
+                and isinstance(mac, str) and len(mac) == 64 and set(mac) <= _HEX_CHARS)
+
     def valid(self, token, secret, mac):
-        if not (isinstance(secret, str) and len(secret) == 32 and set(secret) <= _SECRET_CHARS
-                and isinstance(mac, str) and len(mac) == 64 and mac.isascii()):
+        if not self.well_formed(secret, mac):
             return False
         return hmac.compare_digest(mac, self.seal(token, secret))
 
@@ -457,9 +463,14 @@ class AuthRoutes:
         secret = None
         if view.kind != 'reset_password':
             # The secret this page showed, sealed for this link; nothing else is ever enrolled.
-            secret = fields.get('secret')
-            if not self.seals.valid(token, secret, fields.get('secret_mac')):
+            secret, mac = fields.get('secret'), fields.get('secret_mac')
+            if not self.seals.well_formed(secret, mac):
                 h.send_error(400, 'Invalid form.')
+                return
+            if not self.seals.valid(token, secret, mac):
+                # Most often the server restarted since the page was opened (a new key). The
+                # same answer for a changed secret: nothing says which.
+                h.send_page(account_views.expired_page(), 400)
                 return
         password = self._capped(fields.get('password'))
         current = self._capped(fields.get('current_password'))
