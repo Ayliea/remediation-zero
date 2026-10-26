@@ -11,12 +11,14 @@ import errno
 import http.client
 import io
 import logging
+import os
 import shlex
 import shutil
 import socket
 import ssl
 import threading
 import time
+from http.server import BaseHTTPRequestHandler
 from types import SimpleNamespace
 
 import pytest
@@ -606,3 +608,146 @@ def test_a_peer_over_its_cap_is_closed_on_the_listener_and_logged_without_its_ad
         held.close()
     refused = [r.getMessage() for r in caplog.records if 'connection_refused' in r.getMessage()]
     assert refused and all('too_many_from_one_address' in m and '127.0.0.1' not in m for m in refused)
+
+
+# --- second follow-up: every counted connection gives its slot back, once (C1) -------------
+
+
+class _Plain200(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/boom':
+            raise RuntimeError('synthetic handler failure')
+        self.send_response(200)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def _counts(server):
+    slots = server._slots
+    return slots._all, slots._remote, dict(slots._by_peer)
+
+
+def _settled(server, limit=8):
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline and _counts(server) != (0, 0, {}):
+        time.sleep(0.05)
+    return _counts(server)
+
+
+@pytest.fixture
+def bare_server(fake_endpoints, monkeypatch):
+    """A DashboardServer with a trivial handler; the test client counts as a network peer."""
+    monkeypatch.setattr(local, '_is_loopback_peer', lambda peer: False)
+    running = []
+
+    def run(tls_context=None):
+        server = local.DashboardServer(('127.0.0.1', 0), _Plain200, tls_context=tls_context)
+        fake_endpoints.tcp(server.socket)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        running.append(server)
+        return server
+
+    yield run
+    for server in running:
+        server.shutdown()
+        server.server_close()
+
+
+class _ResetDuringWrap:
+    """What CPython's SSLSocket._create does on a reset: it has already detached the raw
+    socket (so its fileno() is -1) when getpeername()/recv raises ConnectionResetError."""
+
+    def wrap_socket(self, raw, **kwargs):
+        os.close(raw.detach())
+        raise ConnectionResetError(104, 'synthetic reset')
+
+
+@needs_openssl
+def test_a_reset_during_the_tls_wrap_gives_its_slot_back(bare_server, monkeypatch, tmp_path):
+    server = bare_server(tls_context=_ResetDuringWrap())
+    for _ in range(local.MAX_PEER_CONNECTIONS + 4):          # well past the per-address cap
+        with socket.create_connection(('127.0.0.1', server.server_port), timeout=5) as sock:
+            try:
+                sock.recv(1)
+            except OSError:
+                pass
+    assert _settled(server) == (0, 0, {})
+    # The same listener, now with a working certificate, serves that address normally.
+    cert, key = server_tls.ensure_self_signed(tmp_path, [NAME])
+    server.tls_context = server_tls.server_context(cert, key)
+    context = ssl.create_default_context(cafile=str(cert))
+    context.check_hostname = False
+    conn = http.client.HTTPSConnection('127.0.0.1', server.server_port, timeout=10, context=context)
+    conn.request('GET', '/')
+    assert conn.getresponse().status == 200
+    conn.close()
+    assert _settled(server) == (0, 0, {})
+
+
+@needs_openssl
+def test_every_exit_path_releases_once(bare_server, monkeypatch, tmp_path):
+    monkeypatch.setattr(local, 'HEADER_SECONDS', 1)
+    cert, key = server_tls.ensure_self_signed(tmp_path, [NAME])
+    server = bare_server(tls_context=server_tls.server_context(cert, key))
+    gives, real_give = [], server._slots.give
+
+    def give(peer):
+        real_give(peer)
+        gives.append(_counts(server))
+
+    server._slots.give = give
+    port = server.server_port
+    context = ssl.create_default_context(cafile=str(cert))
+    context.check_hostname = False
+
+    def tls_get(path):
+        conn = http.client.HTTPSConnection('127.0.0.1', port, timeout=10, context=context)
+        try:
+            conn.request('GET', path)
+            return conn.getresponse().status
+        except (OSError, http.client.HTTPException):
+            return None
+        finally:
+            conn.close()
+
+    with socket.create_connection(('127.0.0.1', port), timeout=5) as sock:     # a failed handshake
+        sock.sendall(b'\x16\x03\x01\x00\x05hello')
+        try:
+            sock.recv(1)
+        except OSError:
+            pass
+    with socket.create_connection(('127.0.0.1', port), timeout=5) as sock:     # plain HTTP to TLS
+        sock.sendall(b'GET / HTTP/1.0\r\n\r\n')
+        try:
+            sock.recv(1)
+        except OSError:
+            pass
+    with socket.create_connection(('127.0.0.1', port), timeout=5) as sock:     # a timeout
+        try:
+            sock.recv(1)
+        except OSError:
+            pass
+    assert tls_get('/') == 200                                                 # a normal end
+    assert tls_get('/boom') != 200                                             # the handler raises
+    assert _settled(server) == (0, 0, {})
+    assert len(gives) == 5                                                     # once per connection
+    assert all(total >= 0 and remote >= 0 and all(n > 0 for n in peers.values())
+               for total, remote, peers in gives)
+
+
+# --- second follow-up: an IPv6 peer is counted by its /64 -------------------------------
+
+
+def test_ipv6_peers_are_counted_by_their_slash_64():
+    slots = local._ConnectionSlots(total=64, loopback_reserved=16, per_peer=16)
+    assert all(slots.take(f'2001:db8:1:2::{n:x}') for n in range(1, 17))   # 16 addresses, one /64
+    assert not slots.take('2001:db8:1:2:ffff::1')                           # rotating within it
+    assert slots.take('2001:db8:1:3::1')                                    # the next /64 is another peer
+    assert local._peer_key('2001:db8:1:2::5') == '2001:db8:1:2::/64'
+    # IPv4 and IPv4-mapped stay per address; loopback is unchanged.
+    assert local._peer_key('::ffff:192.0.2.10') == '192.0.2.10' == local._peer_key('192.0.2.10')
+    assert local._peer_key('::1') == '::1'
+    assert all(slots.take('::1') for _ in range(16))

@@ -324,17 +324,24 @@ MAX_PEER_CONNECTIONS = 16
 
 
 def _peer_key(address):
-    """The address a connection is counted under: IPv4-mapped IPv6 as IPv4, no scope ID."""
+    """What a connection is counted under: an IPv4 address (IPv4-mapped IPv6 included) or a
+    loopback address as itself, any other IPv6 address as its /64, since one host can rotate
+    through the addresses of its /64 at will. No scope ID."""
     text = str(address).split('%', 1)[0]
     try:
         ip = ipaddress.ip_address(text)
     except ValueError:
         return text
     mapped = getattr(ip, 'ipv4_mapped', None)
-    return str(mapped or ip)
+    if mapped is not None:
+        return str(mapped)
+    if ip.version == 6 and not ip.is_loopback:
+        return str(ipaddress.ip_network(f'{ip}/64', strict=False))
+    return str(ip)
 
 
 def _is_loopback_peer(peer):
+    """`peer` is a `_peer_key`: an address, or an IPv6 /64 (never loopback)."""
     try:
         return ipaddress.ip_address(peer).is_loopback
     except ValueError:
@@ -412,9 +419,9 @@ class DashboardServer(ThreadingHTTPServer):
     The handler still runs requests one at a time.
 
     At most MAX_CONNECTIONS connections at once, LOOPBACK_RESERVED of them kept for loopback
-    peers, and at most MAX_PEER_CONNECTIONS from any one network address: a slot is taken when
-    a connection is accepted and given back when it is shut down; one over a cap is closed at
-    once, unread. Each
+    peers, and at most MAX_PEER_CONNECTIONS from any one network address (an IPv6 /64): a slot
+    is taken when a connection is accepted and given back exactly once when its thread ends;
+    one over a cap is closed at once, unread. Each
     connection has HEADER_SECONDS from accept to the end of its request headers, the TLS
     handshake included (`connection_deadline`).
 
@@ -427,7 +434,6 @@ class DashboardServer(ThreadingHTTPServer):
     def __init__(self, address, handler_class, tls_context=None):
         self.tls_context = tls_context
         self._slots = _ConnectionSlots(MAX_CONNECTIONS, LOOPBACK_RESERVED, MAX_PEER_CONNECTIONS)
-        self._held, self._held_lock = {}, threading.Lock()   # socket fd -> peer counted for it
         self._connection = threading.local()   # each connection has its own thread
         try:
             if ipaddress.ip_address(address[0]).version == 6:
@@ -443,25 +449,26 @@ class DashboardServer(ThreadingHTTPServer):
             _log('connection_refused', reason=self._slots.refusal)   # the reason only, never the address
             self.close_request(request)          # never counted, so nothing is given back
             return
-        with self._held_lock:
-            self._held[request.fileno()] = peer
-        super().process_request(request, client_address)
+        # The counted peer travels with the connection to its thread, which gives the slot back
+        # in a `finally` whatever state the socket is in (a reset during the TLS wrap leaves it
+        # detached, fileno() -1). Nothing is looked up by descriptor at teardown.
+        try:
+            super().process_request((request, peer), client_address)
+        except BaseException:
+            self._slots.give(peer)               # the thread never started: give it back here
+            raise                                # _handle_request_noblock shuts the socket down
 
-    def shutdown_request(self, request):
-        """Every way a counted connection ends comes here (a finished request, a failed
-        handshake, a thread that would not start), so its slot is given back once. The entry is
-        removed before the socket closes, so its descriptor cannot be reused meanwhile."""
+    def process_request_thread(self, counted, client_address):
+        request, peer = counted
         try:
-            fd = request.fileno()
-        except (OSError, ValueError):
-            fd = -1
-        with self._held_lock:
-            peer = self._held.pop(fd, None)
-        try:
-            super().shutdown_request(request)
+            self._connection.deadline = time.monotonic() + HEADER_SECONDS   # the thread starts at accept
+            if self.tls_context is not None:
+                request = self._handshake(request)
+                if request is None:
+                    return
+            super().process_request_thread(request, client_address)
         finally:
-            if peer is not None:
-                self._slots.give(peer)
+            self._slots.give(peer)               # exactly once per counted connection
 
     def connection_deadline(self):
         """The monotonic time this thread's connection must have sent its headers by; None once
@@ -469,16 +476,9 @@ class DashboardServer(ThreadingHTTPServer):
         deadline, self._connection.deadline = getattr(self._connection, 'deadline', None), None
         return deadline
 
-    def process_request_thread(self, request, client_address):
-        self._connection.deadline = time.monotonic() + HEADER_SECONDS   # the thread starts at accept
-        if self.tls_context is not None:
-            request = self._handshake(request)
-            if request is None:
-                return
-        super().process_request_thread(request, client_address)
-
     def _handshake(self, raw):
-        """The TLS socket, or None after shutting the connection down (its slot given back)."""
+        """The TLS socket, or None after shutting the connection down. The slot is given back by
+        process_request_thread, not here."""
         try:
             wrapped = self.tls_context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
         except (OSError, ValueError) as error:
