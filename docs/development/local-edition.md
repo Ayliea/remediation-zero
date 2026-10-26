@@ -174,14 +174,58 @@ a family:
 
 API keys are read only from the environment. They are never written to the
 settings file, the workspace, a record or a log. `RZ_MODEL_ENDPOINT` and
-`RZ_MODEL` override the saved proposer connection. HTTP is allowed only on
-loopback; a hosted endpoint must use HTTPS. Redirects and inherited proxies are
+`RZ_MODEL` override the saved proposer connection (an overridden endpoint does
+not inherit the saved CA file). HTTP is allowed only on loopback; a hosted
+endpoint must use HTTPS (see "A model on another machine"). Redirects and inherited proxies are
 disabled. Requests are capped at 32 KiB in, 64 KiB back and 2048 output tokens,
 with a 60-second socket timeout. `check-models` sends the bundled synthetic
 example to each configured role. No real provider was called during validation.
 
 With no summarizer, the report stores the metrics and a marker saying no
 summarizer is configured, in place of prose.
+
+### A model on another machine
+
+A model on another server is reached over HTTPS; plain `http://` works only on
+loopback. If that server's certificate is self-signed or issued by your own CA,
+set the role's **CA certificate file**: the absolute path, on the Remediation
+Zero server, of that certificate or of the CA that signed it. That file is then
+the only thing trusted for the endpoint (not the system's list), and the
+certificate must still name the host in the endpoint URL. There is no setting
+that skips verification: every request carries finding details and possibly an
+API key. The file is checked when Settings are saved; a file that is missing or
+holds no certificate is refused and nothing is saved.
+
+Example: Ollama on another machine, with Caddy in front issuing a certificate
+from its own local CA (`tls internal`).
+
+```caddyfile
+models.example.internal:11443 {
+    tls internal
+    reverse_proxy 127.0.0.1:11434 {
+        header_up Host 127.0.0.1:11434
+    }
+}
+```
+
+Copy Caddy's root certificate (`<caddy data dir>/pki/authorities/local/root.crt`)
+to the Remediation Zero server, then set the endpoint to
+`https://models.example.internal:11443/v1/chat/completions` and the CA
+certificate file to the copy's path. Make sure the Remediation Zero server
+resolves the name (DNS or `/etc/hosts`).
+
+`check-models` names a certificate problem and what to do about it:
+
+| Line | Meaning |
+|---|---|
+| `failed (CertificateNotTrusted: ...)` | No CA file, or the wrong one |
+| `failed (CertificateNameMismatch: ...)` | The certificate is for another name than the URL's host |
+| `failed (CertificateExpired: ...)` | Expired or not yet valid |
+| `failed (CertificateFileUnreadable: ...)` | The CA file is gone or holds no certificate |
+
+During a cycle a certificate problem counts as an outage: the finding is recorded
+unavailable and retried next cycle, never read as a reviewer's verdict, and it
+is not retried in place, because waiting cannot fix a certificate.
 
 ## Review
 

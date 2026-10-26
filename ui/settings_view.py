@@ -24,10 +24,10 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
     keys = keys or {}
     key_hint = lambda r: 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' if r == 'proposer' else f'RZ_{r.upper()}_API_KEY'
     if section == 'model':
-        body = '<h2>Your models, your choice</h2><p>Each role can use a local or hosted model. Hosted endpoints require HTTPS. Leave a role\'s endpoint and model blank to leave it not configured. Saving makes no model calls.</p>'
+        body = '<h2>Your models, your choice</h2><p>Each role can use a local or hosted model. A model on another machine needs HTTPS; if its certificate is self-signed or from your own CA, give the path of that certificate on this server. Leave a role\'s endpoint and model blank to leave it not configured. Saving makes no model calls.</p>'
         blocks = ''
         for role in ROLES:
-            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': ''}
+            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': '', 'ca_file': ''}
             fmt = ''.join(f'<option value="{e(f)}" {"selected" if cfg["format"] == f else ""}>{e(f)}</option>' for f in FORMATS)
             fam = '<option value="">Detect from model name</option>' + ''.join(
                 f'<option value="{e(f)}" {"selected" if cfg["family"] == f else ""}>{e(f)}</option>' for f in FAMILIES)
@@ -36,6 +36,8 @@ def render_settings(values, section, token, *, message='', keys=None, overrides=
                        f'<label>Endpoint URL<input name="{role}_endpoint" type="url" maxlength="2048" value="{e(cfg["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label>'
                        f'<label>Model name<input name="{role}_model" maxlength="200" value="{e(cfg["model"])}"></label>'
                        f'<label>Model family<select name="{role}_family">{fam}</select></label>'
+                       f'<label>CA certificate file (optional)<input name="{role}_ca_file" maxlength="4096" value="{e(cfg["ca_file"])}" placeholder="/etc/remediation-zero/model-ca.pem"></label>'
+                       '<p>Only for an HTTPS endpoint whose certificate is self-signed or from your own CA: the absolute path of that certificate, or of the CA that signed it, on this server. It is then the only thing trusted for this endpoint. The certificate must still name the host in the URL.</p>'
                        f'<p>Environment key: {"present" if keys.get(role) else "not set"}. Keys are never displayed or saved here. Set {key_hint(role)} before starting the app.</p></fieldset>')
         policy = values['same_family_policy']
         blocks += ('<fieldset class="role-block"><legend>Same-family reviews</legend>'

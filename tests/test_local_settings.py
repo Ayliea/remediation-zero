@@ -18,7 +18,7 @@ LOCAL = 'http://localhost:11434/v1/chat/completions'
 
 
 def proposer(**change):
-    return dict(dict(format='openai_chat', endpoint=LOCAL, model='test', family='other'), **change)
+    return dict(dict(format='openai_chat', endpoint=LOCAL, model='test', family='other', ca_file=''), **change)
 
 
 def with_proposer(**fields):
@@ -77,14 +77,14 @@ def test_v1_settings_upgrade_to_proposer_role(tmp_path):
     path.write_text(json.dumps({'endpoint': 'http://127.0.0.1:11434/v1/chat/completions', 'model': 'llama3.1',
                                 'mode': 'saved', 'open_browser': False, 'port': 8083}))
     loaded = config.load(path)
-    assert loaded['version'] == 3
+    assert loaded['version'] == 4
     assert loaded['roles']['proposer'] == dict(format='openai_chat', model='llama3.1', family='llama',
-        endpoint='http://127.0.0.1:11434/v1/chat/completions')
+        endpoint='http://127.0.0.1:11434/v1/chat/completions', ca_file='')
     assert [loaded['roles'][r] for r in ('reviewer', 'summarizer', 'guard')] == [None] * 3
     assert loaded['same_family_policy'] == 'wait'
     assert (loaded['mode'], loaded['open_browser'], loaded['port']) == ('saved', False, 8083)
     config.save(path, loaded)
-    assert json.loads(path.read_text())['version'] == 3
+    assert json.loads(path.read_text())['version'] == 4
 
 
 def test_blank_v1_connection_upgrades_to_no_proposer(tmp_path):
@@ -108,7 +108,8 @@ ROLES = ('proposer', 'reviewer', 'summarizer', 'guard')
 def model_form(token, **given):
     fields = {'token': token, 'section': 'model', 'same_family_policy': 'wait'}
     for role in ROLES:
-        fields.update({role + '_format': 'openai_chat', role + '_endpoint': '', role + '_model': '', role + '_family': ''})
+        fields.update({role + '_format': 'openai_chat', role + '_endpoint': '', role + '_model': '', role + '_family': '',
+                       role + '_ca_file': ''})
     fields.update(given)
     return fields
 
@@ -198,7 +199,7 @@ def test_cli_uses_saved_connection_with_environment_precedence(tmp_path, monkeyp
     # suggest-demo is retired; the cycle command now builds the proposer the same way.
     monkeypatch.setattr('sys.argv', ['local', '--database', str(database), 'cycle', '--cycle', '1'])
     import tools.model_roles as model_roles
-    monkeypatch.setattr(model_roles, 'build_adapter', lambda fmt, url, model, key: SimpleNamespace(
+    monkeypatch.setattr(model_roles, 'build_adapter', lambda fmt, url, model, key, ca_file=None: SimpleNamespace(
         url=url, model=model, api_key=key))
     seen = []
     def inspect_endpoint(ws, cycle, *, roles):
@@ -222,7 +223,7 @@ def test_settings_renders_four_role_blocks(app):
     _, request = app
     body = request()[1]
     for role in ROLES:
-        for part in ('format', 'endpoint', 'model', 'family'):
+        for part in ('format', 'endpoint', 'model', 'family', 'ca_file'):
             assert f'name="{role}_{part}"' in body
     assert 'name="same_family_policy"' in body
     assert 'Same-family reviews' in body
@@ -254,7 +255,7 @@ def test_post_saves_roles_and_policy(app):
     assert saved['same_family_policy'] == 'proceed'
     assert saved['roles']['proposer']['family'] == 'gemini'  # blank family is suggested from the model
     assert saved['roles']['reviewer'] == dict(format='anthropic_messages', endpoint='https://example.invalid/v1/messages',
-                                              model='claude-x', family='claude')
+                                              model='claude-x', family='claude', ca_file='')
     assert saved['roles']['summarizer'] is None and saved['roles']['guard'] is None
 
 
@@ -287,12 +288,12 @@ def test_post_rejects_unknown_format(app):
     assert not path.exists()
 
 
-def test_post_rejects_21_fields(app):
+def test_post_rejects_extra_fields(app):
     path, request = app
     fields = model_form(_token(request))
-    assert len(fields) == 19
+    assert len(fields) == 23
     fields.update(extra_a='1', extra_b='2')
-    assert len(fields) == 21
+    assert len(fields) == 25
     assert request('POST', '/settings', fields)[0] == 400
     assert not path.exists()
 
@@ -330,8 +331,8 @@ def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch
     path, request = app
     token = _token(request)
     valid = list(model_form(token).items())
-    pairs = valid + valid[:2]  # only valid field names, 21 pairs in all
-    assert len(pairs) == 21 and {k for k, _ in pairs} == {k for k, _ in valid}
+    pairs = valid + valid[:41 - len(valid)]  # only valid field names, 41 pairs in all
+    assert len(pairs) == 41 and {k for k, _ in pairs} == {k for k, _ in valid}
     seen = []
     real = local.parse_qs
     def spy(*args, **kwargs):
@@ -343,7 +344,7 @@ def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch
             raise
     monkeypatch.setattr(local, 'parse_qs', spy)
     assert request('POST', '/settings', pairs)[0] == 400
-    assert seen[-2:] == [20, 'limit-raised']
+    assert seen[-2:] == [40, 'limit-raised']
     assert not path.exists()
 
 
@@ -445,28 +446,30 @@ def _v2_file(**change):
     return v2
 
 
-def test_v2_settings_upgrade_to_v3_with_scanner_defaults(tmp_path):
+def test_v2_settings_upgrade_to_v4_with_scanner_defaults(tmp_path):
     path = tmp_path / 'prefs.json'
     v2 = _v2_file(port=8090, mode='saved')
-    v2['roles']['proposer'] = proposer(model='kept')
+    # v2 roles had no ca_file; the upgrade adds an empty one.
+    v2['roles']['proposer'] = {k: v for k, v in proposer(model='kept').items() if k != 'ca_file'}
     path.write_text(json.dumps(v2))
     loaded = config.load(path)
-    assert loaded['version'] == 3
+    assert loaded['version'] == 4
+    assert loaded['roles']['proposer']['ca_file'] == ''
     assert loaded['scanner'] == SCANNER_DEFAULTS
     assert (loaded['port'], loaded['mode'], loaded['roles']['proposer']['model']) == (8090, 'saved', 'kept')
     # load() never writes: the file is still v2 until the next save, as for v1.
     assert json.loads(path.read_text())['version'] == 2
     config.save(path, loaded)
     on_disk = json.loads(path.read_text())
-    assert on_disk['version'] == 3 and on_disk['scanner'] == SCANNER_DEFAULTS
+    assert on_disk['version'] == 4 and on_disk['scanner'] == SCANNER_DEFAULTS
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_v1_settings_reach_v3(tmp_path):
+def test_v1_settings_reach_v4(tmp_path):
     path = tmp_path / 'prefs.json'
     path.write_text(json.dumps({'endpoint': '', 'model': '', 'mode': 'demo', 'open_browser': True, 'port': 8081}))
     loaded = config.load(path)
-    assert loaded['version'] == 3 and loaded['scanner'] == SCANNER_DEFAULTS
+    assert loaded['version'] == 4 and loaded['scanner'] == SCANNER_DEFAULTS
 
 
 def test_v2_file_with_unknown_key_is_refused(tmp_path):
@@ -484,7 +487,7 @@ def test_v3_file_with_unknown_key_is_refused(tmp_path):
 
 
 def test_scanner_defaults():
-    assert config.DEFAULTS['version'] == 3
+    assert config.DEFAULTS['version'] == 4
     assert config.DEFAULTS['scanner'] == SCANNER_DEFAULTS
 
 

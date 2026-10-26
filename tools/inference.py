@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.adjudication import CapacityError, Proposal, Verdict
+from tools.model_transport import CertificateProblem
 from tools.enrichment import Enrichment, finding_cves
 from tools.models import ChatAdapter
 
@@ -119,6 +120,8 @@ def _with_backoff(call, *, what: str):
     for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
         try:
             return call()
+        except CertificateProblem:
+            raise  # an outage to the caller, but not load: retrying cannot fix a certificate
         except Exception as exc:
             if not _is_capacity(exc):
                 raise

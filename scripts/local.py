@@ -59,7 +59,8 @@ DEFAULT_DATABASE = 'remediation-zero'
 DEFAULT_CORPUS = ROOT / 'data'
 CORPUS_FILES = ('findings.json', 'assets.json', 'owners.json')
 NO_CORPUS = 'no corpus: pass --corpus DIR (findings.json, assets.json, owners.json)'
-MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES for part in ('format', 'endpoint', 'model', 'family')}
+MODEL_FIELDS = {'same_family_policy'} | {f'{role}_{part}' for role in ROLES
+                                         for part in ('format', 'endpoint', 'model', 'family', 'ca_file')}
 # mode and port are required; the checkbox and the interval may be absent.
 APPLICATION_FIELDS = {'mode', 'port', 'open_browser', 'cycle_interval_minutes'}
 SCANNER_REQUIRED = {'transport', 'socket_path', 'host', 'port', 'ca_file', 'task_ids', 'qod_floor'}
@@ -856,7 +857,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 scanner_form = 'section=scanner' in raw.split('&')
                 if length > 8192 and not scanner_form:
                     raise ValueError()
-                fields = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=1100 if scanner_form else 20)
+                fields = parse_qs(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=1100 if scanner_form else 40)
                 if any(len(v) != 1 for k, v in fields.items() if not (scanner_form and k == 'task_ids')):
                     raise ValueError()
                 fields = {k: '\n'.join(v) if k == 'task_ids' else v[0] for k, v in fields.items()}
@@ -880,9 +881,17 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 elif section == 'model' and set(fields) == MODEL_FIELDS:
                     for role in ROLES:
                         endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
+                        ca_file = fields[role + '_ca_file'].strip()
+                        if ca_file and (endpoint or model):
+                            try:
+                                local_settings.check_ca_file(ca_file)
+                            except ValueError:
+                                self.send_error(400, f'The {role} CA certificate file could not be read as a PEM '
+                                                     'certificate. Nothing was saved.')
+                                return
                         values['roles'][role] = None if not (endpoint or model) else {
                             'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
-                            'family': fields[role + '_family'] or suggest_family(model)}
+                            'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file}
                     values['same_family_policy'] = fields['same_family_policy']
                 elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
                     if fields.get('open_browser', 'yes') != 'yes':

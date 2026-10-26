@@ -36,7 +36,7 @@ def capture(monkeypatch):
     calls = []
 
     def install(fmt, reply=None, error=None):
-        def fake(url, body, headers):
+        def fake(url, body, headers, ca_file=None):
             calls.append((url, body, headers))
             if error:
                 raise error

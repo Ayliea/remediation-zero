@@ -27,7 +27,7 @@ class _Response:
 
 
 def _stub(monkeypatch, result):
-    def fake(request, timeout):
+    def fake(request, timeout, ca_file=None):
         assert timeout == 60
         if isinstance(result, Exception):
             raise result

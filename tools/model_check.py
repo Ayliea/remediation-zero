@@ -62,6 +62,17 @@ def _run(role, adapter):
     return 'GuardBlockedBenign' if verdict.blocked else None
 
 
+#: Fixed advice per certificate failure; the line still carries no exception text.
+CERTIFICATE_HINTS = {
+    'CertificateNotTrusted': "set this role's CA certificate file to the model server's certificate "
+                             "or the CA that signed it",
+    'CertificateNameMismatch': 'the certificate does not name the host in the endpoint URL; '
+                               'use the name it was issued for, or reissue it',
+    'CertificateExpired': 'the model server\'s certificate is expired or not yet valid; renew it',
+    'CertificateFileUnreadable': "this role's CA certificate file is missing or is not a PEM certificate",
+}
+
+
 def check_models(roles, only=None, *, out=print):
     """Print one line per role; return 0 if every configured role is ok, else 1."""
     failed = False
@@ -75,6 +86,8 @@ def check_models(roles, only=None, *, out=print):
             problem = _run(role, roles.adapter(role))
         except Exception as exc:
             problem = type(exc).__name__
+            if problem in CERTIFICATE_HINTS:
+                problem = f'{problem}: {CERTIFICATE_HINTS[problem]}'
         if problem:
             failed = True
             out('%s: failed (%s)' % (role, problem))

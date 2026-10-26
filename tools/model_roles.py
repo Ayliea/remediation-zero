@@ -36,6 +36,9 @@ class RoleConfig:
     endpoint: str
     model: str
     family: str
+    #: Absolute path of a PEM file to trust for this HTTPS endpoint instead of the
+    #: system's list (a self-signed certificate, or the private CA that signed it).
+    ca_file: str = ''
 
     def __post_init__(self):
         if self.role not in ROLES:
@@ -50,9 +53,18 @@ class RoleConfig:
             if not isinstance(self.endpoint, str) or len(self.endpoint) > 2048:
                 raise ValueError('Invalid endpoint URL')
             validate_endpoint(self.endpoint)
+        if (not isinstance(self.ca_file, str) or len(self.ca_file) > 4096
+                or any(c in self.ca_file for c in '\n\r\0')):
+            raise ValueError('Invalid CA certificate file')
+        if self.ca_file:
+            if not os.path.isabs(self.ca_file):
+                raise ValueError('The CA certificate file must be an absolute path')
+            if self.format == 'vertex' or not self.endpoint.lower().startswith('https://'):
+                raise ValueError('A CA certificate file applies only to an HTTPS endpoint')
 
     def as_settings(self):
-        return {'format': self.format, 'endpoint': self.endpoint, 'model': self.model, 'family': self.family}
+        return {'format': self.format, 'endpoint': self.endpoint, 'model': self.model, 'family': self.family,
+                'ca_file': self.ca_file}
 
 
 def _key_names(role):
@@ -106,7 +118,7 @@ class ModelRoles:
         key = next((environ[n] for n in _key_names(role) if environ.get(n)), None)
         if key and ('\n' in key or '\r' in key):
             raise ValueError('Invalid API key')
-        return build_adapter(config.format, config.endpoint, config.model, key)
+        return build_adapter(config.format, config.endpoint, config.model, key, config.ca_file or None)
 
     @classmethod
     def from_env(cls, environ):
@@ -140,9 +152,11 @@ class ModelRoles:
             saved = built['proposer']
             use_model = model or (saved.model if saved else '')
             same = saved is not None and use_model == saved.model
+            use_endpoint = endpoint or (saved.endpoint if saved else '')
             built['proposer'] = RoleConfig(
-                'proposer', saved.format if saved else 'openai_chat',
-                endpoint or (saved.endpoint if saved else ''), use_model,
-                saved.family if same else suggest_family(use_model))
+                'proposer', saved.format if saved else 'openai_chat', use_endpoint, use_model,
+                saved.family if same else suggest_family(use_model),
+                # The saved CA file belongs to the saved server; another endpoint gets none.
+                saved.ca_file if saved and use_endpoint == saved.endpoint else '')
         return cls(**built, same_family_policy=settings.get('same_family_policy', 'wait'),
                    environ=environ)

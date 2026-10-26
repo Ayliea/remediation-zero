@@ -10,18 +10,20 @@ from pathlib import Path
 import re
 import tempfile
 from tools.gmp import GmpTarget
+from tools.model_transport import CertificateFileUnreadable, tls_context
 from tools.model_roles import POLICIES, ROLES, RoleConfig, suggest_family
 
 SCANNER_DEFAULTS = {'transport': 'unix', 'socket_path': '', 'host': '', 'port': 9390, 'ca_file': '',
                     'task_ids': [], 'qod_floor': 70, 'auto_enrichment': False}
-DEFAULTS = {'version': 3, 'roles': {role: None for role in ROLES}, 'same_family_policy': 'wait',
+DEFAULTS = {'version': 4, 'roles': {role: None for role in ROLES}, 'same_family_policy': 'wait',
             'mode': 'demo', 'open_browser': True, 'port': 8081, 'cycle_interval_minutes': 0,
             'scanner': SCANNER_DEFAULTS}
 _V2_FIELDS = set(DEFAULTS) - {'scanner'}
 TASK_ID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _HOSTNAME_RE = re.compile(r'[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?')
 _V1_FIELDS = {'endpoint', 'model', 'mode', 'open_browser', 'port'}
-_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family'}
+_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family', 'ca_file'}
+_V3_ROLE_FIELDS = _ROLE_FIELDS - {'ca_file'}
 
 
 def settings_path(database):
@@ -29,7 +31,7 @@ def settings_path(database):
 
 
 def validate(value):
-    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or value['version'] != 3:
+    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or value['version'] != 4:
         raise ValueError('Unexpected settings fields')
     roles = value['roles']
     if not isinstance(roles, dict) or set(roles) != set(ROLES):
@@ -103,11 +105,34 @@ def gmp_target(settings, *, timeout=30.0):
                      ca_file=scanner['ca_file'] or None, timeout=timeout)
 
 
+def check_ca_file(path):
+    """Refuse a CA certificate file that cannot be used, when it is saved. Not part of
+    validate(): settings must still load if the file later moves; the model call then
+    reports CertificateFileUnreadable."""
+    try:
+        tls_context(path)
+    except CertificateFileUnreadable:
+        raise ValueError('The CA certificate file could not be read as a PEM certificate') from None
+
+
+def _upgrade_v3(value):
+    """v3 had no per-role CA file: each configured role gains an empty one."""
+    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or not isinstance(value.get('roles'), dict):
+        raise ValueError('Unexpected settings fields')
+    upgraded = dict(copy.deepcopy(value), version=4)
+    for role, raw in upgraded['roles'].items():
+        if raw is not None:
+            if not isinstance(raw, dict) or set(raw) != _V3_ROLE_FIELDS:
+                raise ValueError('Unexpected settings fields')
+            raw['ca_file'] = ''
+    return validate(upgraded)
+
+
 def _upgrade_v2(value):
     if not isinstance(value, dict) or set(value) != _V2_FIELDS:
         raise ValueError('Unexpected settings fields')
     upgraded = dict(copy.deepcopy(value), version=3, scanner=copy.deepcopy(SCANNER_DEFAULTS))
-    return validate(upgraded)
+    return _upgrade_v3(upgraded)
 
 
 def _upgrade_v1(value):
@@ -119,7 +144,8 @@ def _upgrade_v1(value):
     upgraded.update(mode=value['mode'], open_browser=value['open_browser'], port=value['port'])
     if value['endpoint'] or value['model']:
         upgraded['roles']['proposer'] = {'format': 'openai_chat', 'endpoint': value['endpoint'],
-                                         'model': value['model'], 'family': suggest_family(value['model'])}
+                                         'model': value['model'], 'family': suggest_family(value['model']),
+                                         'ca_file': ''}
     return upgraded
 
 
@@ -131,7 +157,9 @@ def load(path):
     if isinstance(raw, dict) and 'version' not in raw:
         raw = _upgrade_v1(raw)
     elif isinstance(raw, dict) and raw.get('version') == 2:
-        return _upgrade_v2(raw)  # in memory only; the next save writes v3, as for v1
+        return _upgrade_v2(raw)  # in memory only; the next save writes v4, as for v1
+    elif isinstance(raw, dict) and raw.get('version') == 3:
+        return _upgrade_v3(raw)
     return validate(raw)
 
 
