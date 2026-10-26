@@ -224,7 +224,9 @@ def test_a_public_url_that_is_not_a_plain_https_origin_is_refused(url):
 @pytest.fixture
 def proxied(tmp_path, fake_endpoints):
     config_path = tmp_path / 'db.settings.json'
-    cls = local.handler(SimpleNamespace(snapshot=lambda: {}), False, config_path, public_origin=PUBLIC)
+    # scanner_state present, so the Infrastructure view would show the upload form if allowed.
+    cls = local.handler(SimpleNamespace(snapshot=lambda: {'scanner_state': []}), False, config_path,
+                        upload=lambda data, add_task: pytest.fail('imported through the proxy'), public_origin=PUBLIC)
     httpd = local.DashboardServer(('127.0.0.1', 0), cls)
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -260,16 +262,32 @@ def test_the_configured_public_name_is_served_and_others_are_refused(proxied):
         assert request(port, 'GET', '/', host)[0].status == 403
 
 
-def test_a_save_through_the_proxy_needs_the_exact_https_origin(proxied):
+def test_nothing_can_be_changed_through_the_proxy(proxied):
+    # No sign-in yet: a save could point Greenbone, credentials and all, at another server.
     port = proxied.server_port
-    page, body = request(port, 'GET', '/?view=settings&section=scanner', 'dashboard.example.test:8443')
-    token = re.search(r'name="token" value="([^"]+)"', body).group(1)
     host = 'dashboard.example.test:8443'
-    for wrong in ('http://dashboard.example.test:8443', f'http://127.0.0.1:{port}', 'null',
-                  'https://evil.example.test:8443'):
-        assert request(port, 'POST', '/settings', host, wrong, scanner_save(token))[0].status == 403
-    origin = browser_form_origin(page.getheader('Referrer-Policy', ''), PUBLIC)
-    assert request(port, 'POST', '/settings', host, origin, scanner_save(token))[0].status == 303
+    _, body = request(port, 'GET', '/?view=settings&section=scanner', f'127.0.0.1:{port}')
+    token = re.search(r'name="token" value="([^"]+)"', body).group(1)
+    for origin in (PUBLIC, 'http://dashboard.example.test:8443', f'http://127.0.0.1:{port}'):
+        assert request(port, 'POST', '/settings', host, origin, scanner_save(token))[0].status == 403
+        assert request(port, 'POST', '/upload', host, origin, 'x')[0].status == 403
+
+
+def test_settings_do_not_open_through_the_proxy_and_greenbone_is_not_signed_in_to(proxied, monkeypatch):
+    monkeypatch.setattr(local, 'scanner_probe', lambda *a, **kw: pytest.fail('signed in to Greenbone'))
+    port = proxied.server_port
+    host = 'dashboard.example.test:8443'
+    for section in ('scanner', 'model'):
+        response, body = request(port, 'GET', f'/?view=settings&section={section}', host)
+        assert response.status == 403
+        assert 'only on the server itself' in body
+    for view in ('overview', 'infrastructure'):
+        response, body = request(port, 'GET', f'/?view={view}', host)
+        assert response.status == 200
+        assert 'view=settings' not in body
+        assert 'name="token"' not in body
+    # The same page on the server itself does offer the upload, so the check above means something.
+    assert 'name="token"' in request(port, 'GET', '/?view=infrastructure', f'127.0.0.1:{port}')[1]
 
 
 def test_a_loopback_save_still_needs_the_loopback_origin(proxied):
@@ -302,6 +320,7 @@ def test_the_launcher_passes_the_public_url_on_and_warns(tmp_path, monkeypatch, 
     out = capsys.readouterr().out
     assert f'Also at {PUBLIC} through your HTTPS proxy' in out
     assert 'No sign-in yet' in out
+    assert 'only on the server itself' in out
 
 
 def test_the_launcher_refuses_a_bad_public_url_before_starting(tmp_path, monkeypatch):

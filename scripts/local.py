@@ -710,14 +710,17 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             public_origin=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
+    # Until sign-in exists, that name is read-only: no Settings (a visit signs in to Greenbone,
+    # and a save could point it, credentials and all, at another server), no saves, no uploads.
     token = secrets.token_urlsafe(32)
     public_host = public_origin.split('://', 1)[1] if public_origin else None
 
-    def origin_for(host, port):
-        """The Origin a same-origin form POST carries for this Host, or None if the Host is refused."""
-        if host in (f'127.0.0.1:{port}', f'localhost:{port}'):
-            return f'http://{host}'
-        return public_origin if public_host is not None and host == public_host else None
+    def loopback_origin(host, port):
+        """The Origin a same-origin form POST carries for a loopback Host, else None."""
+        return f'http://{host}' if host in (f'127.0.0.1:{port}', f'localhost:{port}') else None
+
+    def proxied(host):
+        return public_host is not None and host == public_host
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
     serial = threading.Lock()
@@ -737,32 +740,38 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 self._post()
 
         def _get(self):
-            if origin_for(self.headers.get('Host'), self.server.server_port) is None:
+            host = self.headers.get('Host')
+            through_proxy = proxied(host)
+            if not through_proxy and loopback_origin(host, self.server.server_port) is None:
                 self.send_error(403)
                 return
             parsed = urlsplit(self.path)
             view = parse_qs(parsed.query).get('view', ['overview'])[0]
             section = parse_qs(parsed.query).get('section', ['model'])[0]
+            if through_proxy and view == 'settings':
+                self.send_error(403, 'Settings open only on the server itself until sign-in exists.')
+                return
+            settings_path = None if through_proxy else config_path
             if parsed.path != '/' or (view not in VIEWS and not (config_path and view == 'settings')) or (view == 'settings' and section not in SECTIONS):
                 self.send_error(404)
                 return
             try:
                 settings_html = None
                 chosen = None
-                if config_path:
-                    saved = local_settings.load(config_path)
+                if settings_path:
+                    saved = local_settings.load(settings_path)
                     chosen = saved['scanner']['task_ids']
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
                         message='Preferences saved. No model calls were made.' if parse_qs(parsed.query).get('saved') == ['1'] else '',
                         scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None)
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
                               approve_command=None if demo else approve_command,
-                              upload_token=token if upload and not demo else None,
+                              upload_token=token if upload and not demo and not through_proxy else None,
                               upload_code=parse_qs(parsed.query).get('upload', [None])[0],
                               chosen_tasks=chosen, records=records() if records and not demo else 'synthetic')
                 status = 200
             except Exception:
-                body, status = render({}, view, unavailable=True, settings_html="" if config_path else None), 503
+                body, status = render({}, view, unavailable=True, settings_html="" if settings_path else None), 503
             self._send_html(body, status)
 
         def _settings_html(self, values, section, *, message='', scanner=None):
@@ -827,7 +836,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.end_headers()
 
         def _post(self):
-            expected = origin_for(self.headers.get('Host'), self.server.server_port)
+            expected = loopback_origin(self.headers.get('Host'), self.server.server_port)  # never the proxy's
             if (not config_path or expected is None or self.path not in ('/settings', '/upload')
                     or (self.path == '/upload' and not upload)
                     or self.headers.get('Origin') != expected
@@ -914,7 +923,8 @@ SAVED_BANNER = 'Local dashboard: '
 _PUBLIC_HOST_RE = re.compile(r'[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?')
 PUBLIC_URL_RULE = 'an https:// address with a host name and an optional port, and nothing after it'
 NO_SIGN_IN = ('No sign-in yet: anyone who can reach this address can read these records. Use it only '
-              'behind a proxy that limits who can connect, such as your tailnet.')
+              'behind a proxy that limits who can connect, such as your tailnet. Settings and uploads '
+              'work only on the server itself.')
 
 
 def public_origin(url):

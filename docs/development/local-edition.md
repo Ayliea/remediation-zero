@@ -105,8 +105,11 @@ before it creates or writes anything.
   - `--public-url https://NAME[:PORT]` (also accepted by the launcher) lets an
     HTTPS proxy in front, such as Tailscale Serve, nginx or Caddy, forward the
     dashboard to other machines. The server still listens only on 127.0.0.1;
-    the option adds that one name to the Host names it answers, and a Settings
-    save or upload through it must carry exactly that `https://` origin. The
+    the option adds that one name to the Host names it answers. Until sign-in
+    exists that name is read-only: Settings do not open through it (opening the
+    Scanner section signs in to Greenbone, and a save could point Greenbone,
+    credentials and all, at another server), and saves and uploads through it
+    are refused. Change settings on the server itself. The
     URL must be `https://` with a host name and an optional port and nothing
     after it; anything else is refused before the server starts. With the
     option set, `serve` prints a second line,
