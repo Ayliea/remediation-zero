@@ -71,7 +71,8 @@ jobs:
         run: bash -n scripts/*.sh
 
       - name: Reject committed whitespace errors
-        run: git show --check --oneline --no-renames HEAD
+        # tools/vendor/ holds upstream files kept byte-for-byte (tests pin their hashes).
+        run: git show --check --oneline --no-renames HEAD -- . ':(exclude)tools/vendor/'
 
       - name: Build the console container
         run: docker build --pull=false -t remediation-zero-console:test .

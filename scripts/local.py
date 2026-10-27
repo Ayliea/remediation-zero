@@ -2242,5 +2242,3 @@ if __name__ == '__main__':
     # Structured log lines go to stderr; stdout carries each command's result.
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format='%(message)s')
     main()
-
-
