@@ -36,6 +36,7 @@ import os
 import re
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Collection, Iterable, Optional
@@ -67,12 +68,19 @@ def workspace_cache_dir(root: Path) -> Path:
     return Path(root) / "enrichment"
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse every redirect (R15): the three hosts are fixed, and a redirect
-    would carry the NVD key header to wherever the response points."""
+class _SameHostRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow at most one redirect, and only over https to the same host and
+    port (R15). The three hosts are fixed, and a redirect anywhere else would
+    carry the NVD key header to wherever the response points. EPSS's
+    current-file link answers with a redirect to that day's file on its own host."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("redirects are refused")
+        if getattr(req, "redirect_dict", None):
+            raise ValueError("a second redirect is refused")
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new.scheme != "https" or new.netloc != old.netloc:
+            raise ValueError("a redirect off the source's own https host is refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 #: Extra handlers for the opener; empty in production, set by tests to stand
@@ -81,11 +89,11 @@ _TRANSPORT_HANDLERS: tuple = ()
 
 
 def urllib_get(url: str, headers: Optional[dict] = None) -> bytes:
-    """The real fetcher: https only, no redirects, explicit timeout, size capped."""
+    """The real fetcher: https only, one same-host redirect at most, explicit timeout, size capped."""
     if not url.startswith("https://"):
         raise ValueError("enrichment sources are fetched over https only")
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
-    opener = urllib.request.build_opener(_NoRedirect, *_TRANSPORT_HANDLERS)
+    opener = urllib.request.build_opener(_SameHostRedirect, *_TRANSPORT_HANDLERS)
     with opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
         data = response.read(MAX_DOWNLOAD_BYTES + 1)
     if len(data) > MAX_DOWNLOAD_BYTES:

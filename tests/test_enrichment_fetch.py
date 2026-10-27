@@ -208,6 +208,34 @@ def test_a_redirect_is_refused_and_the_key_never_follows_it(monkeypatch, caplog,
     assert KEY not in caplog.text
 
 
+def test_one_same_host_https_redirect_is_followed(monkeypatch):
+    """EPSS's current-file link answers 302 with that day's file on the same host."""
+    def responder(req):
+        if req.full_url.endswith("/current.csv.gz"):
+            return 302, {"Location": "/scores-2026-10-26.csv.gz"}, b""
+        return 200, {}, b"body"
+    seen = _fake_transport(monkeypatch, responder)
+    assert urllib_get("https://example.invalid/current.csv.gz") == b"body"
+    assert [url for url, _, _ in seen] == ["https://example.invalid/current.csv.gz",
+                                           "https://example.invalid/scores-2026-10-26.csv.gz"]
+
+
+@pytest.mark.parametrize("location", ["https://other.invalid/x", "http://example.invalid/x",
+                                      "https://example.invalid:8443/x"])
+def test_a_redirect_off_the_host_or_off_https_is_refused(monkeypatch, location):
+    seen = _fake_transport(monkeypatch, lambda r: (302, {"Location": location}, b""))
+    with pytest.raises(ValueError):
+        urllib_get("https://example.invalid/x", headers={"apiKey": KEY})
+    assert len(seen) == 1
+
+
+def test_a_second_redirect_is_refused(monkeypatch):
+    seen = _fake_transport(monkeypatch, lambda r: (302, {"Location": r.full_url + "x"}, b""))
+    with pytest.raises(ValueError):
+        urllib_get("https://example.invalid/x")
+    assert len(seen) == 2
+
+
 def test_cve_check_rejects_trailing_newline_and_non_ascii_digits(tmp_path):
     calls = []
     bad = ["CVE-2021-44228\n", "CVE-\u0662021-44228"]
