@@ -7,6 +7,7 @@ The handler tests elsewhere build requests by hand, so they set whatever headers
 like. These tests cover what only a real connection shows: the headers a browser
 actually sends back, and an idle connection held open the way browsers do."""
 import http.client
+import http.server
 import io
 import re
 import socket
@@ -30,6 +31,17 @@ def browser_form_origin(referrer_policy, origin):
 def no_reverse_lookup(monkeypatch):
     # HTTPServer.server_bind names itself with socket.getfqdn, a lookup the offline guard refuses.
     monkeypatch.setattr(socket, 'getfqdn', lambda name='': name)
+
+
+def test_starting_the_server_makes_no_reverse_lookup(monkeypatch):
+    # http.server names itself with socket.getfqdn, a reverse DNS lookup that can stall startup
+    # for many seconds (seen on macOS); the dashboard never uses that name.
+    monkeypatch.setattr(socket, 'getfqdn', lambda name='': pytest.fail('startup made a reverse lookup'))
+    httpd = local.DashboardServer(('127.0.0.1', 0), http.server.BaseHTTPRequestHandler)
+    try:
+        assert httpd.server_name == '127.0.0.1' and httpd.server_port == httpd.server_address[1]
+    finally:
+        httpd.server_close()
 
 
 @pytest.fixture

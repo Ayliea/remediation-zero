@@ -91,9 +91,11 @@ def verify():
         # Use an unrelated cwd to verify the root launcher imports its own code.
         subprocess.run([sys.executable, '-S', str(app / 'start-remediation-zero.py'),
                         '--help'], cwd=root, check=True, capture_output=True, timeout=10)
+        # The server's own error output, shown only when a check fails.
+        errors = open(root / 'serve-errors.txt', 'w')
         process = subprocess.Popen([sys.executable, '-S', '-m', 'scripts.local',
             'serve', '--port', '0'], cwd=app, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True)
+            stderr=errors, text=True)
         try:
             ready = queue.Queue()
             threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True).start()
@@ -135,6 +137,11 @@ def verify():
             status, _, _ = Browser(base).request('POST', '/settings', data)
             assert status == 403, 'Save without a session accepted'
             assert prefs.read_bytes() == saved
+        except BaseException:
+            failed = True
+            raise
+        else:
+            failed = False
         finally:
             process.terminate()
             try:
@@ -143,6 +150,9 @@ def verify():
                 process.kill()
                 process.wait(timeout=5)
             process.stdout.close()
+            errors.close()
+            if failed:
+                print('The server wrote:\n' + (root / 'serve-errors.txt').read_text(), file=sys.stderr)
         # Re-running the installer must not replace the existing workspace.
         result = subprocess.run([sys.executable, '-S', str(installer), '--directory',
             str(app), '--yes', '--no-start'], capture_output=True, timeout=30)

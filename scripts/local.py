@@ -31,6 +31,7 @@ import re
 import secrets
 import shlex
 import socket
+import socketserver
 import sqlite3
 import ssl
 import sys
@@ -441,6 +442,12 @@ class DashboardServer(ThreadingHTTPServer):
         except ValueError:
             pass  # a host name: the default family
         super().__init__(address, handler_class)
+
+    def server_bind(self):
+        # http.server would name itself with socket.getfqdn, a reverse DNS lookup that can stall
+        # startup for many seconds (seen on macOS); nothing here uses that name.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address):
         peer = client_address[0] if client_address else ''
