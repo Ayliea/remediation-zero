@@ -6,6 +6,7 @@
 Every page and form needs a session; the role decides what each request may
 do; setup is offered only to a local visit with no accounts; the Origin a POST
 must carry is the way the request came in. Synthetic data only."""
+import html
 import http.client
 import json
 import logging
@@ -21,7 +22,7 @@ from urllib.parse import quote, urlencode
 
 import pytest
 
-from scripts import local
+from scripts import local, local_auth
 from tests.signed_in import OWNER, TECH, empty
 from tests.test_accounts import PW_OWNER, PW_TECH, code_for, wrong_code
 from tools import access, local_settings, totp
@@ -394,6 +395,21 @@ def test_settings_save_requires_reconfirm(start, signed_in):
     response, _ = server.request('POST', '/settings', cookie=cookie, body=scanner_save(token))
     assert response.status == 303 and 'saved=1' in response.getheader('Location')
     assert local_settings.load(server.config_path)['scanner']['socket_path'] == '/run/gvmd/gvmd.sock'
+
+
+def test_confirm_with_both_boxes_filled_says_to_use_one(start, signed_in):
+    # A browser can fill the code box by itself; the page must not call a right password wrong.
+    server = start(signed_in.accounts)
+    cookie = signed_in.cookie('unconfirmed')
+    nxt = '/?view=settings&section=scanner'
+    path = '/confirm?next=' + quote(nxt, safe='')
+    pre, value, _ = open_form(server, path, cookie=cookie)
+    body = urlencode({'pre': value, 'password': PW_OWNER, 'code': '123456'})
+    response, page = server.request('POST', path, cookie=cookie + '; ' + pre, body=body)
+    assert response.status == 400
+    assert local_auth.CONFIRM_ONE_ONLY in html.unescape(page) and local_auth.CONFIRM_FAILED not in html.unescape(page)
+    # Nothing was checked, so nothing is counted against the account.
+    assert signed_in.accounts.store.account_by_email(OWNER)['failed_count'] == 0
 
 
 def test_an_upload_requires_reconfirm(start, signed_in):

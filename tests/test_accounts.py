@@ -10,6 +10,7 @@ import threading
 import pytest
 
 from tools import access, totp
+from ui import account_views
 from tools.account_store import AccountStore
 from tools.accounts import AccountRefused, Accounts, InviteView
 from tools.clock import ClockMode, SimClock
@@ -455,6 +456,11 @@ def test_recover_owner_refuses_an_unknown_email_and_promotes_a_tech_only_with_pr
     now.tick()
     account_id, codes = accounts.accept_invite(token, PW_NEW, code_for(view.totp_secret, now), secret=view.totp_secret)
     assert account_id == tech_id and len(codes) == 10
+    # using the recovery link is its own event, not an accepted invite
+    ev = store.events(limit=1)[0]
+    assert ev["event"] == "owner_recovered"
+    assert json.loads(ev["detail"]) == {"invite_kind": "recover", "role": "owner"}
+    assert account_views.event_columns(ev, {})["event"] == "Owner recovery completed"
 
     # an active owner: password and MFA cleared, a link to set new ones
     token = accounts.recover_owner("owner@client.example")

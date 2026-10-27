@@ -513,7 +513,7 @@ class Accounts:
                 revoked = self._revoke_unauthorised_joins(cur)
                 if revoked:
                     detail["count"] = revoked
-        event = {"join": "invite_accepted", "recover": "invite_accepted",
+        event = {"join": "invite_accepted", "recover": "owner_recovered",
                  "reset_password": "password_reset", "reset_mfa": "mfa_reset"}[kind]
         self._event(cur, event, account_id, account_id, via, source, detail, stamp)
         return event, detail

@@ -168,7 +168,7 @@ _EVENT_NAMES = {
     'invite_accepted': 'Invite accepted', 'invite_revoked': 'Link revoked',
     'reset_link_created': 'Reset link created', 'password_reset': 'Password reset',
     'mfa_reset': 'Authenticator reset', 'role_changed': 'Role changed', 'removed': 'Account removed',
-    'recover_owner': 'Owner recovery link made on the server',
+    'recover_owner': 'Owner recovery link made on the server', 'owner_recovered': 'Owner recovery completed',
 }
 #: The only part of an event's detail a page shows: a reason from this closed set. Nothing
 #: else in detail (never email_hmac) is read.
