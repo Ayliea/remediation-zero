@@ -96,7 +96,7 @@ The committed scenario starts with **400 findings across 60 assets and 12 accoun
 | Starting workload | 400 findings · 60 assets · 12 owners | Large enough that weekly manual re-triage is the failure mode |
 | Adversarial gate | 65% of proposals rejected · 53% of findings ratified | The second model changes outcomes instead of rubber-stamping them |
 | Rescan reconciliation | 106 confirmed resolved · 102 unverifiable kept open | Missing scan coverage cannot manufacture remediation |
-| Regression suite | 623 tests | The safety claims are executable, not presentation-only |
+| Regression suite | 2,035 offline tests | The safety claims are executable, not presentation-only |
 
 ---
 

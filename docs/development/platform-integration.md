@@ -47,10 +47,15 @@ reinstalling cannot overwrite preferences. That job has not run remotely.
   permanently redirects to `/`. It has no Settings writes.
 - The local SQLite edition is not a cloud backend and does not synchronize its
   workspace or settings with Firestore.
-- Real scanner ingestion, an import workflow, the approved inventory designs
-  and the complete first-run onboarding flow are still future work.
-- Hosting the local HTTP server publicly is unsupported. A hosted edition needs
-  authentication, tenant isolation, secret storage and operations design first.
+- Real scanner ingestion exists in the local edition: Greenbone/OpenVAS reports
+  are pulled from gvmd or uploaded as exported files (see
+  [greenbone.md](greenbone.md)). The cloud edition still reads the committed
+  synthetic corpus. The approved inventory designs and the complete first-run
+  onboarding flow are still future work.
+- The local edition has sign-in (owner and tech roles, mandatory MFA) and HTTPS
+  for use on a private network or behind a proxy such as Tailscale Serve.
+  Exposing it directly to the public internet is unsupported. A hosted edition
+  needs tenant isolation, secret storage and operations design first.
 
 ## Development branch publication
 
