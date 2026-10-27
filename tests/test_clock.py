@@ -109,7 +109,9 @@ def test_unrecognised_mode_is_rejected_rather_than_guessed():
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-SKIPPED_DIRS = frozenset({".venv", ".git", "__pycache__", ".pytest_cache", ".terraform"})
+# .claude holds git worktrees (.claude/worktrees/, gitignored): full copies of the tree whose
+# allowlisted modules would be reported again under their copy's path.
+SKIPPED_DIRS = frozenset({".venv", ".git", "__pycache__", ".pytest_cache", ".terraform", ".claude"})
 
 #: `adk deploy agent_engine` stages a full copy of the source tree in
 #: agents/<name>_tmp<timestamp>/. Those copies are not new code and are not on
