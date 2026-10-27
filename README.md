@@ -11,6 +11,8 @@ Built for the All Things Agentic Hackathon, Fortified Enterprise Fleet track.
 **[Agent Engine proof (project access required)](https://console.cloud.google.com/vertex-ai/agents/agent-engines/locations/us-central1/agent-engines/3119663582942330880/playground?project=remediation-zero)** ·
 [Architecture](docs/architecture.png) · [Who can touch what](docs/identities.png) · [Demo runbook](docs/DEMO.md)
 
+> The deployed console runs the earlier hackathon code: the cloud services have not been redeployed since the shared-engine refactor, so it is not the current version (see [platform integration](docs/development/platform-integration.md)).
+
 ---
 
 ## Run the portable local edition
