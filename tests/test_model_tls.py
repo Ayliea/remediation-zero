@@ -45,14 +45,18 @@ def certs(tmp_path_factory):
     key = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes']
     for name in ('ca', 'other_ca'):
         _openssl('req', '-x509', *key, '-keyout', f'{name}.key', '-out', f'{name}.pem', '-days', '2',
-                 '-subj', f'/CN=synthetic {name}', '-addext', 'basicConstraints=critical,CA:TRUE', cwd=d)
-    (d / 'san').write_text('subjectAltName=DNS:localhost\n')
+                 '-subj', f'/CN=synthetic {name}', '-addext', 'basicConstraints=critical,CA:TRUE',
+                 '-addext', 'keyUsage=critical,keyCertSign,cRLSign', '-addext', 'subjectKeyIdentifier=hash', cwd=d)
+    # Python 3.13 verifies strictly by default (VERIFY_X509_STRICT): a CA needs key usage, and
+    # older openssl builds add no key identifiers unless asked.
+    (d / 'san').write_text('subjectAltName=DNS:localhost\nsubjectKeyIdentifier=hash\n'
+                           'authorityKeyIdentifier=keyid\n')
     for name, days in (('good', '2'), ('expired', '-1')):
         _openssl('req', *key, '-keyout', f'{name}.key', '-out', f'{name}.csr', '-subj', '/CN=localhost', cwd=d)
         _openssl('x509', '-req', '-in', f'{name}.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial',
                  '-out', f'{name}.pem', '-days', days, '-extfile', 'san', cwd=d)
     _openssl('req', '-x509', *key, '-keyout', 'self.key', '-out', 'self.pem', '-days', '2', '-subj', '/CN=localhost',
-             '-addext', 'subjectAltName=DNS:localhost', cwd=d)
+             '-addext', 'subjectAltName=DNS:localhost', '-addext', 'subjectKeyIdentifier=hash', cwd=d)
     (d / 'not-a-cert.pem').write_text('this is not a certificate\n')
     return d
 
