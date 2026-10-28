@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "providers": [
+    {"id": "anthropic", "name": "Anthropic", "letter": "A", "colour": "#c96442", "format": "anthropic_messages", "base_url": "https://api.anthropic.com/v1", "needs_key": true, "key_page": "https://console.anthropic.com/settings/keys"},
+    {"id": "openai", "name": "OpenAI", "letter": "O", "colour": "#111111", "format": "openai_chat", "base_url": "https://api.openai.com/v1", "needs_key": true, "key_page": "https://platform.openai.com/api-keys"},
+    {"id": "gemini", "name": "Google Gemini", "letter": "G", "colour": "#4f7df3", "format": "gemini_api", "base_url": "https://generativelanguage.googleapis.com/v1beta", "needs_key": true, "key_page": "https://aistudio.google.com/apikey"},
+    {"id": "openrouter", "name": "OpenRouter", "letter": "R", "colour": "#6d5bd0", "format": "openai_chat", "base_url": "https://openrouter.ai/api/v1", "needs_key": true, "key_page": "https://openrouter.ai/keys"},
+    {"id": "ollama", "name": "Ollama", "letter": "Ol", "colour": "#52525b", "format": "openai_chat", "base_url": "http://127.0.0.1:11434/v1", "needs_key": false, "key_page": ""},
+    {"id": "other", "name": "Other", "letter": "+", "colour": "#a1a1aa", "format": "", "base_url": "", "needs_key": false, "key_page": ""}
+  ],
+  "models": [
+    {"provider": "anthropic", "pattern": "claude-*haiku*", "family": "claude", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
+    {"provider": "anthropic", "pattern": "claude-*", "family": "claude", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
+    {"provider": "openai", "pattern": "gpt-*nano*", "family": "gpt", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
+    {"provider": "openai", "pattern": "gpt-*mini*", "family": "gpt", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
+    {"provider": "openai", "pattern": "gpt-*", "family": "gpt", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
+    {"provider": "openai", "pattern": "o[134]*", "family": "gpt", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
+    {"provider": "gemini", "pattern": "gemini-*flash*", "family": "gemini", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
+    {"provider": "gemini", "pattern": "gemini-*", "family": "gemini", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
+    {"provider": "gemini", "pattern": "gemma-*", "family": "gemma", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"}
+  ]
+}
