@@ -69,6 +69,12 @@ def validate_draft(settings, draft, *, replacing=None):
         if cid != replacing and other['name'].casefold() == name.casefold():
             raise ConnectionRefused('Each connection needs its own name')
     old = settings['connections'].get(replacing) if replacing else None
+    base_url = draft.base_url
+    if isinstance(base_url, str) and not (old and old['base_url'] == base_url):
+        # A typed address loses its trailing slashes; one left as it was stays byte for byte (a
+        # migrated 'exact' address is the call string itself).
+        base_url = base_url.rstrip('/')
+    draft = Draft(draft.provider, draft.name, draft.format, base_url, draft.ca_file, draft.key, draft.jobs)
     if (old and old['key_source'] == 'stored' and draft.key is None
             and any(old[f] != getattr(draft, f) for f in ('base_url', 'ca_file', 'format', 'provider'))):
         # A stored key goes only to the address it was entered for.

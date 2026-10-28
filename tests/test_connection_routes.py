@@ -1053,6 +1053,19 @@ def test_an_upgraded_v5_install_can_edit_add_and_remove_connections(server, test
     assert triage not in server.settings()['connections'] and server.settings()['roles']['proposer'] is None
 
 
+def test_settings_set_keeps_a_job_on_its_trailing_slash_stored_key_connection(server, tester):
+    conn = added(server, base_url=BASE + '/', jobs={'proposer': job()})
+    assert server.settings()['connections'][conn]['base_url'] == BASE      # typed: the slash is dropped
+    # As an earlier popup saved it, with the slash.
+    saved = server.settings()
+    saved['connections'][conn]['base_url'] = BASE + '/'
+    local_settings.save(server.config_path, saved)
+    local.settings_set(server.config_path, 'model', ['same_family_policy=proceed'])
+    after = server.settings()
+    assert after['roles']['proposer']['connection'] == conn and after['connections'] == saved['connections']
+    assert after['same_family_policy'] == 'proceed'
+
+
 def test_an_environment_connection_whose_variable_is_unset_takes_a_replaced_key(server, tester):
     write_v5(server.config_path)                          # migrated: Review's key_source is 'environment'
     review = server.settings()['roles']['reviewer']['connection']

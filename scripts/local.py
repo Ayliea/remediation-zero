@@ -71,7 +71,7 @@ from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
 from tools.local_secrets import SecretsFile, secrets_path
 from tools.model_check import check_models
-from tools.model_endpoints import split_endpoint
+from tools.model_endpoints import call_endpoint
 from tools.model_roles import ModelRoles, ROLES, suggest_family
 from tools.models import FORMATS
 from ui import account_views
@@ -956,17 +956,24 @@ def apply_settings_form(values, section, fields, *, running_port=None):
 
 
 def _connection_for(values, role, format, endpoint, model, ca_file):
-    """The id of the connection a job's call goes through: one with the same format, address and
-    CA file (the job's own first), else a new one named for the job. Changes `values`."""
+    """The id of the connection a job's call goes through: one with the same format and CA file
+    whose call address for this model is `endpoint` (the job's own first), else a new one named
+    for the job. Matched on the call string, not the stored base, so a base saved with a trailing
+    slash still matches the address it builds. Changes `values`."""
     if format not in FORMATS:
         raise ValueError('The local edition has no cloud model format' if format == 'vertex' else
                          'Unknown model format')
-    base_url, style = split_endpoint(format, endpoint, model)
     current = (values['roles'][role] or {}).get('connection')
     order = sorted(values['connections'], key=lambda cid: cid != current)
     for cid in order:
         conn = values['connections'][cid]
-        if (conn['format'], conn['base_url'], conn['endpoint_style'], conn['ca_file']) == (format, base_url, style, ca_file):
+        if (conn['format'], conn['ca_file']) != (format, ca_file):
+            continue
+        try:
+            built = call_endpoint(format, conn['base_url'], model, conn['endpoint_style'])
+        except ValueError:
+            continue
+        if built == endpoint:
             return cid
     made = local_settings.new_connection(format, endpoint, model, ca_file, role)
     taken = {c['name'].casefold() for c in values['connections'].values()}

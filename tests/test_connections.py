@@ -171,6 +171,27 @@ def test_changing_the_address_of_a_stored_key_connection_needs_the_key_again(fie
         cx.validate_draft(s, draft(**{**same, field: value}), replacing=AN)
 
 
+def test_a_typed_base_url_loses_its_trailing_slashes_and_a_retyped_one_needs_no_key():
+    assert cx.validate_draft(settings(), draft(base_url='https://generativelanguage.googleapis.com/v1beta//')
+                             ).base_url == 'https://generativelanguage.googleapis.com/v1beta'
+    s = settings(reviewer=job())
+    same = dict(name='Anthropic', provider='anthropic', format='anthropic_messages',
+                base_url='https://api.anthropic.com/v1/', key=None, jobs={'reviewer': JobChoice('claude-x', 'claude')})
+    assert cx.validate_draft(s, draft(**same), replacing=AN).base_url == 'https://api.anthropic.com/v1'
+
+
+def test_an_unchanged_address_is_kept_byte_for_byte():
+    s = settings(reviewer=job())
+    s['connections'][AN].update(base_url='https://guard.example.invalid/screen/v2/', endpoint_style='exact',
+                                key_source='environment')
+    kept = cx.validate_draft(s, draft(name='Anthropic', provider='anthropic', format='anthropic_messages',
+                                      base_url='https://guard.example.invalid/screen/v2/', key=None,
+                                      jobs={'reviewer': JobChoice('claude-x', 'claude')}), replacing=AN)
+    assert kept.base_url == 'https://guard.example.invalid/screen/v2/'
+    new = cx.with_connection(s, AN, kept)
+    assert new['connections'][AN]['endpoint_style'] == 'exact'
+
+
 def test_a_key_needing_provider_with_no_key_becomes_environment_sourced():
     new = cx.with_connection(settings(), NEW, draft(key=None))
     assert new['connections'][NEW]['key_source'] == 'environment'
