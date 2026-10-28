@@ -29,6 +29,10 @@
 
   let confirmed = DATA.confirmed === true;
   let state = null;        // the open popup's values; null when closed
+  // The typed key, once step 2 is left. The input is emptied then, so no password manager sees
+  // a filled password box disappear after a request (a "submission" to it). Back puts it back.
+  let heldKey = '';
+  let keyEpoch = 0;        // changes whenever the key is typed: the model list is signed with it
   let reloadOnClose = false;  // something may have changed: the list is read again on close
 
   const $ = (id) => document.getElementById(id);
@@ -103,6 +107,18 @@
     for (const button of dialog.querySelectorAll('button')) {
       button.disabled = on;
     }
+    if (!on && state.card) {
+      // A disabled button loses focus: give it back to the card, not to the page behind.
+      const shown = card(state.card);
+      if (!shown.contains(document.activeElement)) {
+        const primary = shown.querySelector('[data-primary]');
+        const first = primary && visible(primary) ? primary
+          : Array.from(shown.querySelectorAll('input, select, button, a[href], summary')).find(visible);
+        if (first) {
+          first.focus();
+        }
+      }
+    }
   }
 
   function setMark(name) {
@@ -114,6 +130,7 @@
 
   function clearAll() {
     // Every typed value goes, the key first; nothing else holds it once the state is dropped.
+    heldKey = '';
     fields.key.value = '';
     fields.password.value = '';
     fields.code.value = '';
@@ -145,6 +162,9 @@
   function begin(mode, connId) {
     if (state) {
       clearAll();
+    }
+    for (const button of dialog.querySelectorAll('button')) {
+      button.disabled = false;   // a popup closed mid-request left them disabled
     }
     const conn = connId ? CONNECTIONS.get(connId) : null;
     state = { mode: mode, flow: FLOWS[mode] || [], connection: connId || null, conn: conn,
@@ -205,6 +225,7 @@
   }
 
   function closeDialog() {
+    heldKey = '';
     fields.key.value = '';   // now, not when the close event comes round
     dialog.close();
   }
@@ -261,11 +282,12 @@
   // A change: a lapsed re-confirm (401 {"confirm": true}) asks in place, then sends the same
   // request again with the same values.
   async function change(path, body, from) {
+    const mine = state;
     state.pending = { path: path, body: body, from: from };
     busy(true);
     const result = await post(path, body);
-    if (!state) {
-      reloadOnClose = true;
+    if (state !== mine) {
+      // The popup that asked was closed meanwhile: whatever happened, read the list again.
       location.assign(PAGE);
       return;
     }
@@ -301,9 +323,10 @@
     if (code) {
       body.code = code;
     }
+    const mine = state;
     busy(true);
     const result = await post('/connections/confirm', body);
-    if (!state) {
+    if (state !== mine) {
       return;
     }
     busy(false);
@@ -339,6 +362,8 @@
       for (const input of [fields.key, fields.address, fields.base, fields.ca]) {
         input.value = '';
       }
+      heldKey = '';
+      keyEpoch += 1;
       fields.format.selectedIndex = 0;
       state.listed = null;
       state.advised = null;
@@ -350,6 +375,10 @@
   // --- step 2: the key, or the address ---------------------------------------------
 
   function prepareKey() {
+    if (heldKey) {
+      fields.key.value = heldKey;
+      heldKey = '';
+    }
     const preset = PRESETS.get(state.provider);
     const local = state.provider === 'ollama';
     const other = state.provider === 'other';
@@ -406,6 +435,8 @@
       fields.address.focus();
       return;
     }
+    heldKey = fields.key.value;
+    fields.key.value = '';      // before the card is hidden: see heldKey
     enter(state.flow[state.flow.indexOf('key') + 1]);
   }
 
@@ -430,7 +461,7 @@
       return { connection: state.connection };
     }
     const body = { provider: state.provider, base_url: baseUrl(), ca_file: fields.ca.value.trim(),
-                   key: fields.key.value };
+                   key: heldKey };
     if (state.provider === 'other') {
       body.format = format();
     }
@@ -439,7 +470,8 @@
 
   async function listModels() {
     const body = listBody();
-    const signature = JSON.stringify(body);
+    // Signed without the key itself, so nothing but heldKey and the request keeps it.
+    const signature = JSON.stringify(Object.assign({}, body, { key: 'epoch ' + keyEpoch }));
     if (state.listed === signature) {
       return;   // listed once for these values; Back and Continue do not ask again
     }
@@ -448,8 +480,9 @@
     list.replaceChildren();
     status('model', 'Asking for the models it lists…');
     busy(true);
+    const mine = state;
     const result = await post('/connections/models', body);
-    if (!state) {
+    if (state !== mine) {
       return;
     }
     busy(false);
@@ -555,8 +588,9 @@
     inCard('jobs', '[data-cover]').replaceChildren();
     status('jobs', 'Working out what it should do…');
     busy(true);
+    const mine = state;
     const result = await post('/connections/recommend', body);
-    if (!state) {
+    if (state !== mine) {
       return;
     }
     busy(false);
@@ -696,12 +730,12 @@
         return;
       }
       change('/connections/save', { draft: { provider: state.provider, name: fields.name.value.trim(),
-        format: format(), base_url: baseUrl(), ca_file: fields.ca.value.trim(), key: fields.key.value,
+        format: format(), base_url: baseUrl(), ca_file: fields.ca.value.trim(), key: heldKey,
         jobs: jobs } }, 'test');
     } else if (state.mode === 'edit') {
       change('/connections/edit', { connection: state.connection, jobs: chosenJobs() }, 'test');
     } else {
-      const body = { connection: state.connection, key: fields.key.value };
+      const body = { connection: state.connection, key: heldKey };
       if (baseUrl()) {
         body.base_url = baseUrl();
       }
@@ -769,7 +803,9 @@
     shown.querySelector('[data-audit]').hidden = !unaudited;
     shown.querySelector('[data-do="another"]').hidden = state.mode !== 'add';
     // The key has done its job: it leaves memory now, whatever is pressed next.
+    heldKey = '';
     fields.key.value = '';
+    state.pending = null;
     show('done');
   }
 
@@ -863,8 +899,13 @@
     if (state && state.busy) {
       event.preventDefault();
     } else {
+      heldKey = '';
       fields.key.value = '';
     }
+  });
+
+  fields.key.addEventListener('input', () => {
+    keyEpoch += 1;
   });
 
   dialog.addEventListener('close', () => {

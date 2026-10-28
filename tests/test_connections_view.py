@@ -326,10 +326,37 @@ def test_the_provider_key_page_link_opens_safely():
     assert links and all('rel="noopener noreferrer"' in a for a in links)
 
 
-def test_the_key_field_is_never_remembered_by_the_browser():
+def test_the_key_field_asks_password_managers_to_keep_out():
+    # What the markup can say. Whether a real password manager obeys was not checked (see the report).
     field = re.search(r'<input [^>]*id="rz-key"[^>]*>', section())[0]
-    assert 'type="password"' in field and 'autocomplete="off"' in field and 'spellcheck="false"' in field
-    assert 'value=' not in field
+    assert 'type="password"' in field and 'autocomplete="new-password"' in field and 'spellcheck="false"' in field
+    assert 'data-1p-ignore' in field and 'data-lpignore="true"' in field
+    assert 'value=' not in field and 'name=' not in field
+
+
+def test_the_script_empties_the_key_box_before_leaving_step_2():
+    # keyDone moves the key to memory and empties the box before the card is hidden; requests send
+    # the held key, never the box; the model list is signed with an epoch, not the key.
+    done = SCRIPT[SCRIPT.index('function keyDone()'):SCRIPT.index('function baseUrl()')]
+    assert done.index("heldKey = fields.key.value;") < done.index("fields.key.value = '';") < done.index('enter(')
+    assert SCRIPT.count('key: heldKey') == 3 and 'key: fields.key.value' not in SCRIPT
+    assert "{ key: 'epoch ' + keyEpoch }" in SCRIPT
+
+
+def test_every_answer_is_dropped_when_its_popup_is_gone():
+    # Each awaited request checks the popup that asked is still the open one.
+    assert SCRIPT.count('const mine = state;') == SCRIPT.count('await post(') == 4
+    assert SCRIPT.count('if (state !== mine)') == 4
+    begin = SCRIPT[SCRIPT.index('function begin('):SCRIPT.index('function whenConfirmed(')]
+    assert 'button.disabled = false' in begin
+
+
+def test_only_the_settings_view_builds_the_models_data(owner_client, monkeypatch):
+    local_settings.save(owner_client.config_path, settings_with_connections())
+    monkeypatch.setattr(connections, 'rows', lambda *a, **k: pytest.fail('the key file was read'))
+    for path in ('/', '/?view=actions', '/?view=infrastructure'):
+        r = owner_client.get(path)
+        assert r.status == 200 and '?view=settings' in r.text
 
 
 def test_every_control_in_the_dialog_is_a_real_button_or_input():

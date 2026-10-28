@@ -1530,10 +1530,12 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 if config_path:
                     saved = local_settings.load(config_path)
                     chosen = saved['scanner']['task_ids']
+                    # Only the Settings view shows it (others need only its nav link), so only that view
+                    # reads the key file and builds the Models data.
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
                         message='Preferences saved. No model calls were made.' if query.get('saved') == ['1'] else '',
                         scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None,
-                        session=session)
+                        session=session) if view == 'settings' else ''
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
                               approve_command=None if demo else approve_command,
                               upload_token=session.csrf if upload and not demo else None,
