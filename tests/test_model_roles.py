@@ -191,7 +191,15 @@ def test_run_local_cycle_builds_adapters_from_its_environ(tmp_path, monkeypatch)
     from tools import local_settings
     from tools.local_layout import Workspace
     ws = Workspace(tmp_path / 'workspace')
-    local_settings.save(local_settings.settings_path(ws.root), dict(local_settings.DEFAULTS, **saved()))
+    # saved() as settings version 6: the proposer through its own connection.
+    connection = {'name': 'Ollama (Triage)', 'provider': 'ollama', 'format': 'openai_chat',
+                  'base_url': 'http://127.0.0.1:11434/v1', 'endpoint_style': 'base', 'ca_file': '',
+                  'key_source': 'none', 'last_test': None}
+    proposer = {'connection': 'conn-000000000001', 'model': 'llama3.1', 'family': 'llama', 'timeout_seconds': 60}
+    local_settings.save(local_settings.settings_path(ws.root), dict(
+        local_settings.DEFAULTS, connections={'conn-000000000001': connection},
+        roles=dict(saved()['roles'], proposer=proposer)))
+    assert local.load_roles(ws.root, {}).proposer.as_settings() == ModelRoles.from_settings(saved(), {}).proposer.as_settings()
     seen = []
 
     def stop(fmt, url, model, key, ca_file=None, timeout_seconds=None):

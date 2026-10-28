@@ -117,10 +117,14 @@ def test_check_models_reports_each_role(tmp_path, monkeypatch, capsys):
     from tools.model_check import SAMPLE_PROPOSAL
     from tools.model_roles import ModelRoles
     database = tmp_path / 'w.sqlite3'
-    roles = {r: dict(format='openai_chat', endpoint='http://localhost:1/v1/chat/completions', model='m-' + r, family='other', ca_file='', timeout_seconds=60)
+    connections = {'conn-000000000001': dict(name='Local', provider='other', format='openai_chat',
+                                             base_url='http://localhost:1/v1', endpoint_style='base', ca_file='',
+                                             key_source='none', last_test=None)}
+    roles = {r: dict(connection='conn-000000000001', model='m-' + r, family='other', timeout_seconds=60)
              for r in ('proposer', 'reviewer', 'summarizer')}
     roles['guard'] = None
-    local_settings.save(local_settings.settings_path(database), dict(local_settings.DEFAULTS, roles=roles))
+    local_settings.save(local_settings.settings_path(database),
+                        dict(local_settings.DEFAULTS, connections=connections, roles=roles))
     replies = {'proposer': json.dumps(SAMPLE_PROPOSAL), 'reviewer': CapacityError('queue full at http://secret.invalid'),
                'summarizer': 'Three findings are open.'}
     monkeypatch.setattr(ModelRoles, 'adapter', lambda self, role, **kw: _Adapter(replies[role]))

@@ -10,8 +10,11 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
+from tools.local_secrets import StoredKeyMissing
+from tools.model_endpoints import call_endpoint
 from tools.model_transport import validate_endpoint
 from tools.models import FORMATS, build_adapter
+from tools.secrets_port import SecretsPort
 
 ROLES = ('proposer', 'reviewer', 'summarizer', 'guard')
 FAMILIES = ('gemini', 'gemma', 'llama', 'claude', 'gpt', 'qwen', 'mistral', 'deepseek', 'phi', 'other')
@@ -41,6 +44,9 @@ class RoleConfig:
     ca_file: str = ''
     #: Seconds to wait for an answer: a CPU-only or just-loaded local model can need minutes.
     timeout_seconds: int = 60
+    #: The settings connection this job's call goes through ('' when built another way). Not part of
+    #: the call: as_settings and provenance leave it out.
+    connection: str = ''
 
     def __post_init__(self):
         if self.role not in ROLES:
@@ -81,6 +87,34 @@ def key_present(role, environ):
     return any(bool(environ.get(n)) for n in _key_names(role))
 
 
+def key_source(settings, role, environ):
+    """Where the role's key comes from: 'environment' when one is set there, else its connection's
+    key_source ('stored', 'environment' or 'none'). Reads no key file and returns no key."""
+    if key_present(role, environ):
+        return 'environment'
+    raw = (settings.get('roles') or {}).get(role)
+    if not raw:
+        return 'none'
+    if 'connection' not in raw:
+        return 'environment'  # a role given as a resolved call: keys come only from the environment
+    return settings['connections'][raw['connection']]['key_source']
+
+
+def _resolve(role, raw, connections):
+    """A role's RoleConfig: through its connection (settings v6), or as given (already resolved)."""
+    if 'connection' not in raw:
+        return RoleConfig(role, **raw)
+    conn = connections.get(raw['connection']) if isinstance(raw['connection'], str) else None
+    if not isinstance(conn, Mapping):
+        raise ValueError('A job points at a connection that does not exist')
+    model = raw['model']
+    if not isinstance(model, str) or not isinstance(conn['base_url'], str) or conn['format'] not in FORMATS:
+        raise ValueError('Invalid model connection')
+    return RoleConfig(role, conn['format'], call_endpoint(conn['format'], conn['base_url'], model,
+                                                          conn['endpoint_style']),
+                      model, raw['family'], conn['ca_file'], raw['timeout_seconds'], raw['connection'])
+
+
 @dataclass(frozen=True)
 class ModelRoles:
     proposer: RoleConfig | None = None
@@ -91,6 +125,10 @@ class ModelRoles:
     #: Where adapter() reads API keys; None means the process environment.
     #: Never shown (repr=False) and not part of equality or the fingerprint.
     environ: Mapping[str, str] | None = field(default=None, repr=False, compare=False)
+    #: Where adapter() reads a stored key, for a job whose connection says its key is stored.
+    secrets: SecretsPort | None = field(default=None, repr=False, compare=False)
+    #: Connection id -> key_source ('stored', 'environment', 'none'), from the settings.
+    key_sources: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self):
         if self.same_family_policy not in POLICIES:
@@ -120,6 +158,11 @@ class ModelRoles:
             return VertexAdapter(vertex_client, config.model)
         environ = os.environ if self.environ is None else self.environ
         key = next((environ[n] for n in _key_names(role) if environ.get(n)), None)
+        if key is None and config.connection and self.key_sources.get(config.connection) == 'stored':
+            # The environment wins; else the key file, read now and not kept.
+            key = self.secrets.get(config.connection) if self.secrets is not None else None
+            if key is None:
+                raise StoredKeyMissing(config.connection)
         if key and ('\n' in key or '\r' in key):
             raise ValueError('Invalid API key')
         return build_adapter(config.format, config.endpoint, config.model, key, config.ca_file or None,
@@ -148,10 +191,13 @@ class ModelRoles:
         return cls(proposer, reviewer, summarizer, build('guard', None), 'wait')
 
     @classmethod
-    def from_settings(cls, settings, environ):
-        """Roles from local settings; `environ` overrides the proposer connection."""
+    def from_settings(cls, settings, environ, secrets=None):
+        """Roles from local settings, each resolved through its connection (a role already given
+        as format, endpoint, model... is used as it is); `environ` overrides the proposer.
+        `secrets` holds the keys of connections whose key_source is 'stored'."""
         roles = settings.get('roles') or {}
-        built = {role: RoleConfig(role, **roles[role]) if roles.get(role) else None for role in ROLES}
+        connections = settings.get('connections') or {}
+        built = {role: _resolve(role, roles[role], connections) if roles.get(role) else None for role in ROLES}
         endpoint, model = environ.get('RZ_MODEL_ENDPOINT'), environ.get('RZ_MODEL')
         if endpoint or model:
             saved = built['proposer']
@@ -163,6 +209,9 @@ class ModelRoles:
                 saved.family if same else suggest_family(use_model),
                 # The saved CA file belongs to the saved server; another endpoint gets none.
                 saved.ca_file if saved and use_endpoint == saved.endpoint else '',
-                saved.timeout_seconds if saved else 60)
+                saved.timeout_seconds if saved else 60,
+                # Nor its key: a stored key is sent only to the address it was stored for.
+                saved.connection if saved and use_endpoint == saved.endpoint else '')
         return cls(**built, same_family_policy=settings.get('same_family_policy', 'wait'),
-                   environ=environ)
+                   environ=environ, secrets=secrets,
+                   key_sources={cid: c['key_source'] for cid, c in connections.items()})

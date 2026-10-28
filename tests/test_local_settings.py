@@ -21,10 +21,20 @@ def proposer(**change):
     return dict(dict(format='openai_chat', endpoint=LOCAL, model='test', family='other', ca_file='', timeout_seconds=60), **change)
 
 
-def with_proposer(**fields):
-    value = copy.deepcopy(config.DEFAULTS)
-    value['roles']['proposer'] = proposer(**fields)
+def place(value, role, raw):
+    """`value` (v6) with `raw`, a role's whole call, put on its own connection that uses the
+    endpoint exactly as given. Any field beyond the call stays on the role, to be refused."""
+    raw = dict(raw)
+    cid = 'conn-%012x' % (len(value['connections']) + 1)
+    value['connections'][cid] = {'name': f'Test {role}', 'provider': 'other', 'format': raw.pop('format'),
+                                 'base_url': raw.pop('endpoint'), 'endpoint_style': 'exact',
+                                 'ca_file': raw.pop('ca_file'), 'key_source': 'environment', 'last_test': None}
+    value['roles'][role] = dict(raw, connection=cid)
     return value
+
+
+def with_proposer(**fields):
+    return place(copy.deepcopy(config.DEFAULTS), 'proposer', proposer(**fields))
 
 
 @pytest.mark.parametrize('make', [
@@ -77,14 +87,14 @@ def test_v1_settings_upgrade_to_proposer_role(tmp_path):
     path.write_text(json.dumps({'endpoint': 'http://127.0.0.1:11434/v1/chat/completions', 'model': 'llama3.1',
                                 'mode': 'saved', 'open_browser': False, 'port': 8083}))
     loaded = config.load(path)
-    assert loaded['version'] == 5
-    assert loaded['roles']['proposer'] == dict(format='openai_chat', model='llama3.1', family='llama',
+    assert loaded['version'] == 6
+    assert config.role_settings(loaded, 'proposer') == dict(format='openai_chat', model='llama3.1', family='llama',
         endpoint='http://127.0.0.1:11434/v1/chat/completions', ca_file='', timeout_seconds=60)
     assert [loaded['roles'][r] for r in ('reviewer', 'summarizer', 'guard')] == [None] * 3
     assert loaded['same_family_policy'] == 'wait'
     assert (loaded['mode'], loaded['open_browser'], loaded['port']) == ('saved', False, 8083)
     config.save(path, loaded)
-    assert json.loads(path.read_text())['version'] == 5
+    assert json.loads(path.read_text())['version'] == 6
 
 
 def test_blank_v1_connection_upgrades_to_no_proposer(tmp_path):
@@ -238,8 +248,7 @@ def test_settings_renders_four_role_blocks(app):
 
 def test_no_reviewer_notice_only_when_reviewer_is_none(app):
     path, request = app
-    value = copy.deepcopy(config.DEFAULTS)
-    value['roles']['reviewer'] = proposer(model='gemma-4', family='gemma')
+    value = place(copy.deepcopy(config.DEFAULTS), 'reviewer', proposer(model='gemma-4', family='gemma'))
     config.save(path, value)
     body = request()[1]
     assert 'No reviewer configured' not in body
@@ -256,7 +265,7 @@ def test_post_saves_roles_and_policy(app):
     saved = config.load(path)
     assert saved['same_family_policy'] == 'proceed'
     assert saved['roles']['proposer']['family'] == 'gemini'  # blank family is suggested from the model
-    assert saved['roles']['reviewer'] == dict(format='anthropic_messages', endpoint='https://example.invalid/v1/messages',
+    assert config.role_settings(saved, 'reviewer') == dict(format='anthropic_messages', endpoint='https://example.invalid/v1/messages',
                                               model='claude-x', family='claude', ca_file='', timeout_seconds=60)
     assert saved['roles']['summarizer'] is None and saved['roles']['guard'] is None
 
@@ -312,8 +321,7 @@ def test_settings_never_renders_key_values(app, monkeypatch):
 
 def test_endpoint_model_and_family_are_escaped(app):
     path, request = app
-    value = copy.deepcopy(config.DEFAULTS)
-    value['roles']['proposer'] = proposer(model='m"><script>alert(1)</script>')
+    value = with_proposer(model='m"><script>alert(1)</script>')
     config.save(path, value)
     body = request()[1]
     assert '<script>alert(1)' not in body
@@ -352,9 +360,7 @@ def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch
 
 def test_endpoint_is_escaped_in_the_page(app):
     path, request = app
-    value = copy.deepcopy(config.DEFAULTS)
-    value['roles']['proposer'] = proposer()
-    value['roles']['proposer']['endpoint'] = 'http://localhost:11434/v1/a"onfocus="x<b>'
+    value = with_proposer(endpoint='http://localhost:11434/v1/a"onfocus="x<b>')
     path.write_text(json.dumps(value))
     body = request()[1]
     assert 'a"onfocus="x<b>' not in body
@@ -442,36 +448,37 @@ def with_scanner(**change):
 
 
 def _v2_file(**change):
-    v2 = {k: v for k, v in copy.deepcopy(config.DEFAULTS).items() if k not in {'scanner', 'listen_address', 'server_names', 'certificate'}}
+    v2 = {k: v for k, v in copy.deepcopy(config.DEFAULTS).items()
+          if k not in {'connections', 'scanner', 'listen_address', 'server_names', 'certificate'}}
     v2.update(version=2)
     v2.update(change)
     return v2
 
 
-def test_v2_settings_upgrade_to_v5_with_scanner_defaults(tmp_path):
+def test_v2_settings_upgrade_to_v6_with_scanner_defaults(tmp_path):
     path = tmp_path / 'prefs.json'
     v2 = _v2_file(port=8090, mode='saved')
     # v2 roles had no ca_file; the upgrade adds an empty one.
     v2['roles']['proposer'] = {k: v for k, v in proposer(model='kept').items() if k not in ('ca_file', 'timeout_seconds')}
     path.write_text(json.dumps(v2))
     loaded = config.load(path)
-    assert loaded['version'] == 5
-    assert loaded['roles']['proposer']['ca_file'] == ''
+    assert loaded['version'] == 6
+    assert config.role_settings(loaded, 'proposer')['ca_file'] == ''
     assert loaded['scanner'] == SCANNER_DEFAULTS
     assert (loaded['port'], loaded['mode'], loaded['roles']['proposer']['model']) == (8090, 'saved', 'kept')
     # load() never writes: the file is still v2 until the next save, as for v1.
     assert json.loads(path.read_text())['version'] == 2
     config.save(path, loaded)
     on_disk = json.loads(path.read_text())
-    assert on_disk['version'] == 5 and on_disk['scanner'] == SCANNER_DEFAULTS
+    assert on_disk['version'] == 6 and on_disk['scanner'] == SCANNER_DEFAULTS
     assert list(tmp_path.iterdir()) == [path]
 
 
-def test_v1_settings_reach_v5(tmp_path):
+def test_v1_settings_reach_v6(tmp_path):
     path = tmp_path / 'prefs.json'
     path.write_text(json.dumps({'endpoint': '', 'model': '', 'mode': 'demo', 'open_browser': True, 'port': 8081}))
     loaded = config.load(path)
-    assert loaded['version'] == 5 and loaded['scanner'] == SCANNER_DEFAULTS
+    assert loaded['version'] == 6 and loaded['scanner'] == SCANNER_DEFAULTS
 
 
 def test_v2_file_with_unknown_key_is_refused(tmp_path):
@@ -489,7 +496,7 @@ def test_v3_file_with_unknown_key_is_refused(tmp_path):
 
 
 def test_scanner_defaults():
-    assert config.DEFAULTS['version'] == 5
+    assert config.DEFAULTS['version'] == 6
     assert config.DEFAULTS['scanner'] == SCANNER_DEFAULTS
 
 
@@ -955,17 +962,17 @@ def test_a_trickling_gvmd_cannot_hold_the_settings_page(app, tmp_path_factory, f
 
 def v4_settings():
     old = copy.deepcopy(config.DEFAULTS)
-    for key in ('listen_address', 'server_names', 'certificate'):
+    for key in ('connections', 'listen_address', 'server_names', 'certificate'):
         del old[key]
     return dict(old, version=4)
 
 
-def test_v4_settings_upgrade_to_v5_with_loopback_defaults(tmp_path):
+def test_v4_settings_upgrade_to_v6_with_loopback_defaults(tmp_path):
     path = tmp_path / 'prefs.json'
     old = dict(v4_settings(), port=8090)
     path.write_text(json.dumps(old))
     loaded = config.load(path)
-    assert loaded['version'] == 5 and loaded['port'] == 8090
+    assert loaded['version'] == 6 and loaded['port'] == 8090
     assert loaded['listen_address'] == '127.0.0.1' and loaded['server_names'] == []
     assert loaded['certificate'] == {'mode': 'self-signed', 'cert_file': '', 'key_file': ''}
     assert config.exposed(loaded) is False

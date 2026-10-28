@@ -176,14 +176,15 @@ def role(endpoint='https://models.example.test/v1/chat/completions', ca_file='')
 
 def test_version_3_settings_upgrade_with_an_empty_ca_file_and_the_default_timeout(tmp_path):
     path = tmp_path / 'db.settings.json'
-    old = {k: v for k, v in local_settings.DEFAULTS.items() if k not in {'listen_address', 'server_names', 'certificate'}}
+    old = {k: v for k, v in local_settings.DEFAULTS.items()
+           if k not in {'connections', 'listen_address', 'server_names', 'certificate'}}
     old['version'] = 3
     old['roles'] = dict(old['roles'], proposer={k: v for k, v in role().items()
                                                 if k not in ('ca_file', 'timeout_seconds')})
     path.write_text(json.dumps(old))
     loaded = local_settings.load(path)
-    assert loaded['version'] == 5
-    assert loaded['roles']['proposer']['ca_file'] == ''
+    assert loaded['version'] == 6
+    assert local_settings.role_settings(loaded, 'proposer')['ca_file'] == ''
     assert loaded['roles']['proposer']['timeout_seconds'] == 60
     assert loaded['roles']['reviewer'] is None
 
@@ -194,9 +195,15 @@ def test_version_3_settings_upgrade_with_an_empty_ca_file_and_the_default_timeou
     role(ca_file='/etc/ca.pem\n'),
 ])
 def test_a_ca_file_setting_that_cannot_apply_is_refused(bad):
-    value = dict(local_settings.DEFAULTS, roles=dict(local_settings.DEFAULTS['roles'], proposer=bad))
+    connection = {'name': 'Test', 'provider': 'other', 'format': bad['format'], 'base_url': bad['endpoint'],
+                  'endpoint_style': 'exact', 'ca_file': bad['ca_file'], 'key_source': 'environment', 'last_test': None}
+    proposer = {'connection': 'conn-000000000001', 'model': bad['model'], 'family': bad['family'],
+                'timeout_seconds': bad['timeout_seconds']}
+    value = dict(local_settings.DEFAULTS, connections={'conn-000000000001': connection},
+                 roles=dict(local_settings.DEFAULTS['roles'], proposer=proposer))
     with pytest.raises(ValueError):
         local_settings.validate(value)
+    local_settings.validate(dict(value, connections={'conn-000000000001': dict(connection, ca_file='')}))
 
 
 def test_the_ca_file_is_checked_when_saved(certs):
@@ -257,7 +264,7 @@ def save_model(port, ca_file, timeout='60'):
 def test_a_model_ca_file_is_saved_from_the_settings_page(settings_server, certs):
     port, config_path = settings_server
     assert save_model(port, str(certs / 'ca.pem'))[0] == 303
-    assert local_settings.load(config_path)['roles']['proposer']['ca_file'] == str(certs / 'ca.pem')
+    assert local_settings.role_settings(local_settings.load(config_path), 'proposer')['ca_file'] == str(certs / 'ca.pem')
 
 
 def test_an_unreadable_ca_file_is_refused_and_nothing_is_saved(settings_server, certs):

@@ -8,22 +8,27 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import ssl
 import tempfile
 from tools.gmp import GmpTarget
-from tools.model_transport import CertificateFileUnreadable, tls_context
+from tools.model_catalogue import JOB_NAMES, preset_for, presets
+from tools.model_endpoints import call_endpoint, split_endpoint
+from tools.model_transport import CertificateFileUnreadable, tls_context, validate_endpoint
 from tools.model_roles import POLICIES, ROLES, RoleConfig, suggest_family
+from tools.models import FORMATS
 
 SCANNER_DEFAULTS = {'transport': 'unix', 'socket_path': '', 'host': '', 'port': 9390, 'ca_file': '',
                     'task_ids': [], 'qod_floor': 70, 'auto_enrichment': False}
 CERTIFICATE_DEFAULTS = {'mode': 'self-signed', 'cert_file': '', 'key_file': ''}
-DEFAULTS = {'version': 5, 'roles': {role: None for role in ROLES}, 'same_family_policy': 'wait',
-            'mode': 'demo', 'open_browser': True, 'port': 8081, 'cycle_interval_minutes': 0,
-            'scanner': SCANNER_DEFAULTS, 'listen_address': '127.0.0.1', 'server_names': [],
-            'certificate': CERTIFICATE_DEFAULTS}
+DEFAULTS = {'version': 6, 'connections': {}, 'roles': {role: None for role in ROLES},
+            'same_family_policy': 'wait', 'mode': 'demo', 'open_browser': True, 'port': 8081,
+            'cycle_interval_minutes': 0, 'scanner': SCANNER_DEFAULTS, 'listen_address': '127.0.0.1',
+            'server_names': [], 'certificate': CERTIFICATE_DEFAULTS}
+_V5_FIELDS = set(DEFAULTS) - {'connections'}
 _V4_ADDED = {'listen_address', 'server_names', 'certificate'}
-_V3_FIELDS = set(DEFAULTS) - _V4_ADDED
+_V3_FIELDS = _V5_FIELDS - _V4_ADDED
 _V2_FIELDS = _V3_FIELDS - {'scanner'}
 MAX_SERVER_NAMES = 20
 #: The one rule for a host name people type or a proxy forwards (lower case). scripts/local.py's
@@ -32,17 +37,44 @@ PUBLIC_HOST_RE = re.compile(r'[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?')
 TASK_ID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 _HOSTNAME_RE = re.compile(r'[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?')
 _V1_FIELDS = {'endpoint', 'model', 'mode', 'open_browser', 'port'}
-_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds'}
-_V3_ROLE_FIELDS = _ROLE_FIELDS - {'ca_file', 'timeout_seconds'}
+#: A v5 role carried its whole call; a v6 role points at a connection for format, address and CA file.
+_V5_ROLE_FIELDS = {'format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds'}
+_V3_ROLE_FIELDS = _V5_ROLE_FIELDS - {'ca_file', 'timeout_seconds'}
+_ROLE_FIELDS = {'connection', 'model', 'family', 'timeout_seconds'}
+#: Exactly these fields: a key has no place to live in a connection (it is in the key file or
+#: the environment).
+CONNECTION_FIELDS = {'name', 'provider', 'format', 'base_url', 'endpoint_style', 'ca_file', 'key_source',
+                     'last_test'}
+LAST_TEST_FIELDS = {'ok', 'error', 'seconds', 'jobs', 'real_ts', 'sim_ts'}
+KEY_SOURCES = ('stored', 'environment', 'none')
+CONNECTION_ID_RE = re.compile(r'conn-[0-9a-f]{12}')
+MAX_CONNECTION_NAME = 60
+#: A test's error is an exception class name, never its message (which could carry anything).
+_ERROR_CLASS_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_.]{0,99}')
 
 
 def settings_path(database):
     return Path(database).resolve().with_suffix('.settings.json')
 
 
+def new_connection_id():
+    return 'conn-' + secrets.token_hex(6)
+
+
 def validate(value):
-    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or value['version'] != 5:
+    if not isinstance(value, dict) or set(value) != set(DEFAULTS) or value['version'] != 6:
         raise ValueError('Unexpected settings fields')
+    connections = value['connections']
+    if not isinstance(connections, dict):
+        raise ValueError('Unexpected settings fields')
+    names = set()
+    for cid, conn in connections.items():
+        if not isinstance(cid, str) or not CONNECTION_ID_RE.fullmatch(cid):
+            raise ValueError('Unexpected settings fields')
+        _validate_connection(conn)
+        if conn['name'].casefold() in names:
+            raise ValueError('Each connection needs its own name')
+        names.add(conn['name'].casefold())
     roles = value['roles']
     if not isinstance(roles, dict) or set(roles) != set(ROLES):
         raise ValueError('Unexpected settings fields')
@@ -51,9 +83,79 @@ def validate(value):
             continue
         if not isinstance(raw, dict) or set(raw) != _ROLE_FIELDS:
             raise ValueError('Unexpected settings fields')
+        if not isinstance(raw['connection'], str) or raw['connection'] not in connections:
+            raise ValueError('A job points at a connection that does not exist')
+        if not isinstance(raw['model'], str):
+            raise ValueError('A model name is required (at most 200 characters)')
+        conn = connections[raw['connection']]
+        # The call each job makes must pass the endpoint rules, as a v5 role's did.
+        RoleConfig(role, conn['format'], call_endpoint(conn['format'], conn['base_url'], raw['model'],
+                                                       conn['endpoint_style']),
+                   raw['model'], raw['family'], conn['ca_file'], raw['timeout_seconds'], raw['connection'])
+    return _validate_rest(value)
+
+
+def _validate_connection(conn):
+    if not isinstance(conn, dict) or set(conn) != CONNECTION_FIELDS:
+        raise ValueError('Unexpected settings fields')
+    name = conn['name']
+    if (not isinstance(name, str) or not 1 <= len(name) <= MAX_CONNECTION_NAME or not name.strip()
+            or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in name)):
+        raise ValueError(f'A connection name is 1 to {MAX_CONNECTION_NAME} characters on one line')
+    if conn['provider'] not in {p.id for p in presets()}:
+        raise ValueError('Unknown provider')
+    if conn['format'] == 'vertex':
+        raise ValueError('The local edition has no cloud model format')
+    if conn['format'] not in FORMATS:
+        raise ValueError('Unknown model format')
+    if not isinstance(conn['base_url'], str) or len(conn['base_url']) > 2048:
+        raise ValueError('Invalid endpoint URL')
+    validate_endpoint(conn['base_url'])
+    if conn['endpoint_style'] not in {'base', 'exact'}:
+        raise ValueError('Unexpected settings fields')
+    ca_file = conn['ca_file']
+    if not isinstance(ca_file, str) or len(ca_file) > 4096 or any(c in ca_file for c in '\n\r\0'):
+        raise ValueError('Invalid CA certificate file')
+    if ca_file:
+        if not os.path.isabs(ca_file):
+            raise ValueError('The CA certificate file must be an absolute path')
+        if not conn['base_url'].lower().startswith('https://'):
+            raise ValueError('A CA certificate file applies only to an HTTPS endpoint')
+    if conn['key_source'] not in KEY_SOURCES:
+        raise ValueError('Unexpected settings fields')
+    test = conn['last_test']
+    if test is None:
+        return
+    number = lambda v: type(v) in (int, float) and v >= 0
+    if (not isinstance(test, dict) or set(test) != LAST_TEST_FIELDS or type(test['ok']) is not bool
+            or not isinstance(test['error'], str)
+            or (test['error'] and not _ERROR_CLASS_RE.fullmatch(test['error']))
+            or not all(number(test[k]) for k in ('seconds', 'real_ts', 'sim_ts'))
+            or not isinstance(test['jobs'], list) or not all(j in ROLES for j in test['jobs'])
+            or len(set(test['jobs'])) != len(test['jobs'])):
+        raise ValueError('Unexpected settings fields')
+
+
+def _validate_v5(value):
+    """A version 5 file as it was saved: each role carries its whole call."""
+    if not isinstance(value, dict) or set(value) != _V5_FIELDS or value['version'] != 5:
+        raise ValueError('Unexpected settings fields')
+    roles = value['roles']
+    if not isinstance(roles, dict) or set(roles) != set(ROLES):
+        raise ValueError('Unexpected settings fields')
+    for role, raw in roles.items():
+        if raw is None:
+            continue
+        if not isinstance(raw, dict) or set(raw) != _V5_ROLE_FIELDS:
+            raise ValueError('Unexpected settings fields')
         if raw['format'] == 'vertex':
             raise ValueError('The local edition has no cloud model format')
         RoleConfig(role, **raw)
+    return _validate_rest(value)
+
+
+def _validate_rest(value):
+    """Everything but the models, the same in v5 and v6."""
     if value['same_family_policy'] not in POLICIES:
         raise ValueError('Invalid same-family policy')
     if not isinstance(value['mode'], str) or value['mode'] not in {'demo', 'saved'} or type(value['open_browser']) is not bool:
@@ -204,13 +306,59 @@ def check_ca_file(path):
         raise ValueError('The CA certificate file could not be read as a PEM certificate') from None
 
 
+def connection_name(format, base_url, role):
+    """The name of a connection made for one job: '<Provider> (<Job>)'."""
+    return f'{preset_for(format, base_url).name} ({JOB_NAMES[role]})'
+
+
+def new_connection(format, endpoint, model, ca_file, role):
+    """A connection for one job's call, named for the job. Its key comes from the environment, as
+    before connections, except Ollama's, which needs none."""
+    base_url, style = split_endpoint(format, endpoint, model)
+    provider = preset_for(format, base_url)
+    return {'name': connection_name(format, base_url, role), 'provider': provider.id, 'format': format,
+            'base_url': base_url, 'endpoint_style': style, 'ca_file': ca_file,
+            'key_source': 'none' if provider.id == 'ollama' else 'environment', 'last_test': None}
+
+
+def role_settings(value, role):
+    """A v6 role resolved to its whole call (format, endpoint, model, family, ca_file,
+    timeout_seconds), as a v5 role was saved; None when the role is not configured."""
+    raw = value['roles'][role]
+    if raw is None:
+        return None
+    conn = value['connections'][raw['connection']]
+    return {'format': conn['format'],
+            'endpoint': call_endpoint(conn['format'], conn['base_url'], raw['model'], conn['endpoint_style']),
+            'model': raw['model'], 'family': raw['family'], 'ca_file': conn['ca_file'],
+            'timeout_seconds': raw['timeout_seconds']}
+
+
+def _upgrade_v5(value):
+    """Each configured v5 role becomes its own connection, so no job's format, call address,
+    model, family, CA file, timeout or key changes."""
+    value = _validate_v5(value)
+    upgraded = dict(value, version=6, connections={}, roles={})
+    for role in ROLES:
+        raw = value['roles'][role]
+        if raw is None:
+            upgraded['roles'][role] = None
+            continue
+        cid = new_connection_id()
+        upgraded['connections'][cid] = new_connection(raw['format'], raw['endpoint'], raw['model'],
+                                                      raw['ca_file'], role)
+        upgraded['roles'][role] = {'connection': cid, 'model': raw['model'], 'family': raw['family'],
+                                   'timeout_seconds': raw['timeout_seconds']}
+    return validate(upgraded)
+
+
 def _upgrade_v4(value):
     """v4 listened on loopback only, with no names and no certificate choice."""
     if not isinstance(value, dict) or set(value) != _V3_FIELDS:
         raise ValueError('Unexpected settings fields')
     upgraded = dict(copy.deepcopy(value), version=5, listen_address=DEFAULTS['listen_address'],
                     server_names=[], certificate=dict(CERTIFICATE_DEFAULTS))
-    return validate(upgraded)
+    return _upgrade_v5(upgraded)
 
 
 def _upgrade_v3(value):
@@ -239,13 +387,13 @@ def _upgrade_v1(value):
         raise ValueError('Unexpected settings fields')
     if not all(isinstance(value[k], str) for k in ('endpoint', 'model', 'mode')):
         raise ValueError('Invalid text settings')
-    upgraded = copy.deepcopy(DEFAULTS)
-    upgraded.update(mode=value['mode'], open_browser=value['open_browser'], port=value['port'])
+    upgraded = {k: copy.deepcopy(v) for k, v in DEFAULTS.items() if k in _V5_FIELDS}
+    upgraded.update(version=5, mode=value['mode'], open_browser=value['open_browser'], port=value['port'])
     if value['endpoint'] or value['model']:
         upgraded['roles']['proposer'] = {'format': 'openai_chat', 'endpoint': value['endpoint'],
                                          'model': value['model'], 'family': suggest_family(value['model']),
                                          'ca_file': '', 'timeout_seconds': 60}
-    return upgraded
+    return _upgrade_v5(upgraded)
 
 
 def load(path):
@@ -253,14 +401,17 @@ def load(path):
         raw = json.loads(Path(path).read_text())
     except FileNotFoundError:
         return copy.deepcopy(DEFAULTS)
+    # An earlier version is upgraded in memory only; the next save writes v6.
     if isinstance(raw, dict) and 'version' not in raw:
-        raw = _upgrade_v1(raw)
+        return _upgrade_v1(raw)
     elif isinstance(raw, dict) and raw.get('version') == 2:
-        return _upgrade_v2(raw)  # in memory only; the next save writes v5, as for v1
+        return _upgrade_v2(raw)
     elif isinstance(raw, dict) and raw.get('version') == 3:
         return _upgrade_v3(raw)
     elif isinstance(raw, dict) and raw.get('version') == 4:
         return _upgrade_v4(raw)
+    elif isinstance(raw, dict) and raw.get('version') == 5:
+        return _upgrade_v5(raw)
     return validate(raw)
 
 

@@ -67,8 +67,11 @@ from tools.greenbone_report import MAX_REPORT_BYTES, parse_report
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
+from tools.local_secrets import SecretsFile, secrets_path
 from tools.model_check import check_models
+from tools.model_endpoints import split_endpoint
 from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
+from tools.models import FORMATS
 from ui import account_views
 from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
 from ui.settings_view import NO_VISIBLE_TASKS, SECTIONS, render_settings
@@ -129,8 +132,10 @@ def open_workspace(database):
 
 
 def load_roles(database, environ):
-    """Roles from the workspace's settings; RZ_MODEL_ENDPOINT / RZ_MODEL override the proposer."""
-    return ModelRoles.from_settings(local_settings.load(local_settings.settings_path(database)), environ)
+    """Roles from the workspace's settings; RZ_MODEL_ENDPOINT / RZ_MODEL override the proposer.
+    A key comes from the environment first, else from the workspace's key file."""
+    return ModelRoles.from_settings(local_settings.load(local_settings.settings_path(database)), environ,
+                                    SecretsFile(secrets_path(database)))
 
 
 def _ports(docs, journal, clock, *, roles=None, delivery=None, memory=None, guard=None,
@@ -889,6 +894,8 @@ def apply_settings_form(values, section, fields, *, running_port=None):
         if any(k.lower() in {'username', 'password'} for k in fields) or not SCANNER_REQUIRED <= set(fields) <= SCANNER_FIELDS:
             raise ValueError()
         values['scanner'] = _scanner_values(fields, values)
+    elif section == 'model' and set(fields) == {'same_family_policy'}:
+        values['same_family_policy'] = fields['same_family_policy']  # jobs change through /connections
     elif section == 'model' and set(fields) == MODEL_FIELDS:
         for role in ROLES:
             endpoint, model = fields[role + '_endpoint'], fields[role + '_model']
@@ -902,9 +909,12 @@ def apply_settings_form(values, section, fields, *, running_port=None):
             timeout = fields[role + '_timeout_seconds'].strip() or '60'
             if not (timeout.isascii() and timeout.isdigit()):
                 raise ValueError()  # 5-600 is checked by local_settings on save
-            values['roles'][role] = None if not (endpoint or model) else {
-                'format': fields[role + '_format'], 'endpoint': endpoint, 'model': model,
-                'family': fields[role + '_family'] or suggest_family(model), 'ca_file': ca_file,
+            if not (endpoint or model):
+                values['roles'][role] = None  # its connection stays
+                continue
+            values['roles'][role] = {
+                'connection': _connection_for(values, role, fields[role + '_format'], endpoint, model, ca_file),
+                'model': model, 'family': fields[role + '_family'] or suggest_family(model),
                 'timeout_seconds': int(timeout)}
         values['same_family_policy'] = fields['same_family_policy']
     elif section == 'application' and {'mode', 'port'} <= set(fields) <= APPLICATION_FIELDS:
@@ -942,14 +952,37 @@ def apply_settings_form(values, section, fields, *, running_port=None):
     return values
 
 
+def _connection_for(values, role, format, endpoint, model, ca_file):
+    """The id of the connection a job's call goes through: one with the same format, address and
+    CA file (the job's own first), else a new one named for the job. Changes `values`."""
+    if format not in FORMATS:
+        raise ValueError('The local edition has no cloud model format' if format == 'vertex' else
+                         'Unknown model format')
+    base_url, style = split_endpoint(format, endpoint, model)
+    current = (values['roles'][role] or {}).get('connection')
+    order = sorted(values['connections'], key=lambda cid: cid != current)
+    for cid in order:
+        conn = values['connections'][cid]
+        if (conn['format'], conn['base_url'], conn['endpoint_style'], conn['ca_file']) == (format, base_url, style, ca_file):
+            return cid
+    made = local_settings.new_connection(format, endpoint, model, ca_file, role)
+    taken = {c['name'].casefold() for c in values['connections'].values()}
+    name, number = made['name'], 2
+    while name.casefold() in taken:
+        name, number = f"{made['name']} {number}", number + 1
+    cid = local_settings.new_connection_id()
+    values['connections'][cid] = dict(made, name=name)
+    return cid
+
+
 def settings_form(values, section):
     """The form fields the Settings page shows for `section`, filled from `values`: what it
     posts when nothing is changed (a ticked checkbox is 'yes'; an unticked one is absent)."""
     if section == 'model':
         fields = {'same_family_policy': values['same_family_policy']}
         for role in ROLES:
-            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': '',
-                                            'ca_file': '', 'timeout_seconds': 60}
+            cfg = local_settings.role_settings(values, role) or {
+                'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': '', 'ca_file': '', 'timeout_seconds': 60}
             fields.update({f'{role}_{part}': str(cfg[part]) for part in
                            ('format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds')})
         return fields
@@ -1041,17 +1074,21 @@ def settings_set(config_path, section, assignments, *, running_port=None):
     return SAVED_RESTART if changed else SAVED
 
 
-#: A field name that would hold a secret. No settings field does today (API keys and scanner
-#: credentials live only in the environment); `settings show` masks any that ever appears.
-#: A `*_file` field is a path to a file, not its contents, so it is shown.
+#: A field name that would hold a secret. No settings field does (API keys live in the environment
+#: or the key file, scanner credentials in the environment); `settings show` masks any that ever
+#: appears. A `*_file` field is a path to a file, not its contents, so it is shown, as is a
+#: connection's `key_source` (where its key comes from: stored, environment or none).
 _SECRET_NAME = re.compile(r'key|secret|password|token', re.I)
+_NOT_SECRET = {'key_source'}
 
 
 def settings_shown(config_path):
-    """The saved settings as `settings show` prints them."""
+    """The saved settings as `settings show` prints them. Reads the settings file only, never the
+    key file."""
     def masked(value):
         if isinstance(value, dict):
-            return {k: '(hidden)' if _SECRET_NAME.search(k) and not k.endswith('_file') else masked(v)
+            return {k: '(hidden)' if _SECRET_NAME.search(k) and not k.endswith('_file') and k not in _NOT_SECRET
+                    else masked(v)
                     for k, v in value.items()}
         if isinstance(value, list):
             return [masked(v) for v in value]
@@ -1595,6 +1632,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             self.redirect('/?view=accounts')
 
         def _settings_html(self, values, section, *, message='', scanner=None):
+            # The model form shows each job's whole call, resolved through its connection.
+            values = dict(values, roles={role: local_settings.role_settings(values, role) for role in ROLES})
             return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, workspace_root),
                 keys={role: key_present(role, os.environ) for role in ROLES},
                 overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
@@ -2105,13 +2144,15 @@ def main(argv=None):
         preferences = local_settings.load(config_path)
         if args.command == 'check-models':
             # Reads settings only; writes nothing to the workspace.
-            raise SystemExit(check_models(ModelRoles.from_settings(preferences, os.environ), args.role))
+            raise SystemExit(check_models(ModelRoles.from_settings(preferences, os.environ,
+                                                                   SecretsFile(secrets_path(args.database))),
+                                          args.role))
         if args.command == 'greenbone' and args.gb_action in {'tasks', 'test'}:
             # Reads settings and the environment only; writes nothing to the workspace.
             run_greenbone = greenbone_tasks if args.gb_action == 'tasks' else greenbone_test
             raise SystemExit(run_greenbone(preferences, os.environ))
         if args.command == 'cycle':
-            roles = ModelRoles.from_settings(preferences, os.environ)
+            roles = ModelRoles.from_settings(preferences, os.environ, SecretsFile(secrets_path(args.database)))
             if roles.proposer is None:
                 parser.exit(1, NO_PROPOSER + '\n')  # Ruling 21: before anything is created
             ws = open_workspace(args.database)
