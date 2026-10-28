@@ -192,6 +192,42 @@ def test_weak_tiers_keep_the_badge_and_add_the_suffix():
     assert 'stronger' not in cards['summarizer'].reason
 
 
+TRIAGE_CLASH = (' Review (claude) is the same family, so the record would read '
+                '"reviewed by the same model family".')
+
+
+@pytest.mark.parametrize('policy', ['wait', 'proceed'])
+def test_an_uncovered_triage_says_when_the_covering_review_is_the_same_family(policy):
+    # Review was set up before Triage; the new model is Review's family.
+    s = settings(policy, reviewer=job(AN, 'claude-test', 'claude'))
+    cards = by_role(recommend(s, provider='anthropic', model='claude-test-2', family='claude'))
+    triage = cards['proposer']
+    assert (triage.badge, triage.on, triage.same_family) == ('recommended', True, True)
+    assert triage.reason == 'Without triage no cycle runs.' + TRIAGE_CLASH
+    assert triage.policy_note == ca.POLICY_NOTES[policy]
+    # Review is the same family whether or not it is switched on, so its card makes no knock-on claim.
+    review = cards['reviewer']
+    assert (review.badge, review.on, review.same_family, review.policy_note) == ('covered', False, False, None)
+    assert review.reason == 'Anthropic already does this. Switching on replaces it.'
+
+
+def test_editing_triage_to_the_reviewers_family_says_so():
+    s = settings(proposer=job(OA, 'gpt-test', 'gpt'), reviewer=job(AN, 'claude-test', 'claude'))
+    triage = by_role(recommend(s, provider='openai', model='mystery', family='other', editing=OA))['proposer']
+    assert (triage.badge, triage.on, triage.same_family) == ('recommended', True, True)
+    assert 'Review (claude) is the same family' in triage.reason and triage.policy_note == ca.POLICY_NOTES['wait']
+    # A different family: nothing is said.
+    triage = by_role(recommend(s, provider='gemini', model='gemini-test', family='gemini', editing=OA))['proposer']
+    assert (triage.same_family, triage.policy_note) == (False, None)
+    assert triage.reason == 'Without triage no cycle runs.'
+
+
+@pytest.mark.parametrize('policy', ['wait', 'proceed'])
+def test_first_connection_triage_card_has_no_policy_note(policy):
+    triage = by_role(recommend(settings(policy), provider='openai', model='gpt-test', family='gpt'))['proposer']
+    assert (triage.same_family, triage.policy_note) == (False, None)
+
+
 def test_large_model_uncovered_for_cheap_jobs_works_but_costs_more():
     cards = by_role(recommend(settings(), provider='anthropic', model='claude-test', family='claude'))
     assert cards['guard'].badge == 'recommended'

@@ -20,6 +20,7 @@ DESCRIPTIONS = {
 COSTS = {'higher': 'Costs more per finding.', 'lower': 'Costs less per finding.',
          'free': 'Free, runs on your own server.'}
 SAME_FAMILY_REASON = 'Same family as your triage model, so the record would read "reviewed by the same model family".'
+REVIEW_SAME_FAMILY = 'Review (%s) is the same family, so the record would read "reviewed by the same model family".'
 POLICY_NOTES = {'wait': "With 'wait', triage waits for a person before anything is assigned.",
                 'proceed': "With 'proceed', it is assigned without waiting."}
 UNKNOWN = "We don't know this model's strengths."
@@ -76,10 +77,11 @@ def recommend(settings, *, provider, model, family, editing=None):
         review_family = current_family('reviewer') if covered['reviewer'] is not None else None
 
     def knock_on(role):
-        """Would switching this covered job on make Review the same family as Triage?"""
+        """Would switching this covered job on be what makes Review the same family as Triage?"""
         if role == 'proposer':
             return review_family is not None and _same(family, review_family)
-        return _same(triage_family, family)
+        # Already the same family with Review left as it is: switching on causes nothing new.
+        return _same(triage_family, family) and not _same(triage_family, current_family('reviewer'))
 
     weak = entry is not None and entry.tier in ('small', 'local')
     large = entry is not None and entry.tier == 'large'
@@ -104,6 +106,10 @@ def recommend(settings, *, provider, model, family, editing=None):
                     reason = '%s already does this at lower cost. A large model is not needed here.' % conn['name']
         elif role == 'proposer':
             reason = 'Without triage no cycle runs.'
+            # Review stays on another connection: this model's triage would be reviewed by its own family.
+            if covered['reviewer'] is not None and _same(family, current_family('reviewer')):
+                reason += ' ' + REVIEW_SAME_FAMILY % current_family('reviewer')
+                same_family, note = True, policy
         elif role == 'reviewer':
             if review_same:
                 badge, on, same_family, note = 'not_suggested', False, True, policy
