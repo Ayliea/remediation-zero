@@ -99,3 +99,18 @@ def test_malformed_file_raises(tmp_path):
         mc.load_catalogue(bad)
     with pytest.raises(ValueError):
         mc.load_catalogue(_write(tmp_path, [], version=2))
+
+
+@pytest.mark.parametrize('provider, model, tier', [
+    ('openai', 'o4-mini', 'small'), ('openai', 'o3-mini', 'small'), ('openai', 'o3', 'large'),
+    ('openai', 'gpt-5-nano', 'small'), ('openai', 'gpt-5-mini', 'small'),
+    ('gemini', 'gemini-x-flash-lite', 'small'), ('gemini', 'gemini-x-lite', 'small'),
+    ('gemini', 'gemini-x-pro', 'large'), ('anthropic', 'claude-x-haiku', 'small'),
+    ('anthropic', 'claude-x-sonnet', 'large')])
+def test_small_variants_are_never_labelled_large(provider, model, tier):
+    assert mc.match(provider, model).tier == tier
+
+
+def test_large_lines_claim_only_tier_speed_and_cost():
+    for entry in mc.entries():
+        assert 'stronger' not in entry.strengths.lower() and 'hard cases' not in entry.strengths.lower()

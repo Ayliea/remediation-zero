@@ -9,14 +9,16 @@
     {"id": "other", "name": "Other", "letter": "+", "colour": "#a1a1aa", "format": "", "base_url": "", "needs_key": false, "key_page": ""}
   ],
   "models": [
-    {"provider": "anthropic", "pattern": "claude-*haiku*", "family": "claude", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
-    {"provider": "anthropic", "pattern": "claude-*", "family": "claude", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
-    {"provider": "openai", "pattern": "gpt-*nano*", "family": "gpt", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
-    {"provider": "openai", "pattern": "gpt-*mini*", "family": "gpt", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
-    {"provider": "openai", "pattern": "gpt-*", "family": "gpt", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
-    {"provider": "openai", "pattern": "o[134]*", "family": "gpt", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
-    {"provider": "gemini", "pattern": "gemini-*flash*", "family": "gemini", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"},
-    {"provider": "gemini", "pattern": "gemini-*", "family": "gemini", "tier": "large", "strengths": "Larger model; stronger on hard cases, slower.", "cost": "higher"},
-    {"provider": "gemini", "pattern": "gemma-*", "family": "gemma", "tier": "small", "strengths": "Smaller model; quick and cheaper.", "cost": "lower"}
+    {"provider": "anthropic", "pattern": "claude-*haiku*", "family": "claude", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "anthropic", "pattern": "claude-*", "family": "claude", "tier": "large", "strengths": "Larger model; slower, higher cost.", "cost": "higher"},
+    {"provider": "openai", "pattern": "gpt-*nano*", "family": "gpt", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "openai", "pattern": "gpt-*mini*", "family": "gpt", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "openai", "pattern": "gpt-*", "family": "gpt", "tier": "large", "strengths": "Larger model; slower, higher cost.", "cost": "higher"},
+    {"provider": "openai", "pattern": "o[134]*mini*", "family": "gpt", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "openai", "pattern": "o[134]*", "family": "gpt", "tier": "large", "strengths": "Larger model; slower, higher cost.", "cost": "higher"},
+    {"provider": "gemini", "pattern": "gemini-*flash*", "family": "gemini", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "gemini", "pattern": "gemini-*lite*", "family": "gemini", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"},
+    {"provider": "gemini", "pattern": "gemini-*", "family": "gemini", "tier": "large", "strengths": "Larger model; slower, higher cost.", "cost": "higher"},
+    {"provider": "gemini", "pattern": "gemma-*", "family": "gemma", "tier": "small", "strengths": "Smaller model; faster, lower cost.", "cost": "lower"}
   ]
 }
