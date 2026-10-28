@@ -110,12 +110,52 @@ def test_cost_changes_the_sentence_never_the_badge(monkeypatch):
     real = ca.match
     for cost, sentence in (('higher', 'Costs more per finding.'), ('lower', 'Costs less per finding.'),
                            ('free', 'Free, runs on your own server.')):
+        # Flip the cost of the chosen model and of the model already covering Screening.
         monkeypatch.setattr(ca, 'match', lambda p, m, cost=cost: dataclasses.replace(real(p, m), cost=cost)
-                            if p == 'anthropic' else real(p, m))
+                            if p in ('anthropic', 'ollama') else real(p, m))
         cards = recommend(s, provider='anthropic', model='claude-test', family='claude')
         seen[cost] = [(c.badge, c.on) for c in cards]
         assert {c.cost for c in cards} == {sentence}
     assert seen['higher'] == seen['lower'] == seen['free']
+
+
+def test_first_connection_review_same_family_is_not_suggested_by_rule_one():
+    # Triage is uncovered, so rule 1 switches it on with the chosen family; Review then matches it.
+    cards = by_role(recommend(settings(), provider='anthropic', model='claude-test', family='claude'))
+    assert cards['proposer'].on is True
+    assert (cards['reviewer'].badge, cards['reviewer'].on, cards['reviewer'].same_family) == (
+        'not_suggested', False, True)
+
+
+def test_covered_review_card_carries_the_knock_on_and_policy():
+    s = settings('proceed', proposer=job(OA, 'gpt-test', 'gpt'), reviewer=job(AN, 'claude-test', 'claude'))
+    review = by_role(recommend(s, provider='gemini', model='gemini-test', family='gemini'))['reviewer']
+    assert review.badge == 'covered' and review.same_family is False and review.policy_note is None
+    s = settings('proceed', proposer=job(OA, 'gpt-test', 'gpt'), reviewer=job(AN, 'claude-test', 'claude'))
+    review = by_role(recommend(s, provider='openai', model='gpt-other', family='gpt'))['reviewer']
+    assert review.badge == 'covered' and review.on is False
+    assert review.reason == ('Anthropic already does this. Switching on replaces it, and then it would be the '
+                             'same family as Triage, which the record would say.')
+    assert review.same_family is True
+    assert review.policy_note == "With 'proceed', it is assigned without waiting."
+
+
+def test_recommended_review_on_a_small_model_gets_the_stronger_suffix():
+    s = settings(proposer=job(OA, 'gpt-test', 'gpt'))
+    review = by_role(recommend(s, provider='anthropic', model='claude-haiku-test', family='claude'))['reviewer']
+    assert review.badge == 'recommended'
+    assert review.reason.endswith('A stronger model would do this better.')
+
+
+def test_large_model_does_not_displace_a_large_or_unknown_covering_model():
+    s = settings(guard=job(OA, 'gpt-test', 'gpt'), summarizer=job(AN, 'claude-test', 'claude'))
+    cards = by_role(recommend(s, provider='gemini', model='gemini-test', family='gemini'))
+    assert cards['guard'].badge == 'covered'
+    assert cards['summarizer'].badge == 'covered'
+    value = settings(guard=job(OL, 'zz-unknown', 'other'))
+    value['connections'][OL]['provider'] = 'other'
+    cards = by_role(recommend(value, provider='gemini', model='gemini-test', family='gemini'))
+    assert cards['guard'].badge == 'covered'
 
 
 def test_unknown_model_uses_family_only_and_says_so():

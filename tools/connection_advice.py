@@ -68,7 +68,7 @@ def recommend(settings, *, provider, model, family, editing=None):
     review_on = False
     review_same = False
     if covered['reviewer'] is None:
-        review_same = triage_family is not None and _same(triage_family, family)
+        review_same = _same(triage_family, family)
         review_on = not review_same
     if review_on:
         review_family = family
@@ -79,7 +79,7 @@ def recommend(settings, *, provider, model, family, editing=None):
         """Would switching this covered job on make Review the same family as Triage?"""
         if role == 'proposer':
             return review_family is not None and _same(family, review_family)
-        return triage_family is not None and _same(triage_family, family)
+        return _same(triage_family, family)
 
     weak = entry is not None and entry.tier in ('small', 'local')
     large = entry is not None and entry.tier == 'large'
@@ -91,13 +91,15 @@ def recommend(settings, *, provider, model, family, editing=None):
             badge, on = 'covered', False
             reason = '%s already does this. Switching on replaces it' % conn['name']
             if role in ('proposer', 'reviewer') and knock_on(role):
-                reason += ', and then Review would be the same family, which the record would say.'
+                reason += (', and then Review would be the same family, which the record would say.'
+                           if role == 'proposer' else
+                           ', and then it would be the same family as Triage, which the record would say.')
                 same_family, note = True, policy
             else:
                 reason += '.'
             if role in ('guard', 'summarizer') and large:
                 held = match(conn['provider'], roles[role]['model'])
-                if held is not None and (held.tier in ('local', 'small') or held.cost in ('lower', 'free')):
+                if held is not None and held.tier in ('local', 'small'):
                     badge = 'not_suggested'
                     reason = '%s already does this at lower cost. A large model is not needed here.' % conn['name']
         elif role == 'proposer':
@@ -106,8 +108,6 @@ def recommend(settings, *, provider, model, family, editing=None):
             if review_same:
                 badge, on, same_family, note = 'not_suggested', False, True, policy
                 reason = SAME_FAMILY_REASON
-            elif triage_family is None:
-                reason = 'Nothing double-checks triage yet.'
             else:
                 reason = ('Nothing double-checks triage yet, and %s is a different family from your triage model (%s).'
                           % (family, triage_family))
