@@ -419,6 +419,30 @@ def test_an_upgraded_v5_install_can_test_add_and_remove_connections(db, people, 
     assert settings(db)['roles']['reviewer'] is None and len(settings(db)['connections']) == 1
 
 
+@pytest.mark.parametrize('variable, value, jobs', [
+    ('RZ_REVIEWER_API_KEY', 'sk-test-fromenv0001', 'review,summaries'),
+    ('RZ_MODEL_API_KEY', 'sk-test-fromenv0001', 'triage'),
+    ('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions', 'triage')])
+def test_a_typed_key_is_refused_when_the_server_would_use_its_own(db, people, capsys, tester, typed, monkeypatch,
+                                                                   variable, value, jobs):
+    monkeypatch.setenv(variable, value)
+    code, out, err = add(capsys, db, '--jobs', jobs)
+    assert code == 1 and variable in err and 'Nothing was saved.' in err
+    assert value not in out + err and KEY not in out + err
+    assert tester.calls == [] and settings(db)['connections'] == {}
+
+
+def test_a_replaced_key_is_refused_when_the_server_would_use_its_own(db, people, capsys, tester, typed, monkeypatch):
+    add(capsys, db)
+    (conn_id,) = settings(db)['connections']
+    tester.calls.clear()
+    monkeypatch.setenv('RZ_SUMMARIZER_API_KEY', 'sk-test-fromenv0001')
+    typed.answers[0] = NEW_KEY
+    code, out, err = cli(capsys, db, 'connection', 'replace-key', 'OpenAI', '--as', OWNER)
+    assert code == 1 and 'RZ_SUMMARIZER_API_KEY' in err and 'fromenv' not in out + err
+    assert tester.calls == [] and SecretsFile(secrets_path(db)).get(conn_id) == KEY
+
+
 def test_an_environment_connection_whose_variable_is_unset_takes_a_replaced_key(db, people, capsys, tester, typed):
     write_v5(db)                                         # migrated: Review's key_source is 'environment'
     review = settings(db)['roles']['reviewer']['connection']

@@ -17,7 +17,7 @@ from tools.local_secrets import SecretsFileUnsafe
 from tools.local_settings import MAX_CONNECTION_NAME, check_ca_file
 from tools.model_catalogue import JOB_NAMES, JOB_ORDER, preset, presets
 from tools.model_endpoints import call_endpoint
-from tools.model_roles import ROLES, ModelRoles, RoleConfig, key_source
+from tools.model_roles import ROLES, ModelRoles, RoleConfig, key_names, key_source
 from tools.secrets_port import check_key
 
 
@@ -106,6 +106,28 @@ def validate_draft(settings, draft, *, replacing=None):
         raise _refuse(exc) from None
     jobs = {role: JobChoice(c.model.strip(), c.family, c.timeout_seconds) for role, c in draft.jobs.items()}
     return Draft(draft.provider, name, draft.format, draft.base_url, draft.ca_file, key, jobs)
+
+
+ENV_KEY_WINS = ("{job}'s key is set on the server ({variable}), so it would be used instead of the key typed "
+                "here. Unset it first, or connect without a key. Nothing was saved.")
+ENV_ENDPOINT_WINS = ('Triage is sent to the address set on the server (RZ_MODEL_ENDPOINT), so the key typed here '
+                     'would never be tested or used. Unset it first, or connect without a key. Nothing was saved.')
+
+
+def environment_conflict(jobs, environ):
+    """The refusal for a typed key that the server would not use, or None. A job whose key is set
+    on the server takes that one instead, and Triage under RZ_MODEL_ENDPOINT is called at that
+    address: either way the typed key would be stored without ever answering a test. Names the
+    variable, never its value."""
+    for role in JOB_ORDER:
+        if role not in jobs:
+            continue
+        if role == 'proposer' and environ.get('RZ_MODEL_ENDPOINT'):
+            return ENV_ENDPOINT_WINS
+        variable = next((name for name in key_names(role) if environ.get(name)), None)
+        if variable is not None:
+            return ENV_KEY_WINS.format(job=JOB_NAMES[role], variable=variable)
+    return None
 
 
 def with_connection(settings, conn_id, draft):

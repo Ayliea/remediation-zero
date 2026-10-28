@@ -77,14 +77,15 @@ class RoleConfig:
                 'ca_file': self.ca_file, 'timeout_seconds': self.timeout_seconds}
 
 
-def _key_names(role):
+def key_names(role):
+    """The environment variables a role's key is read from, in order. Names only."""
     names = ['RZ_%s_API_KEY' % role.upper()]
     return names + ['RZ_MODEL_API_KEY'] if role == 'proposer' else names
 
 
 def key_present(role, environ):
     """Whether an API key is set for the role. Reports presence only, never the value."""
-    return any(bool(environ.get(n)) for n in _key_names(role))
+    return any(bool(environ.get(n)) for n in key_names(role))
 
 
 def key_source(settings, role, environ):
@@ -159,7 +160,7 @@ class ModelRoles:
             from tools.vertex_models import VertexAdapter
             return VertexAdapter(vertex_client, config.model)
         environ = os.environ if self.environ is None else self.environ
-        key = next((environ[n] for n in _key_names(role) if environ.get(n)), None)
+        key = next((environ[n] for n in key_names(role) if environ.get(n)), None)
         if key is None and config.connection and self.key_sources.get(config.connection) == 'stored':
             # The environment wins; else the key file, read now and not kept.
             key = self.secrets.get(config.connection) if self.secrets is not None else None

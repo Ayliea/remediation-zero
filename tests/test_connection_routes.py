@@ -717,6 +717,13 @@ def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, cap
     step('/connections/models', {'provider': 'openai', 'base_url': BASE, 'ca_file': '', 'key': KEY + '\x07'}, 400)
     step('/connections/models', {'provider': 'openai', 'base_url': 'ftp://x.example.invalid', 'ca_file': '',
                                  'key': KEY}, 400)
+    # A typed key the server would not use: its own key for Review, or Triage's address override.
+    monkeypatch.setenv('RZ_REVIEWER_API_KEY', OTHER_KEY)
+    step('/connections/save', {'draft': draft()}, 400)
+    monkeypatch.delenv('RZ_REVIEWER_API_KEY')
+    monkeypatch.setenv('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions')
+    step('/connections/save', {'draft': draft(jobs={'proposer': job()})}, 400)
+    monkeypatch.delenv('RZ_MODEL_ENDPOINT')
     # A model list, failing and passing, with the typed key.
     monkeypatch.setattr(model_endpoints, 'list_models', list_fails)
     assert 'error' in step('/connections/models', {'provider': 'openai', 'base_url': BASE, 'ca_file': '', 'key': KEY})
@@ -743,6 +750,9 @@ def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, cap
     assert step('/connections/test', {'connection': conn})['ok'] is False
     step('/connections/replace-key', {'connection': conn, 'key': KEY + ' \x07'}, 400)
     step('/connections/replace-key', {'connection': conn, 'key': KEY}, 401, who='unconfirmed')
+    monkeypatch.setenv('RZ_REVIEWER_API_KEY', OTHER_KEY)      # the one job it does now takes the server's key
+    step('/connections/replace-key', {'connection': conn, 'key': KEY}, 400)
+    monkeypatch.delenv('RZ_REVIEWER_API_KEY')
     tester.result = None
     assert step('/connections/replace-key', {'connection': conn, 'key': KEY})['ok'] is True
     assert server.secrets.get(conn) == KEY
@@ -1064,6 +1074,36 @@ def test_settings_set_keeps_a_job_on_its_trailing_slash_stored_key_connection(se
     after = server.settings()
     assert after['roles']['proposer']['connection'] == conn and after['connections'] == saved['connections']
     assert after['same_family_policy'] == 'proceed'
+
+
+@pytest.mark.parametrize('variable, value, jobs', [
+    ('RZ_REVIEWER_API_KEY', ENV_KEY, {'reviewer': job(), 'summarizer': job('gpt-x-mini')}),
+    ('RZ_SUMMARIZER_API_KEY', ENV_KEY, {'reviewer': job(), 'summarizer': job('gpt-x-mini')}),
+    ('RZ_PROPOSER_API_KEY', ENV_KEY, {'proposer': job()}),
+    ('RZ_MODEL_API_KEY', ENV_KEY, {'proposer': job()}),
+    ('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions', {'proposer': job()})])
+def test_a_typed_key_is_refused_when_the_server_would_use_its_own(server, tester, monkeypatch, variable, value, jobs):
+    monkeypatch.setenv(variable, value)
+    response, data, text = server.post('/connections/save', {'draft': draft(jobs=jobs)})
+    assert response.status == 400 and variable in data['error'] and 'Nothing was saved.' in data['error']
+    assert value not in text and KEY not in text
+    assert tester.calls == [] and server.settings()['connections'] == {} and not server.secrets.path.exists()
+    # Without a key typed, the server's own is used, as before.
+    if variable != 'RZ_MODEL_ENDPOINT':
+        assert added(server, key=None, jobs=jobs)
+
+
+@pytest.mark.parametrize('variable, value', [
+    ('RZ_SUMMARIZER_API_KEY', ENV_KEY),
+    ('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions')])
+def test_a_replaced_key_is_refused_when_the_server_would_use_its_own(server, tester, monkeypatch, variable, value):
+    conn = added(server, jobs={'proposer': job(), 'summarizer': job('gpt-x-mini')})
+    tester.calls.clear()
+    before = server.file_bytes()
+    monkeypatch.setenv(variable, value)
+    response, data, text = server.post('/connections/replace-key', {'connection': conn, 'key': OTHER_KEY})
+    assert response.status == 400 and variable in data['error'] and value not in text and OTHER_KEY not in text
+    assert tester.calls == [] and server.file_bytes() == before and server.secrets.get(conn) == KEY
 
 
 def test_an_environment_connection_whose_variable_is_unset_takes_a_replaced_key(server, tester):

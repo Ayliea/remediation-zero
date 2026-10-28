@@ -387,6 +387,13 @@ class ConnectionRoutes:
         except ConnectionRefused as refusal:
             raise _refused(_safe(str(refusal), body)) from None
 
+    def _no_environment_conflict(self, draft):
+        """Refuse a typed key the server would not use (tools.connections.environment_conflict),
+        before any model call. The sentence is fixed text and a variable's name, so it is sent
+        as it is (not through _safe: a field name such as "key" would match it)."""
+        if draft.key and (conflict := connections.environment_conflict(draft.jobs, self.environ)):
+            raise _refused(conflict)
+
     @staticmethod
     def _choices(raw, provider):
         """The jobs a request switches on: {role: {model, family?, timeout_seconds?}}."""
@@ -545,6 +552,7 @@ class ConnectionRoutes:
             settings = self._read()
             before = copy.deepcopy(settings)
             draft = self._validate(settings, draft, body)
+            self._no_environment_conflict(draft)
             conn_id = local_settings.new_connection_id()
             pending = connections.with_connection(settings, conn_id, draft)
             roles = self._roles(pending, Overlay(self.secrets, {conn_id: draft.key} if draft.key else {}))
@@ -624,6 +632,7 @@ class ConnectionRoutes:
                           conn['ca_file'] if ca_file is None else ca_file, key if key.strip() else None,
                           choices)
             draft = self._validate(settings, draft, body, replacing=conn_id)
+            self._no_environment_conflict(draft)
             pending = connections.with_connection(settings, conn_id, draft)
             roles = self._roles(pending, Overlay(self.secrets, {conn_id: draft.key} if draft.key else {}))
         jobs = list(current)

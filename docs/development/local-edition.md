@@ -396,7 +396,11 @@ A key comes from the environment or from the key file:
 
 - **Environment.** The variables in the table above. If a job's variable is set,
   it is used and wins over a stored key. A connection added without a key uses
-  these ("set on the server" in the list).
+  these ("set on the server" in the list, only for a job whose variable is
+  set; otherwise "key missing", and Replace key stores one). A key typed for a
+  job whose variable is set, or for Triage while `RZ_MODEL_ENDPOINT` sends it
+  elsewhere, would never be tested or used, so the save is refused with a
+  sentence naming the variable: unset it first, or connect without a key.
 - **Key file.** A key typed in the Settings popup (or at the `connection`
   command's hidden prompt) is stored in `<database>.secrets.json`, beside the
   settings file. It is created readable only by its owner (0600), written

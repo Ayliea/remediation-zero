@@ -225,6 +225,8 @@ def _add(args, config_path, secrets, environ, acting, log, out):
         draft = connections.validate_draft(settings, draft)
     except ConnectionRefused as refusal:
         raise Stop(_sentence(str(refusal)) + ' Nothing was saved.') from None
+    if draft.key and (conflict := connections.environment_conflict(draft.jobs, environ)):
+        raise Stop(conflict)
     if not jobs:
         raise Stop('Choose at least one job, so the connection can be tested before it is saved. Nothing was saved.')
     conn_id = local_settings.new_connection_id()
@@ -262,6 +264,8 @@ def _replace_key(args, config_path, secrets, environ, acting, log, out):
         draft = connections.validate_draft(settings, draft, replacing=conn_id)
     except ConnectionRefused as refusal:
         raise Stop(_sentence(str(refusal)) + ' Nothing was saved.') from None
+    if conflict := connections.environment_conflict(draft.jobs, environ):
+        raise Stop(conflict)
     pending = connections.with_connection(settings, conn_id, draft)
     jobs = list(current)
     if jobs:
