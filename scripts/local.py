@@ -1665,9 +1665,9 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
         @staticmethod
         def _models(values, session):
             """What the Models section shows: never a key, only its last characters (rows).
-            `time.time()` only words "Tested n min ago"; it is never stored."""
+            The SimClock's real_ts only words "Tested n min ago"; it is never stored."""
             keys = SecretsFile(local_connections.secrets_beside(config_path))
-            return {'rows': connections.rows(values, os.environ, keys, now_real_ts=time.time()),
+            return {'rows': connections.rows(values, os.environ, keys, now_real_ts=accounts.clock.now().real_ts),
                     'coverage': connections.coverage(values, os.environ),
                     'owner': session is not None and access.allowed(session.role, local_connections.ACTION),
                     'confirmed': bool(session is not None and session.confirmed),

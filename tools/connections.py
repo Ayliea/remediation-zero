@@ -220,7 +220,7 @@ def _last_test_text(test, now_real_ts):
 
 def rows(settings, environ, secrets, *, now_real_ts):
     """One dict per connection for the list page. Names come back raw: the view escapes them.
-    `now_real_ts` (the caller's time.time()) only words "Tested n min ago" and is never stored."""
+    `now_real_ts` (the caller's SimClock real_ts) only words "Tested n min ago" and is never stored."""
     out = []
     for conn_id, conn in settings['connections'].items():
         look = preset(conn['provider'])

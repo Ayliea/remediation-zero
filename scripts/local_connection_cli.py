@@ -21,7 +21,6 @@ import getpass
 import logging
 import re
 import sys
-import time
 
 from scripts import local_accounts
 from scripts.local_connections import (FAILED, KEY_NEEDED, KEY_NOT_DELETED, KEY_NOT_STORED, KEY_NOT_STORED_NOT_RESTORED,
@@ -196,8 +195,8 @@ def _audit(accounts, person, event, name, jobs, log, conn_id):
     return True
 
 
-def _list(settings, environ, secrets, out):
-    shown = connections.rows(settings, environ, secrets, now_real_ts=time.time())
+def _list(settings, environ, secrets, clock, out):
+    shown = connections.rows(settings, environ, secrets, now_real_ts=clock.now().real_ts)
     if not shown:
         out(NO_CONNECTIONS)
     for row in shown:
@@ -330,7 +329,7 @@ def run(args, config_path, secrets_file, environ, *, acting, clock, log, out=pri
     action = args.connection_action
     try:
         if action == 'list':
-            _list(_settings(config_path), environ, secrets, out)
+            _list(_settings(config_path), environ, secrets, clock, out)
             return 0
         if action == 'add':
             return _add(args, config_path, secrets, environ, acting, log, out)
