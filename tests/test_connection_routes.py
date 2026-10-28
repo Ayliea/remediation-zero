@@ -1018,3 +1018,36 @@ def test_a_key_delete_failure_is_logged_by_class_for_any_key_source(server, test
     failed = [json.loads(r.getMessage()) for r in caplog.records if 'connection_key_delete_failed' in r.getMessage()]
     assert failed == [{'event': 'connection_key_delete_failed', 'connection': conn, 'error': 'ValueError',
                        'cycle_id': '-', 'finding_id': '-'}]
+
+
+# --- final review fixes ------------------------------------------------------------
+
+def write_v5(config_path):
+    """A version-5 settings file with two configured jobs, as an upgraded install has on disk."""
+    value = {k: json.loads(json.dumps(v)) for k, v in local_settings.DEFAULTS.items() if k != 'connections'}
+    value['version'] = 5
+    value['roles'] = dict.fromkeys(local_settings.ROLES)
+    value['roles']['proposer'] = {'format': 'openai_chat', 'endpoint': 'http://127.0.0.1:11434/v1/chat/completions',
+                                  'model': 'qwen2.5:7b', 'family': 'qwen', 'ca_file': '', 'timeout_seconds': 300}
+    value['roles']['reviewer'] = {'format': 'anthropic_messages', 'endpoint': 'https://api.anthropic.com/v1/messages',
+                                  'model': 'claude-test-1', 'family': 'claude', 'ca_file': '', 'timeout_seconds': 60}
+    config_path.write_text(json.dumps(value))
+
+
+def test_an_upgraded_v5_install_can_edit_add_and_remove_connections(server, tester):
+    write_v5(server.config_path)
+    first = server.settings()
+    assert server.settings() == first                     # two loads of one v5 file are equal
+    triage = first['roles']['proposer']['connection']
+    review = first['roles']['reviewer']['connection']
+    response, data, text = server.post('/connections/edit', {'connection': review,
+                                                             'jobs': {'reviewer': job('claude-test-2', 'claude')}})
+    assert response.status == 200 and data['ok'] is True, text
+    assert server.settings()['roles']['reviewer']['model'] == 'claude-test-2'
+    write_v5(server.config_path)                          # back to v5 on disk: add, then remove
+    conn = added(server, jobs={'summarizer': job('gpt-x-mini')})
+    assert server.settings()['roles']['summarizer']['connection'] == conn
+    write_v5(server.config_path)
+    response, data, text = server.post('/connections/delete', {'connection': triage})
+    assert response.status == 200 and data['ok'] is True, text
+    assert triage not in server.settings()['connections'] and server.settings()['roles']['proposer'] is None

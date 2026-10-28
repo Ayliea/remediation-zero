@@ -114,6 +114,14 @@ def test_migrated_names_and_key_sources(tmp_path):
                                            'family': 'claude', 'timeout_seconds': 60}
 
 
+def test_two_loads_of_one_v5_file_are_equal_and_ids_never_collide(tmp_path):
+    path = write_v5(tmp_path)
+    first, second = config.load(path), config.load(path)
+    assert first == second
+    ids = [raw['connection'] for raw in first['roles'].values() if raw]
+    assert len(ids) == len(set(ids)) == 3 and all(config.CONNECTION_ID_RE.fullmatch(cid) for cid in ids)
+
+
 def test_save_writes_v6_and_validate_refuses_v5(tmp_path):
     path = write_v5(tmp_path)
     loaded = config.load(path)

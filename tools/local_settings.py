@@ -3,6 +3,7 @@
 # you may not use this file except in compliance with the License.
 """Non-secret local preferences, validated before atomic persistence."""
 import copy
+import hashlib
 import ipaddress
 import json
 import os
@@ -59,6 +60,13 @@ def settings_path(database):
 
 def new_connection_id():
     return 'conn-' + secrets.token_hex(6)
+
+
+def migrated_connection_id(role):
+    """The id of the connection a v5 role becomes: derived from the role, the v5 grouping (one
+    connection per configured role), so every load of one v5 file gives the same settings, and no
+    two roles' ids collide."""
+    return 'conn-' + hashlib.sha256(f'v5-{role}'.encode()).hexdigest()[:12]
 
 
 def validate(value):
@@ -344,7 +352,7 @@ def _upgrade_v5(value):
         if raw is None:
             upgraded['roles'][role] = None
             continue
-        cid = new_connection_id()
+        cid = migrated_connection_id(role)
         upgraded['connections'][cid] = new_connection(raw['format'], raw['endpoint'], raw['model'],
                                                       raw['ca_file'], role)
         upgraded['roles'][role] = {'connection': cid, 'model': raw['model'], 'family': raw['family'],

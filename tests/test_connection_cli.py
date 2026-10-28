@@ -386,3 +386,34 @@ def test_the_storage_page_names_the_key_file_in_the_backup_steps():
     body = render_settings(dict(local_settings.DEFAULTS), 'storage', 'form-token')
     assert '.secrets.json' in body and 'API keys you stored here' in body
     assert 'API keys come from the environment or from the owner-only key file' in body
+
+
+# --- final review fixes ------------------------------------------------------------
+
+
+def write_v5(db):
+    """A version-5 settings file with two configured jobs, as an upgraded install has on disk."""
+    value = {k: json.loads(json.dumps(v)) for k, v in local_settings.DEFAULTS.items() if k != 'connections'}
+    value['version'] = 5
+    value['roles'] = dict.fromkeys(local_settings.ROLES)
+    value['roles']['proposer'] = {'format': 'openai_chat', 'endpoint': 'http://127.0.0.1:11434/v1/chat/completions',
+                                  'model': 'qwen2.5:7b', 'family': 'qwen', 'ca_file': '', 'timeout_seconds': 300}
+    value['roles']['reviewer'] = {'format': 'anthropic_messages', 'endpoint': 'https://api.anthropic.com/v1/messages',
+                                  'model': 'claude-test-1', 'family': 'claude', 'ca_file': '', 'timeout_seconds': 60}
+    local_settings.settings_path(db).write_text(json.dumps(value))
+
+
+def test_an_upgraded_v5_install_can_test_add_and_remove_connections(db, people, capsys, tester, typed):
+    write_v5(db)
+    assert settings(db) == settings(db)                  # two loads of one v5 file are equal
+    code, out, err = cli(capsys, db, 'connection', 'test', 'Ollama (Triage)')
+    assert code == 0, err
+    triage = settings(db)['roles']['proposer']['connection']
+    assert settings(db)['connections'][triage]['last_test']['ok'] is True
+    write_v5(db)
+    code, out, err = add(capsys, db, '--jobs', 'summaries')
+    assert code == 0, err
+    write_v5(db)
+    code, out, err = cli(capsys, db, 'connection', 'remove', 'Anthropic (Review)', '--as', OWNER, '--yes')
+    assert code == 0, err
+    assert settings(db)['roles']['reviewer'] is None and len(settings(db)['connections']) == 1
