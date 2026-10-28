@@ -108,3 +108,17 @@ def resolve_owner(
         needs_human=False,
         reason="Resolved through the asset registry.",
     )
+
+
+def owner_found_cycle(entry: Mapping[str, Any],
+                      sla_clock: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """The cycle an "unassigned" queue entry was resolved in, else None.
+
+    A later cycle that finds an owner starts the finding's SLA clock, so a clock
+    naming an owner and started after the entry's cycle is the resolution. The
+    entry itself is kept: it is the record that nobody owned the finding then.
+    """
+    if entry.get("kind") != "unassigned" or not sla_clock or not sla_clock.get("owner_id"):
+        return None
+    started = int(sla_clock.get("cycle_started") or 0)
+    return started if started > int(entry.get("cycle") or 0) else None

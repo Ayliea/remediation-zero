@@ -28,6 +28,8 @@ there being nothing here that could describe.
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
+from tools.ownership import owner_found_cycle
+
 
 def _rate(numerator: int, denominator: int) -> float:
     """A rate over an empty period is zero, not an error.
@@ -83,6 +85,13 @@ def compute_metrics(
     severities = Counter(
         d.get("proposed_severity") for d in decisions if d.get("proposed_severity")
     )
+    # An "unassigned" entry a later cycle found an owner for stays as history,
+    # and is no longer waiting on anyone.
+    clocks = {s.get("finding_id"): s for s in sla_clocks}
+    owner_found = sum(1 for item in human_queue
+                      if owner_found_cycle(item, clocks.get(item.get("finding_id"))))
+    human_queue = [item for item in human_queue
+                   if not owner_found_cycle(item, clocks.get(item.get("finding_id")))]
     queue_kinds = Counter(item.get("kind", "adjudication") for item in human_queue)
 
     resolved_findings = sum(1 for f in findings if f.get("status") == "resolved")
@@ -116,6 +125,8 @@ def compute_metrics(
         # Where the humans are
         "human_queue_total": len(human_queue),
         "human_queue_by_kind": dict(queue_kinds),
+        # Only when non-zero, like the local-only keys above; the cloud never re-checks.
+        **({"human_queue_owner_found": owner_found} if owner_found else {}),
         # Deferred risk
         "exceptions_active": sum(1 for e in exceptions if e.get("status") == "active"),
         "exceptions_expired": sum(1 for e in exceptions if e.get("status") == "expired"),

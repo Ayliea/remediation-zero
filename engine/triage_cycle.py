@@ -134,7 +134,49 @@ def run_triage_cycle(ports: Ports, cycle: int, *, finding_ids: Optional[list] = 
             _record_failure(ports, finding_id, cycle, cycle_id, exc)
             raise
 
+    recheck_unassigned(ports, cycle, writer=writer, assigner=assigner,
+                       assets=assets, owners=owners)
     return close_cycle(ports, cycle, outcomes, finding_ids=finding_ids, started=started)
+
+
+def recheck_unassigned(ports: Ports, cycle: int, *, writer: DecisionWriter,
+                       assigner: AssignmentWriter, assets: dict, owners: dict) -> None:
+    """Look again for an owner for every open finding left unassigned.
+
+    Every open finding whose newest assignment needed a person, from an earlier
+    cycle, is resolved again against the current assets and owners. Found: a new
+    assignment in this cycle, and the SLA clock started now with the decision's
+    `sla_days`; never backdated to the decision, since nobody was told before
+    an owner existed. Still none: nothing is written, so the queue holds one
+    "unassigned" entry per finding rather than one per cycle. Keyed like every
+    assignment, so re-running this cycle assigns nothing twice.
+    """
+    cycle_id = f"cycle-{cycle:03d}"
+    newest: dict = {}  # finding_id -> newest assignment row
+    for snap in ports.docs.collection("assignments").stream():
+        row = snap.to_dict() or {}
+        finding_id = row.get("finding_id")
+        if finding_id and int(row.get("cycle") or 0) >= int(
+                newest.get(finding_id, {}).get("cycle") or 0):
+            newest[finding_id] = row
+    for finding_id, row in sorted(newest.items()):
+        earlier = int(row.get("cycle") or 0)
+        if not row.get("needs_human") or earlier >= cycle:
+            continue
+        finding = ports.docs.collection("findings").document(finding_id).get().to_dict() or {}
+        if finding.get("status") != "open":
+            continue
+        assignment = resolve_owner(finding, assets, owners)
+        if assignment.needs_human:
+            _log("still_unassigned_on_recheck", cycle_id, finding_id,
+                 unassigned_since_cycle=earlier, reason=assignment.reason[:120])
+            continue
+        decision = writer.restore(finding_id, earlier)
+        sla_days = decision.proposal.sla_days if decision and decision.proposal else None
+        assignment_id = assigner.record(assignment, cycle=cycle, sla_days=sla_days)
+        _log("owner_found_on_recheck", cycle_id, finding_id, owner_id=assignment.owner_id,
+             team=assignment.team, assignment_id=assignment_id,
+             unassigned_since_cycle=earlier, sla_days=sla_days)
 
 
 def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,

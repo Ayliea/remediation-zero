@@ -157,7 +157,10 @@ credentials and make no connection.
   report id, no status, or a timestamp that is not ISO 8601 with a zone) is
   refused and never considered; the count is shown on the card and in the
   pull line. Assets are keyed on Greenbone's host asset ID (IP as a
-  recorded fallback) and arrive with no owner.
+  recorded fallback) and arrive with no owner. A ratified finding on a host
+  with no owner waits in the human queue as "unassigned"; every later cycle
+  looks again, and once an owner is recorded it is assigned in that cycle and
+  its SLA clock starts then. The queue entry stays, marked resolved.
 
 ## How closure works
 

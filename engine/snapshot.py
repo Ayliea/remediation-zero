@@ -17,6 +17,7 @@ Two local additions ride on existing keys rather than new ones:
 Standard library only: nothing here imports FastAPI or a cloud SDK.
 """
 from tools.docstore import DESCENDING, DocStore, FieldFilter
+from tools.ownership import owner_found_cycle
 
 COUNTED = ("findings", "assets", "owners", "decisions", "tickets",
            "human_queue", "sla_clocks", "idempotency")
@@ -52,6 +53,13 @@ def snapshot(docs: DocStore) -> dict:
         scanner_state = rows("scanner_state", limit=SCANNER_STATE_LIMIT)  # per-task pull state and enrichment status
     except KeyError:
         scanner_state = []  # a store without the scanner file
+
+    clocks = docs.collection("sla_clocks")
+    for row in human_queue:
+        if row.get("kind") == "unassigned" and row.get("finding_id"):
+            found = owner_found_cycle(row, clocks.document(row["finding_id"]).get().to_dict())
+            if found:
+                row["owner_found_cycle"] = found
 
     approvals = docs.collection("approvals")
     for row in decisions:

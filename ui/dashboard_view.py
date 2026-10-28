@@ -389,7 +389,9 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
         body += "".join(decision_card(r, approve_command) for r in rows) or '<p class="card">No recent recommendations available. This does not establish that there are no issues.</p>'
         body += '<h2>Requests for human review</h2><p>Up to 60 recorded requests. Queue records do not establish whether someone has already handled them.</p>'
         for row in data.get("human_queue", []):
-            body += f'<article class="card"><h3>{text(row.get("finding_id"))}</h3><p>{text(row.get("reason"))}</p></article>'
+            found = row.get("owner_found_cycle")
+            resolved = f'<p><strong>Resolved:</strong> an owner was found in cycle {text(found)}; this no longer waits on anyone.</p>' if found else ''
+            body += f'<article class="card"><h3>{text(row.get("finding_id"))}</h3><p>{text(row.get("reason"))}</p>{resolved}</article>'
         if not data.get("human_queue"):
             body += '<p>No requests returned in this snapshot.</p>'
         body += failed_runs_section(data)
