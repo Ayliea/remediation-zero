@@ -131,14 +131,10 @@ def _open(request, timeout, ca_file=None):
     return _build_opener(ca_file).open(request, timeout=timeout)
 
 
-def post_json(url, body, headers, *, ca_file=None, timeout=None):
-    """`timeout`: the role's seconds (Settings, 5-600); None is TIMEOUT_SECONDS."""
-    if ca_file and urlsplit(url).scheme != 'https':
-        raise ValueError('A CA file applies only to an HTTPS endpoint')
-    seconds = TIMEOUT_SECONDS if timeout is None else timeout
-    data = json.dumps(body).encode()
+def _exchange(request, seconds, ca_file):
+    """Send `request` and return the parsed JSON body; the one place errors are mapped."""
     try:
-        with _open(Request(url, data=data, headers=headers), timeout=seconds, ca_file=ca_file) as response:
+        with _open(request, timeout=seconds, ca_file=ca_file) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
     except HTTPError as exc:
         if _is_capacity_code(exc.code):
@@ -161,3 +157,23 @@ def post_json(url, body, headers, *, ca_file=None, timeout=None):
         return json.loads(raw)
     except ValueError:
         raise ValueError('Model returned an invalid proposal') from None
+
+
+def _check_ca_file(url, ca_file):
+    if ca_file and urlsplit(url).scheme != 'https':
+        raise ValueError('A CA file applies only to an HTTPS endpoint')
+
+
+def post_json(url, body, headers, *, ca_file=None, timeout=None):
+    """`timeout`: the role's seconds (Settings, 5-600); None is TIMEOUT_SECONDS."""
+    _check_ca_file(url, ca_file)
+    seconds = TIMEOUT_SECONDS if timeout is None else timeout
+    data = json.dumps(body).encode()
+    return _exchange(Request(url, data=data, headers=headers), seconds, ca_file)
+
+
+def get_json(url, headers, *, ca_file=None, timeout=None):
+    """GET `url` under the same rules and error mapping as post_json."""
+    _check_ca_file(url, ca_file)
+    seconds = TIMEOUT_SECONDS if timeout is None else timeout
+    return _exchange(Request(url, headers=headers, method='GET'), seconds, ca_file)
