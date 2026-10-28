@@ -101,6 +101,29 @@ def secrets_beside(config_path):
     return path.with_suffix('.secrets.json')
 
 
+def restore_settings(config_path, earlier, conn_id, log):
+    """Put the settings file back as `earlier` (its bytes, or None for no file); False (logged
+    at error) if that failed too. The server and the `connection` command share this."""
+    try:
+        if earlier is None:
+            config_path.unlink(missing_ok=True)
+            return True
+        fd, name = tempfile.mkstemp(prefix='.rz-settings-', dir=config_path.parent)
+        try:
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(earlier)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, config_path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    except OSError as exc:
+        log('connection_restore_failed', connection=conn_id, error=type(exc).__name__, level=logging.ERROR)
+        return False
+    return True
+
+
 class _Reply(Exception):
     """Answer now with `status` and `payload` (JSON); nothing further is done."""
 
@@ -333,24 +356,7 @@ class ConnectionRoutes:
 
     def _restore(self, earlier, conn_id):
         """Put the settings file back as it was; False (logged at error) if that failed too."""
-        try:
-            if earlier is None:
-                self.config_path.unlink(missing_ok=True)
-                return True
-            fd, name = tempfile.mkstemp(prefix='.rz-settings-', dir=self.config_path.parent)
-            try:
-                with os.fdopen(fd, 'wb') as stream:
-                    stream.write(earlier)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(name, self.config_path)
-            finally:
-                if os.path.exists(name):
-                    os.unlink(name)
-        except OSError as exc:
-            self.log('connection_restore_failed', connection=conn_id, error=type(exc).__name__, level=logging.ERROR)
-            return False
-        return True
+        return restore_settings(self.config_path, earlier, conn_id, self.log)
 
     def _audit(self, req, session, event, conn_id, name, jobs):
         """Write the audit row; False when it could not be (the change is saved by then, so this

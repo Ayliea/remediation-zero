@@ -8,13 +8,15 @@ root (one SQLite file per agent; see tools/local_layout.py). Only `cycle` and
 `check-models` call a model; `update-enrichment` is the one command that reaches the
 internet (CISA, EPSS, NVD); `greenbone` reads from your Greenbone server
 (credentials only from RZ_GREENBONE_USERNAME and RZ_GREENBONE_PASSWORD); `seed`, `rescan`, `exception` and `approve` work
-with no model configured. API keys come only from the environment
-(RZ_<ROLE>_API_KEY, or RZ_MODEL_API_KEY for the proposer) and are never
+with no model configured. API keys come from the environment
+(RZ_<ROLE>_API_KEY, or RZ_MODEL_API_KEY for the proposer) or from the owner-only
+key file (`connection add`, never a command-line argument) and are never
 printed, logged or written to settings.
 
 `account` (scripts/local_accounts.py) does on the server what the Accounts page
-does, and `settings show` / `settings set` what the Settings page does, through
-the page's own validation (apply_settings_form). `approve` and `exception accept`
+does, `settings show` / `settings set` what the Settings page does, through
+the page's own validation (apply_settings_form), and `connection` what Settings ->
+Models does (scripts/local_connection_cli.py). `approve` and `exception accept`
 name the person with `--as EMAIL`, an active account (an owner, to accept a
 risk); the record carries `actor = {'via': 'command_line', 'account_id': ...,
 'verified': False}`.
@@ -52,7 +54,7 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
-from scripts import local_accounts, local_auth, local_connections
+from scripts import local_accounts, local_auth, local_connection_cli, local_connections
 from tools import access, connections, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
@@ -2114,6 +2116,7 @@ def _parser():
                     'comma-separated (server_names=a.example,192.0.2.10); a checkbox takes true or false.')
     setting.add_argument('section', metavar='SECTION', help='application, model or scanner')
     setting.add_argument('assignments', nargs='+', metavar='FIELD=VALUE')
+    local_connection_cli.add_parsers(commands)
     return parser
 
 
@@ -2181,6 +2184,15 @@ def main(argv=None):
             except SettingsCommandRefused as refusal:
                 parser.exit(1, f'{refusal}\n')
             return
+        if args.command == 'connection':
+            # Settings and the key file; the workspace is opened only to name and audit the acting account.
+            def acting(email):
+                ws = open_workspace(args.database)
+                person, _ = command_line_account(ws, email, 'manage_connections')
+                return person, Accounts(AccountStore(ws.accounts_path()), SimClock.from_env())
+            raise SystemExit(local_connection_cli.run(args, config_path, SecretsFile(secrets_path(args.database)),
+                                                      os.environ, acting=acting, clock=SimClock.from_env(),
+                                                      log=_log))
         preferences = local_settings.load(config_path)
         if args.command == 'check-models':
             # Reads settings only; writes nothing to the workspace.

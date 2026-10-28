@@ -375,9 +375,13 @@ are shown once, at setup; each signs in once in place of a code.
 
 ## Model roles
 
-There are four roles. Configure each in Settings with a format
-(`openai_chat`, `anthropic_messages` or `gemini_api`), an endpoint, a model and
-a family:
+There are four roles, shown in Settings as four jobs: Triage (proposer), Review
+(reviewer), Screening (guard) and Summaries (summarizer). A **connection** is one
+provider account or endpoint (a format, a base URL, an optional CA file and a
+key) that can do any of the jobs; Settings -> Models lists the connections and
+a popup adds, edits, tests, re-keys or deletes one. A connection is tested, job
+by job, before it is saved; nothing is saved if a job fails. Only an owner can
+change connections, and each change is recorded in the account audit trail.
 
 | Role | Does | API key variable |
 |---|---|---|
@@ -386,8 +390,61 @@ a family:
 | summarizer | Narrates the report's figures | `RZ_SUMMARIZER_API_KEY` |
 | guard | Screens untrusted text before any model sees it | `RZ_GUARD_API_KEY` |
 
-API keys are read only from the environment. They are never written to the
-settings file, the workspace, a record or a log. `RZ_MODEL_ENDPOINT` and
+### Where API keys live
+
+A key comes from the environment or from the key file:
+
+- **Environment.** The variables in the table above. If a job's variable is set,
+  it is used and wins over a stored key. A connection added without a key uses
+  these ("set on the server" in the list).
+- **Key file.** A key typed in the Settings popup (or at the `connection`
+  command's hidden prompt) is stored in `<database>.secrets.json`, beside the
+  settings file. It is created readable only by its owner (0600), written
+  atomically, and refused on read if it is group- or world-accessible, a
+  symbolic link, or owned by someone else; the refusal names the
+  `chmod 600` fix. A key is sent only to the address it was entered for:
+  changing a connection's address or certificate asks for the key again.
+- **At rest.** The protection is the file mode plus full-disk encryption of
+  the host. There is no encryption with a key kept next to the file, because
+  that would add nothing. Back the key file up with the same care as the
+  database, and keep it out of anything shared.
+- **Never** in the settings file, `settings show`, a record, a log line, the
+  audit trail, an error message or a page. The list shows at most the last four
+  characters of a stored key, and nothing for a short key.
+
+### Connection commands
+
+`python3 -S -m scripts.local connection` does on the server what Settings ->
+Models does, through the same checks:
+
+```bash
+python3 -S -m scripts.local connection list
+python3 -S -m scripts.local connection add openai --jobs review,summaries --model MODEL --as OWNER_EMAIL
+python3 -S -m scripts.local connection replace-key NAME --as OWNER_EMAIL
+python3 -S -m scripts.local connection test NAME
+python3 -S -m scripts.local connection remove NAME --as OWNER_EMAIL
+```
+
+- `list` and `test` need no account. `add`, `replace-key` and `remove` need
+  `--as EMAIL`, an active owner; the audit event says `via: command_line`.
+- `add PROVIDER` takes `--name`, `--endpoint BASE_URL`, `--ca-file PATH`,
+  `--format` (provider `other` only), `--jobs` (comma-separated: `triage`,
+  `review`, `screening`, `summaries`), `--model`, `--family` and `--timeout`.
+  It tests every chosen job and saves only if all pass.
+- A key is never a command-line argument: it would reach shell history and the
+  process list. The command asks at a hidden prompt, or reads the variable
+  named by `--key-env VARIABLE`. An empty answer stores no key and the
+  environment variables above are used.
+- `remove` prints what deleting would stop, then asks for the connection's name
+  to be typed; `--yes` skips the question.
+- The command runs in its own process and cannot take the dashboard's settings
+  lock. It refuses to save if the settings changed while it was testing, but a
+  Settings save landing in the same instant could be overwritten; run it when
+  nobody is changing Settings.
+
+### Overrides, limits and checks
+
+`RZ_MODEL_ENDPOINT` and
 `RZ_MODEL` override the saved proposer connection (an overridden endpoint does
 not inherit the saved CA file). HTTP is allowed only on loopback; a hosted
 endpoint must use HTTPS (see "A model on another machine"). Redirects and inherited proxies are

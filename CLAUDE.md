@@ -146,7 +146,7 @@ python3 -m venv .venv
 # local edition (no pip packages, no cloud account)
 python3 -S start-remediation-zero.py                                       # launcher; opens http://127.0.0.1:8081
 python3 -S start-remediation-zero.py --saved --public-url https://NAME:PORT  # also reachable through an HTTPS proxy (Tailscale Serve); every page needs sign-in
-python3 -S -m scripts.local --help                                         # init | seed | cycle | rescan | exception | approve | serve | check-models | update-enrichment | greenbone | account | settings
+python3 -S -m scripts.local --help                                         # init | seed | cycle | rescan | exception | approve | serve | check-models | update-enrichment | greenbone | account | settings | connection
 python3 -S -m scripts.local approve FINDING --cycle N --as EMAIL                         # approve a held or unreviewed decision as an active account
 python3 -S -m scripts.local exception accept FINDING --ttl D --reason T --cycle N --as OWNER_EMAIL [--approved-by-person]  # only an owner
 python3 -S -m scripts.local account setup                                  # the first account, on the server only; asks for the password and a code
@@ -160,6 +160,11 @@ python3 -S -m scripts.local account events [--limit N]                     # the
 python3 -S -m scripts.local account recover-owner --email E [--promote]    # last resort when no owner can sign in
 python3 -S -m scripts.local settings show                                  # the settings file as JSON
 python3 -S -m scripts.local settings set SECTION FIELD=VALUE...            # validated as the Settings page; e.g. application server_names=a.example
+python3 -S -m scripts.local connection list                                 # name, provider, key hint or "set on the server", jobs
+python3 -S -m scripts.local connection add PROVIDER --jobs triage,review --model M --as EMAIL  # asks for the key at a hidden prompt; tests before saving
+python3 -S -m scripts.local connection replace-key NAME --as EMAIL
+python3 -S -m scripts.local connection test NAME
+python3 -S -m scripts.local connection remove NAME --as EMAIL
 python3 -S -m scripts.local update-enrichment                              # fetch CISA KEV, EPSS and NVD into the workspace cache; reaches the internet
 python3 -S -m scripts.local greenbone tasks                                # list the account's Greenbone tasks: task_id  name
 python3 -S -m scripts.local greenbone test                                 # connect / sign in / list tasks, one line each
