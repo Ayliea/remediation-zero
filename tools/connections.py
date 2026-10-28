@@ -233,10 +233,10 @@ def _job_key(settings, role, conn_id, environ, secrets):
     if source == 'environment':
         return 'set on the server'
     if source == 'missing':
-        return 'key missing'
+        return 'no key set'
     hint = _stored_hint(secrets, conn_id)
     if hint is None:
-        return 'key missing'
+        return 'no key set'
     return f'stored …{hint}' if hint else 'stored'
 
 
@@ -275,10 +275,10 @@ def rows(settings, environ, secrets, *, now_real_ts):
             hint = 'set on the server'
         elif conn['key_source'] == 'environment':
             # Set on the server only for a job whose variable is set: the rest have no key.
-            hint = 'key missing'
+            hint = 'no key set'
         else:
             ending = _stored_hint(secrets, conn_id)
-            hint = 'key missing' if ending is None else (f'ends in …{ending}' if ending else 'key stored')
+            hint = 'no key set' if ending is None else (f'ends in …{ending}' if ending else 'key stored')
         out.append({'id': conn_id, 'name': conn['name'], 'provider': conn['provider'], 'letter': look.letter,
                     'colour': look.colour, 'base_url': conn['base_url'], 'ca_file': conn['ca_file'],
                     'jobs': jobs, 'key_hint': hint,

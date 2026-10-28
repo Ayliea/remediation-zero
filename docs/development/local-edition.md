@@ -397,7 +397,8 @@ A key comes from the environment or from the key file:
 - **Environment.** The variables in the table above. If a job's variable is set,
   it is used and wins over a stored key. A connection added without a key uses
   these ("set on the server" in the list, only for a job whose variable is
-  set; otherwise "key missing", and Replace key stores one). A key typed for a
+  set; otherwise "no key set", which is also right for a local server that
+  needs none, and Replace key stores one). A key typed for a
   job whose variable is set, or for Triage while `RZ_MODEL_ENDPOINT` sends it
   elsewhere, would never be tested or used, so the save is refused with a
   sentence naming the variable: unset it first, or connect without a key.

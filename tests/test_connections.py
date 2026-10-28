@@ -325,7 +325,7 @@ def test_environment_sourced_connection_without_the_variable_is_key_missing():
     s['connections'][AN]['key_source'] = 'environment'
     # 'environment' counts only when the job's variable is set: else the key is missing and can be given.
     row = cx.rows(s, {}, None, now_real_ts=0)[0]
-    assert row['jobs'][0]['key'] == 'key missing' and row['key_hint'] == 'key missing'
+    assert row['jobs'][0]['key'] == 'no key set' and row['key_hint'] == 'no key set'
     assert row['can_replace_key'] is True
     assert key_source(s, 'reviewer', {}) == 'missing'
     row = cx.rows(s, {'RZ_REVIEWER_API_KEY': 'k'}, None, now_real_ts=0)[0]
@@ -334,7 +334,7 @@ def test_environment_sourced_connection_without_the_variable_is_key_missing():
     # With no jobs at all, nothing is set on the server for it either.
     s['roles']['reviewer'] = None
     row = cx.rows(s, {'RZ_REVIEWER_API_KEY': 'k'}, None, now_real_ts=0)[0]
-    assert row['key_hint'] == 'key missing' and row['can_replace_key'] is True
+    assert row['key_hint'] == 'no key set' and row['can_replace_key'] is True
 
 
 def test_a_short_key_shows_no_ending(tmp_path):
@@ -347,13 +347,13 @@ def test_missing_and_unreadable_key_files_show_key_missing(tmp_path):
     s = settings(reviewer=job())
     empty = SecretsFile(tmp_path / 'none.secrets.json')
     row = cx.rows(s, {}, empty, now_real_ts=0)[0]
-    assert row['jobs'][0]['key'] == 'key missing' and row['key_hint'] == 'key missing'
+    assert row['jobs'][0]['key'] == 'no key set' and row['key_hint'] == 'no key set'
     store = stored(tmp_path)
     os.chmod(store.path, 0o644)
     row = cx.rows(s, {}, store, now_real_ts=0)[0]
-    assert row['jobs'][0]['key'] == 'key missing' and row['key_hint'] == 'key missing'
+    assert row['jobs'][0]['key'] == 'no key set' and row['key_hint'] == 'no key set'
     assert str(tmp_path) not in repr(row)
-    assert cx.rows(s, {}, None, now_real_ts=0)[0]['key_hint'] == 'key missing'
+    assert cx.rows(s, {}, None, now_real_ts=0)[0]['key_hint'] == 'no key set'
 
 
 def test_last_test_text():

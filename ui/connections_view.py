@@ -69,7 +69,7 @@ JOB_ICONS = {
 
 
 #: A job's own key, said only where it differs from its connection's (an environment key wins).
-_JOB_KEY = {'set on the server': 'key set on the server', 'key missing': 'key missing'}
+_JOB_KEY = {'set on the server': 'key set on the server', 'no key set': 'no key set'}
 
 
 def _e(value):

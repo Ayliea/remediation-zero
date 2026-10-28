@@ -277,7 +277,7 @@ def test_an_environment_connection_whose_variable_is_unset_says_key_missing_and_
     settings['connections'][OPENAI]['key_source'] = 'environment'
     local_settings.save(owner_client.config_path, settings)
     r = owner_client.get('/?view=settings&section=model')
-    assert 'Key: key missing' in r.text and 'Key: set on the server' not in r.text
+    assert 'Key: no key set' in r.text and 'Key: set on the server' not in r.text
     assert f'data-action="replace" data-connection="{OPENAI}"' in r.text
 
 
