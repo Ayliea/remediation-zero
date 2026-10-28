@@ -12,7 +12,7 @@ from tools.clock import ClockMode, SimClock
 from tools.connections import ConnectionRefused, Draft, JobChoice
 from tools.local_secrets import Overlay, SecretsFile
 from tools.local_settings import DEFAULTS, validate
-from tools.model_roles import ModelRoles
+from tools.model_roles import ModelRoles, key_source
 
 AN = 'conn-aaaaaaaaaaaa'
 OL = 'conn-bbbbbbbbbbbb'
@@ -302,10 +302,18 @@ def test_can_replace_key_is_false_when_every_job_takes_its_key_from_the_environm
 def test_environment_sourced_connection_without_the_variable_is_key_missing():
     s = settings(reviewer=job())
     s['connections'][AN]['key_source'] = 'environment'
+    # 'environment' counts only when the job's variable is set: else the key is missing and can be given.
     row = cx.rows(s, {}, None, now_real_ts=0)[0]
-    assert row['jobs'][0]['key'] == 'key missing' and row['key_hint'] == 'set on the server'
+    assert row['jobs'][0]['key'] == 'key missing' and row['key_hint'] == 'key missing'
+    assert row['can_replace_key'] is True
+    assert key_source(s, 'reviewer', {}) == 'missing'
     row = cx.rows(s, {'RZ_REVIEWER_API_KEY': 'k'}, None, now_real_ts=0)[0]
-    assert row['jobs'][0]['key'] == 'set on the server'
+    assert row['jobs'][0]['key'] == 'set on the server' and row['key_hint'] == 'set on the server'
+    assert row['can_replace_key'] is False
+    # With no jobs at all, nothing is set on the server for it either.
+    s['roles']['reviewer'] = None
+    row = cx.rows(s, {'RZ_REVIEWER_API_KEY': 'k'}, None, now_real_ts=0)[0]
+    assert row['key_hint'] == 'key missing' and row['can_replace_key'] is True
 
 
 def test_a_short_key_shows_no_ending(tmp_path):

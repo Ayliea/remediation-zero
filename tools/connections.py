@@ -17,7 +17,7 @@ from tools.local_secrets import SecretsFileUnsafe
 from tools.local_settings import MAX_CONNECTION_NAME, check_ca_file
 from tools.model_catalogue import JOB_NAMES, JOB_ORDER, preset, presets
 from tools.model_endpoints import call_endpoint
-from tools.model_roles import ROLES, ModelRoles, RoleConfig, key_present, key_source
+from tools.model_roles import ROLES, ModelRoles, RoleConfig, key_source
 from tools.secrets_port import check_key
 
 
@@ -203,7 +203,9 @@ def _job_key(settings, role, conn_id, environ, secrets):
     if source == 'none':
         return 'no key needed'
     if source == 'environment':
-        return 'set on the server' if key_present(role, environ) else 'key missing'
+        return 'set on the server'
+    if source == 'missing':
+        return 'key missing'
     hint = _stored_hint(secrets, conn_id)
     if hint is None:
         return 'key missing'
@@ -232,8 +234,11 @@ def rows(settings, environ, secrets, *, now_real_ts):
         all_env = bool(jobs) and all(key_source(settings, j['role'], environ) == 'environment' for j in jobs)
         if conn['key_source'] == 'none':
             hint = 'no key needed'
-        elif all_env or conn['key_source'] == 'environment':
+        elif all_env:
             hint = 'set on the server'
+        elif conn['key_source'] == 'environment':
+            # Set on the server only for a job whose variable is set: the rest have no key.
+            hint = 'key missing'
         else:
             ending = _stored_hint(secrets, conn_id)
             hint = 'key missing' if ending is None else (f'ends in …{ending}' if ending else 'key stored')

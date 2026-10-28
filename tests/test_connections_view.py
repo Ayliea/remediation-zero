@@ -272,6 +272,15 @@ def test_the_page_says_when_a_key_is_set_on_the_server(owner_client, monkeypatch
     assert f'data-action="replace" data-connection="{OPENAI}"' not in r.text
 
 
+def test_an_environment_connection_whose_variable_is_unset_says_key_missing_and_offers_replace_key(owner_client):
+    settings = settings_with_connections()
+    settings['connections'][OPENAI]['key_source'] = 'environment'
+    local_settings.save(owner_client.config_path, settings)
+    r = owner_client.get('/?view=settings&section=model')
+    assert 'Key: key missing' in r.text and 'Key: set on the server' not in r.text
+    assert f'data-action="replace" data-connection="{OPENAI}"' in r.text
+
+
 def test_coverage_shows_nobody_and_family_note():
     settings = settings_with_connections()
     text = section(coverage=connections.coverage(settings, {}))

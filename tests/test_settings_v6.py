@@ -202,7 +202,9 @@ def test_no_stored_key_is_read_unless_the_connection_says_stored(tmp_path):
     for source in ('environment', 'none'):
         roles = ModelRoles.from_settings(v6_settings(key_source=source), {}, stored(tmp_path))
         assert roles.adapter('reviewer').api_key is None
-        assert key_source(v6_settings(key_source=source), 'reviewer', {}) == source
+        # 'environment' only when the job's variable is set: without it the key is missing.
+        assert key_source(v6_settings(key_source=source), 'reviewer', {}) == (
+            'missing' if source == 'environment' else source)
 
 
 def test_missing_stored_key_raises_stored_key_missing(tmp_path):

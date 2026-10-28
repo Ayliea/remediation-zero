@@ -89,15 +89,17 @@ def key_present(role, environ):
 
 def key_source(settings, role, environ):
     """Where the role's key comes from: 'environment' when one is set there, else its connection's
-    key_source ('stored', 'environment' or 'none'). Reads no key file and returns no key."""
+    key_source ('stored' or 'none'), or 'missing' when the key would come from the environment
+    and none is set there. Reads no key file and returns no key."""
     if key_present(role, environ):
         return 'environment'
     raw = (settings.get('roles') or {}).get(role)
     if not raw:
         return 'none'
     if 'connection' not in raw:
-        return 'environment'  # a role given as a resolved call: keys come only from the environment
-    return settings['connections'][raw['connection']]['key_source']
+        return 'missing'  # a role given as a resolved call: keys come only from the environment
+    source = settings['connections'][raw['connection']]['key_source']
+    return 'missing' if source == 'environment' else source
 
 
 def _resolve(role, raw, connections):

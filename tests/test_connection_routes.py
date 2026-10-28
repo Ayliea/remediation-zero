@@ -1051,3 +1051,14 @@ def test_an_upgraded_v5_install_can_edit_add_and_remove_connections(server, test
     response, data, text = server.post('/connections/delete', {'connection': triage})
     assert response.status == 200 and data['ok'] is True, text
     assert triage not in server.settings()['connections'] and server.settings()['roles']['proposer'] is None
+
+
+def test_an_environment_connection_whose_variable_is_unset_takes_a_replaced_key(server, tester):
+    write_v5(server.config_path)                          # migrated: Review's key_source is 'environment'
+    review = server.settings()['roles']['reviewer']['connection']
+    assert server.settings()['connections'][review]['key_source'] == 'environment'
+    response, data, text = server.post('/connections/replace-key', {'connection': review, 'key': OTHER_KEY})
+    assert response.status == 200 and data['ok'] is True, text
+    assert tester.calls[-1]['keys'] == {'reviewer': OTHER_KEY}
+    assert server.settings()['connections'][review]['key_source'] == 'stored'
+    assert server.secrets.get(review) == OTHER_KEY

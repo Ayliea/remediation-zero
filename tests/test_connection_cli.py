@@ -417,3 +417,16 @@ def test_an_upgraded_v5_install_can_test_add_and_remove_connections(db, people, 
     code, out, err = cli(capsys, db, 'connection', 'remove', 'Anthropic (Review)', '--as', OWNER, '--yes')
     assert code == 0, err
     assert settings(db)['roles']['reviewer'] is None and len(settings(db)['connections']) == 1
+
+
+def test_an_environment_connection_whose_variable_is_unset_takes_a_replaced_key(db, people, capsys, tester, typed):
+    write_v5(db)                                         # migrated: Review's key_source is 'environment'
+    review = settings(db)['roles']['reviewer']['connection']
+    listed = cli(capsys, db, 'connection', 'list')[1]
+    assert 'Anthropic (Review)  anthropic  key missing' in listed
+    typed.answers[0] = NEW_KEY
+    code, out, err = cli(capsys, db, 'connection', 'replace-key', 'Anthropic (Review)', '--as', OWNER)
+    assert code == 0, err
+    assert tester.calls[-1]['keys'] == {'reviewer': NEW_KEY}
+    assert settings(db)['connections'][review]['key_source'] == 'stored'
+    assert SecretsFile(secrets_path(db)).get(review) == NEW_KEY
