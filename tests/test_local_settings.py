@@ -163,18 +163,20 @@ def test_all_settings_pages_and_save_without_model(app):
     legacy = dict(token=token, section='model', endpoint=LOCAL, model='test')
     assert request('POST', '/settings', legacy)[0] == 400
     assert not path.exists()
+    # The page no longer sets a job's call: that is the owner-only popup, or `settings set` on the server.
     fields = model_form(token, proposer_format='openai_chat', proposer_endpoint=LOCAL, proposer_model='test')
-    assert request('POST', '/settings', fields)[0] == 303
-    assert config.load(path)['roles']['proposer']['model'] == 'test'
-    assert request('POST', '/settings', model_form(token))[0] == 303
-    assert config.load(path)['roles']['proposer'] is None
-    assert request('POST', '/settings', fields)[0] == 303
+    assert request('POST', '/settings', fields)[0] == 400
+    assert not path.exists()
+    assert request('POST', '/settings', dict(token=token, section='model', same_family_policy='proceed'))[0] == 303
+    assert config.load(path)['same_family_policy'] == 'proceed'
+    from scripts import local
+    local.settings_set(path, 'model', [f'proposer.endpoint={LOCAL}', 'proposer.model=test'])
     fields = dict(token=token, section='application', mode='saved', port='8082')
     assert request('POST', '/settings', fields)[0] == 303
     assert config.load(path)['open_browser'] is False
     assert config.load(path)['roles']['proposer']['model'] == 'test'
     assert config.load(path)['roles']['reviewer'] is None
-    assert 'value="test"' in request()[1]
+    assert 'Triage</strong> test' in request()[1]
 
 
 @pytest.mark.parametrize('attack', ['origin', 'host', 'token', 'unicode-token', 'duplicate', 'unknown', 'invalid'])
@@ -195,9 +197,11 @@ def test_forged_or_invalid_saves_do_not_mutate(app, attack):
 
 
 def test_key_is_never_rendered(app, monkeypatch):
+    path, request = app
+    config.save(path, with_proposer())
     monkeypatch.setenv('RZ_MODEL_API_KEY', 'private-secret-value')
-    body = app[1]()[1]
-    assert 'Environment key: present' in body
+    body = request()[1]
+    assert 'set on the server' in body
     assert 'private-secret-value' not in body
 
 
@@ -231,18 +235,19 @@ def _token(request):
     return re.search('name="token" value="([^"]+)"', request()[1])[1]
 
 
-def test_settings_renders_four_role_blocks(app):
+def test_the_models_section_shows_the_policy_but_no_per_role_fields(app):
     _, request = app
     body = request()[1]
     for role in ROLES:
         for part in ('format', 'endpoint', 'model', 'family', 'ca_file', 'timeout_seconds'):
-            assert f'name="{role}_{part}"' in body
+            assert f'name="{role}_{part}"' not in body
     assert 'name="same_family_policy"' in body
     assert 'Same-family reviews' in body
     assert 'Wait for a person (recommended)' in body and 'Proceed automatically' in body
     assert 'A model reviewing reasoning from its own family shares its blind spots.' in body
     assert 'No reviewer configured: every suggestion waits for a person.' in body
     assert 'value="vertex"' not in body
+    # The popup offers the formats and families (the owner's page; the fixture signs in the owner).
     assert 'value="anthropic_messages"' in body and 'value="gemma"' in body
 
 
@@ -252,16 +257,25 @@ def test_no_reviewer_notice_only_when_reviewer_is_none(app):
     config.save(path, value)
     body = request()[1]
     assert 'No reviewer configured' not in body
-    assert 'value="gemma-4"' in body
+    assert 'Review</strong> gemma-4' in body
 
 
-def test_post_saves_roles_and_policy(app):
+def role_fields(**given):
+    """The per-role fields as `settings set` applies them (apply_settings_form), without the page's token."""
+    fields = model_form('', **given)
+    del fields['token'], fields['section']
+    return fields
+
+
+def test_the_role_fields_save_roles_and_policy(app):
+    from scripts import local
     path, request = app
-    fields = model_form(_token(request), same_family_policy='proceed',
-                        proposer_endpoint=LOCAL, proposer_model='gemini-x',
-                        reviewer_format='anthropic_messages', reviewer_endpoint='https://example.invalid/v1/messages',
-                        reviewer_model='claude-x', reviewer_family='claude')
-    assert request('POST', '/settings', fields)[0] == 303
+    fields = role_fields(same_family_policy='proceed',
+                         proposer_endpoint=LOCAL, proposer_model='gemini-x',
+                         reviewer_format='anthropic_messages', reviewer_endpoint='https://example.invalid/v1/messages',
+                         reviewer_model='claude-x', reviewer_family='claude')
+    assert request('POST', '/settings', dict(fields, token=_token(request), section='model'))[0] == 400
+    config.save(path, local.apply_settings_form(config.DEFAULTS, 'model', fields))
     saved = config.load(path)
     assert saved['same_family_policy'] == 'proceed'
     assert saved['roles']['proposer']['family'] == 'gemini'  # blank family is suggested from the model
@@ -277,46 +291,47 @@ def test_post_saves_roles_and_policy(app):
     dict(proposer_endpoint=LOCAL),  # endpoint without a model
     dict(proposer_family='bogus', proposer_endpoint=LOCAL, proposer_model='m'),
     dict(same_family_policy='skip')])
-def test_post_rejects_invalid_role_fields(app, change):
-    path, request = app
-    config.save(path, with_proposer())
-    before = path.read_bytes()
-    assert request('POST', '/settings', model_form(_token(request), **change))[0] == 400
-    assert path.read_bytes() == before
+def test_the_role_fields_refuse_invalid_values(change):
+    from scripts import local
+    with pytest.raises(ValueError):
+        config.validate(local.apply_settings_form(with_proposer(), 'model', role_fields(**change)))
 
 
-def test_post_rejects_http_hosted_reviewer(app):
-    path, request = app
-    fields = model_form(_token(request), reviewer_endpoint='http://example.invalid/v1/chat/completions', reviewer_model='m')
-    assert request('POST', '/settings', fields)[0] == 400
-    assert not path.exists()
+def test_the_role_fields_refuse_an_http_hosted_reviewer():
+    from scripts import local
+    fields = role_fields(reviewer_endpoint='http://example.invalid/v1/chat/completions', reviewer_model='m')
+    with pytest.raises(ValueError):
+        config.validate(local.apply_settings_form(config.DEFAULTS, 'model', fields))
 
 
-def test_post_rejects_unknown_format(app):
-    path, request = app
-    fields = model_form(_token(request), guard_format='carrier_pigeon', guard_endpoint=LOCAL, guard_model='m')
-    assert request('POST', '/settings', fields)[0] == 400
-    assert not path.exists()
+def test_the_role_fields_refuse_an_unknown_format():
+    from scripts import local
+    with pytest.raises(ValueError):
+        local.apply_settings_form(config.DEFAULTS, 'model', role_fields(guard_format='carrier_pigeon',
+                                                                        guard_endpoint=LOCAL, guard_model='m'))
 
 
-def test_post_rejects_extra_fields(app):
-    path, request = app
-    fields = model_form(_token(request))
-    assert len(fields) == 27
+def test_the_role_fields_refuse_extra_fields():
+    from scripts import local
+    fields = role_fields()
+    assert len(fields) == 25
     fields.update(extra_a='1', extra_b='2')
-    assert len(fields) == 29
-    assert request('POST', '/settings', fields)[0] == 400
-    assert not path.exists()
+    with pytest.raises(ValueError):
+        local.apply_settings_form(config.DEFAULTS, 'model', fields)
 
 
 def test_settings_never_renders_key_values(app, monkeypatch):
+    path, request = app
     for name in ('RZ_PROPOSER_API_KEY', 'RZ_REVIEWER_API_KEY', 'RZ_SUMMARIZER_API_KEY', 'RZ_MODEL_API_KEY'):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv('RZ_GUARD_API_KEY', 'secret-x')
-    body = app[1]()[1]
+    config.save(path, place(with_proposer(), 'guard', proposer(model='guard-m')))
+    body = request()[1]
     assert 'secret-x' not in body
-    assert body.count('Environment key: present') == 1
-    assert body.count('Environment key: not set') == 3
+    # Both connections take their key from the environment; only Screening's is there.
+    assert body.count('Key: set on the server') == 2
+    assert 'Triage</strong> test <span class="rz-muted">(key missing)</span>' in body
+    assert 'Screening</strong> guard-m</li>' in body
 
 
 def test_endpoint_model_and_family_are_escaped(app):
@@ -330,9 +345,10 @@ def test_endpoint_model_and_family_are_escaped(app):
 
 def test_saving_makes_no_model_call(app):
     # The fixture already fails ModelEndpoint.propose, and the offline guard fails any socket.
-    _, request = app
-    fields = model_form(_token(request), reviewer_endpoint=LOCAL, reviewer_model='m')
-    assert request('POST', '/settings', fields)[0] == 303
+    from scripts import local
+    path, request = app
+    assert request('POST', '/settings', dict(token=_token(request), section='model', same_family_policy='wait'))[0] == 303
+    local.settings_set(path, 'model', [f'reviewer.endpoint={LOCAL}', 'reviewer.model=m'])
 
 
 def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch):
@@ -358,19 +374,18 @@ def test_field_limit_is_enforced_by_the_parse_not_the_field_set(app, monkeypatch
     assert not path.exists()
 
 
-def test_endpoint_is_escaped_in_the_page(app):
+def test_endpoint_is_never_written_raw_into_the_page(app):
     path, request = app
     value = with_proposer(endpoint='http://localhost:11434/v1/a"onfocus="x<b>')
     path.write_text(json.dumps(value))
     body = request()[1]
     assert 'a"onfocus="x<b>' not in body
-    assert 'a&quot;onfocus=&quot;x&lt;b&gt;' in body
 
 
 def test_proposer_key_hint_names_the_fallback(app):
     body = app[1]()[1]
     assert 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' in body
-    assert 'Set RZ_REVIEWER_API_KEY before' in body
+    assert 'RZ_REVIEWER_API_KEY for Review' in body
 
 
 # --- Ruling 2: the cycle interval ---------------------------------------------

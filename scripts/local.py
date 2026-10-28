@@ -53,7 +53,7 @@ from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
 from scripts import local_accounts, local_auth, local_connections
-from tools import access, local_settings, server_tls
+from tools import access, connections, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
 from tools.adjudication import RetryStateError
@@ -70,10 +70,11 @@ from tools.local_memory import LocalMemory
 from tools.local_secrets import SecretsFile, secrets_path
 from tools.model_check import check_models
 from tools.model_endpoints import split_endpoint
-from tools.model_roles import ModelRoles, ROLES, key_present, suggest_family
+from tools.model_roles import ModelRoles, ROLES, suggest_family
 from tools.models import FORMATS
 from ui import account_views
 from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
+from ui.connections_view import SCRIPT_HASH
 from ui.settings_view import NO_VISIBLE_TASKS, SECTIONS, render_settings
 from worker.envelope import cycle_for_day
 
@@ -1531,7 +1532,8 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     chosen = saved['scanner']['task_ids']
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
                         message='Preferences saved. No model calls were made.' if query.get('saved') == ['1'] else '',
-                        scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None)
+                        scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None,
+                        session=session)
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
                               approve_command=None if demo else approve_command,
                               upload_token=session.csrf if upload and not demo else None,
@@ -1542,7 +1544,10 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             except Exception:
                 body, status = render({}, view, unavailable=True, settings_html="" if config_path else None,
                                       account=account), 503
-            self._send_html(body, status)
+            # Settings -> Models, for an owner, is the one page that runs a script: its popup.
+            scripted = (status == 200 and view == 'settings' and section == 'model'
+                        and access.allowed(session.role, local_connections.ACTION))
+            self._send_html(body, status, script_hash=SCRIPT_HASH if scripted else None)
 
         def _may_post(self, session, path, action):
             if path == '/accounts/invite':
@@ -1647,21 +1652,34 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 return
             self.redirect('/?view=accounts')
 
-        def _settings_html(self, values, section, *, message='', scanner=None):
-            # The model form shows each job's whole call, resolved through its connection.
-            values = dict(values, roles={role: local_settings.role_settings(values, role) for role in ROLES})
-            return render_settings(values, section, self.csrf, message=message, fingerprint=_certificate_fingerprint(values, workspace_root),
-                keys={role: key_present(role, os.environ) for role in ROLES},
-                overrides=bool(os.environ.get('RZ_MODEL_ENDPOINT') or os.environ.get('RZ_MODEL')), scanner=scanner)
+        def _settings_html(self, values, section, *, message='', scanner=None, session=None):
+            return render_settings(values, section, self.csrf, message=message,
+                                   fingerprint=_certificate_fingerprint(values, workspace_root),
+                                   models=self._models(values, session) if section == 'model' else None,
+                                   scanner=scanner)
 
-        def _send_html(self, body, status, headers=()):
+        @staticmethod
+        def _models(values, session):
+            """What the Models section shows: never a key, only its last characters (rows).
+            `time.time()` only words "Tested n min ago"; it is never stored."""
+            keys = SecretsFile(local_connections.secrets_beside(config_path))
+            return {'rows': connections.rows(values, os.environ, keys, now_real_ts=time.time()),
+                    'coverage': connections.coverage(values, os.environ),
+                    'owner': session is not None and access.allowed(session.role, local_connections.ACTION),
+                    'confirmed': bool(session is not None and session.confirmed),
+                    'deletions': {cid: connections.deletion_consequences(values, cid) for cid in values['connections']}}
+
+        def _send_html(self, body, status, headers=(), script_hash=None):
             encoded = body.encode()
             self.send_response(status)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(encoded)))
             self.send_header('Cache-Control', 'no-store')
             # Inline <svg> (the QR code) is markup, not a loaded image: img-src is unchanged.
-            self.send_header('Content-Security-Policy', "default-src 'none'; img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            # `script_hash` (the Models page, for an owner only) allows that one inline script, and
+            # its requests to this server; every other page runs no script at all.
+            scripted = f"script-src '{script_hash}'; connect-src 'self'; " if script_hash else ''
+            self.send_header('Content-Security-Policy', f"default-src 'none'; {scripted}img-src data:; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
             self.send_header('X-Content-Type-Options', 'nosniff')
             # Not no-referrer: under it a browser sends "Origin: null" on this page's own form
             # posts, which do_POST refuses. same-origin still sends nothing to other sites,
@@ -1758,6 +1776,10 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     return
                 self.csrf = session.csrf
                 section = fields.pop('section', '')
+                if section == 'model' and set(fields) != {'same_family_policy'}:
+                    # The page posts the same-family policy only. Jobs and models change through the
+                    # owner-only /connections/* routes; the per-role fields stay for `settings set`.
+                    raise ValueError()
                 values = local_settings.load(config_path)
                 if section == 'scanner_test' and not fields:
                     # Tests the saved settings. Never saves, so nothing below runs and no re-confirm is asked.

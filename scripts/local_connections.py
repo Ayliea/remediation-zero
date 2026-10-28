@@ -448,7 +448,7 @@ class ConnectionRoutes:
             name = type(exc).__name__
             self.log('connection_models_failed', connection=conn_id or '-', error=name)
             return {'error': LIST_FAILED.format(name), 'hint': PROBLEM_HINTS.get(name)}
-        return {'models': models, 'suggested': suggest(settings, provider, models)}
+        return {'models': models, 'suggested': suggest(settings, provider, models), 'lines': lines(provider, models)}
 
     def _saved_key(self, settings, conn_id, conn):
         """The key a saved connection's model list is fetched with: a job's environment key
@@ -681,6 +681,11 @@ class ConnectionRoutes:
         if key_kept:
             raise _Reply(503, self._done({'error': KEY_NOT_DELETED}, audited))
         return self._done({'ok': True}, audited)
+
+
+def lines(provider, models):
+    """Each listed model's catalogue line (tier, speed, relative cost), None when unknown."""
+    return {model: entry.strengths if (entry := match(provider, model)) else None for model in models}
 
 
 def suggest(settings, provider, models):

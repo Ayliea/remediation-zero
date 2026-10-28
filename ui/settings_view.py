@@ -4,57 +4,29 @@
 """Local settings pages. Rendering never contacts a model."""
 from html import escape
 
-from tools.model_roles import FAMILIES, ROLES
-from tools.models import FORMATS
+from tools.model_catalogue import presets
+from ui.connections_view import models_section
 
-SECTIONS = {'model': 'Model connection', 'storage': 'Data & storage',
+SECTIONS = {'model': 'Models', 'storage': 'Data & storage',
             'scanner': 'Scanner', 'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
 #: Shown on the Scanner page and by `greenbone tasks` when the account lists nothing.
 NO_VISIBLE_TASKS = ('This account can see no tasks. In Greenbone, add it as an observer on each task '
                     'to import, or give its role access to them.')
 
 
-def render_settings(values, section, token, *, message='', keys=None, overrides=False, scanner=None, fingerprint=None):
+def render_settings(values, section, token, *, message='', models=None, scanner=None, fingerprint=None):
     e = lambda v: escape(str(v), quote=True)
     tabs = '<nav class="settings-tabs" aria-label="Settings sections">' + ''.join(
         f'<a href="/?view=settings&amp;section={k}" aria-current="{"page" if k == section else "false"}">{v}</a>'
         for k, v in SECTIONS.items()) + '</nav>'
     def form(contents):
         return f'<form method="post" action="/settings"><input type="hidden" name="token" value="{e(token)}"><input type="hidden" name="section" value="{section}">{contents}<div class="row"><button type="submit">Save preferences</button><a href="/?view=settings&amp;section={section}">Cancel</a></div></form>'
-    keys = keys or {}
-    key_hint = lambda r: 'RZ_PROPOSER_API_KEY (or RZ_MODEL_API_KEY)' if r == 'proposer' else f'RZ_{r.upper()}_API_KEY'
     if section == 'model':
-        body = '<h2>Your models, your choice</h2><p>Each role can use a local or hosted model. A model on another machine needs HTTPS; if its certificate is self-signed or from your own CA, give the path of that certificate on this server. Leave a role\'s endpoint and model blank to leave it not configured. Saving makes no model calls.</p>'
-        blocks = ''
-        for role in ROLES:
-            cfg = values['roles'][role] or {'format': 'openai_chat', 'endpoint': '', 'model': '', 'family': '', 'ca_file': '',
-                                            'timeout_seconds': 60}
-            fmt = ''.join(f'<option value="{e(f)}" {"selected" if cfg["format"] == f else ""}>{e(f)}</option>' for f in FORMATS)
-            fam = '<option value="">Detect from model name</option>' + ''.join(
-                f'<option value="{e(f)}" {"selected" if cfg["family"] == f else ""}>{e(f)}</option>' for f in FAMILIES)
-            blocks += (f'<fieldset class="role-block"><legend>{role.capitalize()}</legend>'
-                       f'<label>Format<select name="{role}_format">{fmt}</select></label>'
-                       f'<label>Endpoint URL<input name="{role}_endpoint" type="url" maxlength="2048" value="{e(cfg["endpoint"])}" placeholder="http://localhost:11434/v1/chat/completions"></label>'
-                       f'<label>Model name<input name="{role}_model" maxlength="200" value="{e(cfg["model"])}"></label>'
-                       f'<label>Model family<select name="{role}_family">{fam}</select></label>'
-                       f'<label>CA certificate file (optional)<input name="{role}_ca_file" maxlength="4096" value="{e(cfg["ca_file"])}" placeholder="/etc/remediation-zero/model-ca.pem"></label>'
-                       '<p>Only for an HTTPS endpoint whose certificate is self-signed or from your own CA: the absolute path of that certificate, or of the CA that signed it, on this server. It is then the only thing trusted for this endpoint. The certificate must still name the host in the URL.</p>'
-                       f'<label>Timeout in seconds<input name="{role}_timeout_seconds" type="number" min="5" max="600" value="{e(str(cfg["timeout_seconds"]))}"></label>'
-                       '<p>How long to wait for an answer, 5 to 600. A local model on a CPU-only server, or one loading for its first request, can need several minutes.</p>'
-                       f'<p>Environment key: {"present" if keys.get(role) else "not set"}. Keys are never displayed or saved here. Set {key_hint(role)} before starting the app.</p></fieldset>')
-        policy = values['same_family_policy']
-        blocks += ('<fieldset class="role-block"><legend>Same-family reviews</legend>'
-                   '<label>Same-family reviews<select name="same_family_policy">'
-                   f'<option value="wait" {"selected" if policy == "wait" else ""}>Wait for a person (recommended)</option>'
-                   f'<option value="proceed" {"selected" if policy == "proceed" else ""}>Proceed automatically</option></select></label>'
-                   '<p>A model reviewing reasoning from its own family shares its blind spots.</p></fieldset>')
-        body += form(blocks)
-        if values['roles']['reviewer'] is None:
-            body += '<p class="notice">No reviewer configured: every suggestion waits for a person.</p>'
-        body += '<p>Connection status: Not tested. Saving does not verify availability.</p>'
-        if overrides:
-            body += '<p class="notice">RZ_MODEL_ENDPOINT or RZ_MODEL is set in this process. Environment values override the saved proposer for command-line runs.</p>'
-        body += '<details><summary>Run an optional sample check</summary><p>From your installation folder, run <code>python3 -m scripts.local check-models</code> (add <code>--role reviewer</code> to check one role). This sends the bundled synthetic example to each configured model and may incur provider charges. On Windows, use <code>py -3.12</code>. Use the same database and environment as the dashboard. No check runs when you open this page.</p></details>'
+        # The connections list, the coverage strip and the same-family policy (ui/connections_view.py).
+        # `models`: rows, coverage, owner, confirmed and deletions, worked out by the server.
+        models = models or {'rows': [], 'coverage': [], 'owner': False, 'confirmed': False, 'deletions': {}}
+        body = models_section(models['rows'], models['coverage'], presets(), values['same_family_policy'], token,
+                              owner=models['owner'], confirmed=models['confirmed'], deletions=models['deletions'])
     elif section == 'scanner':
         body = _scanner_body(values['scanner'], scanner or {}, form, token, e)
     elif section == 'application':

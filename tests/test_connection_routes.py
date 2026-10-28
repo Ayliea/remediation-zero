@@ -606,6 +606,16 @@ def test_models_lists_with_the_key_just_typed_and_suggests_one(server, monkeypat
     assert not server.config_path.exists()
 
 
+def test_models_carry_each_model_s_catalogue_line(server, monkeypatch):
+    # The Models popup shows one line per listed model from the catalogue; an unknown model has none.
+    monkeypatch.setattr(model_endpoints, 'list_models', lambda *a, **k: ['gpt-x', 'gpt-x-mini', 'whatever-1'])
+    response, data, _ = server.post('/connections/models', {'provider': 'openai', 'base_url': BASE,
+                                                            'ca_file': '', 'key': KEY})
+    assert response.status == 200
+    assert data['lines'] == {'gpt-x': 'Larger model; slower, higher cost.',
+                             'gpt-x-mini': 'Smaller model; faster, lower cost.', 'whatever-1': None}
+
+
 def test_models_for_a_saved_connection_use_its_stored_key(server, tester, monkeypatch):
     conn = added(server)
     seen = []

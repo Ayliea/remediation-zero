@@ -225,6 +225,8 @@ def rows(settings, environ, secrets, *, now_real_ts):
     for conn_id, conn in settings['connections'].items():
         look = preset(conn['provider'])
         jobs = [{'role': role, 'job': JOB_NAMES[role], 'model': settings['roles'][role]['model'],
+                 'family': settings['roles'][role]['family'],
+                 'timeout_seconds': settings['roles'][role]['timeout_seconds'],
                  'key': _job_key(settings, role, conn_id, environ, secrets)}
                 for role in _jobs_of(settings, conn_id)]
         all_env = bool(jobs) and all(key_source(settings, j['role'], environ) == 'environment' for j in jobs)

@@ -224,6 +224,7 @@ def test_the_ca_file_reaches_the_adapter():
 
 
 SESSION_COOKIES = {}
+SETTINGS_PATHS = {}
 
 
 @pytest.fixture
@@ -232,6 +233,7 @@ def settings_server(tmp_path, fake_endpoints, signed_in):
     httpd = local.DashboardServer(('127.0.0.1', 0), local.handler(SimpleNamespace(snapshot=lambda: {}), False,
                                                                   config_path, accounts=signed_in.accounts))
     SESSION_COOKIES[httpd.server_port] = signed_in.cookie()  # every page needs a session
+    SETTINGS_PATHS[httpd.server_port] = config_path
     fake_endpoints.tcp(httpd.socket)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield httpd.server_port, config_path
@@ -240,28 +242,36 @@ def settings_server(tmp_path, fake_endpoints, signed_in):
 
 
 def save_model(port, ca_file, timeout='60'):
+    """Set Triage's whole call as `settings set` does on the server, with the Settings page's own
+    validation (apply_settings_form). The page itself posts only the same-family policy now; that
+    it refuses these fields is checked first, so a refusal below is the validation's own."""
+    config_path = SETTINGS_PATHS[port]
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
     conn.request('GET', '/?view=settings&section=model', headers={'Host': f'127.0.0.1:{port}',
                                                                    'Cookie': SESSION_COOKIES[port]})
     page = conn.getresponse().read().decode()
     token = re.search(r'name="token" value="([^"]+)"', page).group(1)
-    assert 'name="proposer_ca_file"' in page and 'name="proposer_timeout_seconds"' in page
-    fields = {'token': token, 'section': 'model', 'same_family_policy': 'wait'}
-    for name in local.ROLES:
-        fields.update({f'{name}_format': 'openai_chat', f'{name}_endpoint': '', f'{name}_model': '',
-                       f'{name}_family': '', f'{name}_ca_file': '', f'{name}_timeout_seconds': ''})
-    fields.update(proposer_endpoint='https://models.example.test/v1/chat/completions', proposer_model='qwen2.5:3b',
-                  proposer_ca_file=ca_file, proposer_timeout_seconds=timeout)
+    assert 'name="proposer_ca_file"' not in page and 'name="proposer_timeout_seconds"' not in page
+    fields = {'token': token, 'section': 'model', 'same_family_policy': 'wait',
+              'proposer_endpoint': 'https://models.example.test/v1/chat/completions', 'proposer_model': 'qwen2.5:3b',
+              'proposer_ca_file': ca_file, 'proposer_timeout_seconds': timeout}
     conn.request('POST', '/settings', body=urlencode(fields), headers={
         'Host': f'127.0.0.1:{port}', 'Origin': f'http://127.0.0.1:{port}', 'Sec-Fetch-Site': 'same-origin',
         'Content-Type': 'application/x-www-form-urlencoded', 'Cookie': SESSION_COOKIES[port]})
     response = conn.getresponse()
-    text = response.read().decode()
+    response.read()
     conn.close()
-    return response.status, text
+    assert response.status == 400
+    try:
+        message = local.settings_set(config_path, 'model', [
+            'proposer.endpoint=https://models.example.test/v1/chat/completions', 'proposer.model=qwen2.5:3b',
+            f'proposer.ca_file={ca_file}', f'proposer.timeout_seconds={timeout}'])
+    except local.SettingsCommandRefused as refusal:
+        return 400, str(refusal)
+    return 303, message
 
 
-def test_a_model_ca_file_is_saved_from_the_settings_page(settings_server, certs):
+def test_a_model_ca_file_is_saved_from_the_settings_command(settings_server, certs):
     port, config_path = settings_server
     assert save_model(port, str(certs / 'ca.pem'))[0] == 303
     assert local_settings.role_settings(local_settings.load(config_path), 'proposer')['ca_file'] == str(certs / 'ca.pem')
@@ -320,7 +330,7 @@ def test_a_timeout_outside_5_to_600_seconds_is_refused(bad):
         RoleConfig('proposer', 'openai_chat', 'https://m.example.test/v1', 'm', 'qwen', timeout_seconds=bad)
 
 
-def test_the_timeout_is_saved_from_the_settings_page_and_reaches_the_adapter(settings_server):
+def test_the_timeout_is_saved_from_the_settings_command_and_reaches_the_adapter(settings_server):
     port, config_path = settings_server
     assert save_model(port, '', timeout='300')[0] == 303
     saved = local_settings.load(config_path)
@@ -329,7 +339,7 @@ def test_the_timeout_is_saved_from_the_settings_page_and_reaches_the_adapter(set
 
 
 @pytest.mark.parametrize('bad', ['4', '601', 'abc', '60.5', '٣٠٠'])
-def test_a_bad_timeout_on_the_settings_page_saves_nothing(settings_server, bad):
+def test_a_bad_timeout_from_the_settings_command_saves_nothing(settings_server, bad):
     port, config_path = settings_server
     assert save_model(port, '', timeout=bad)[0] == 400
     assert local_settings.load(config_path)['roles']['proposer'] is None

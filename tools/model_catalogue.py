@@ -10,6 +10,7 @@ and relative cost, and an unmatched model is simply unknown. No network lookup.
 """
 import fnmatch
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,9 @@ JOB_ORDER = ('proposer', 'reviewer', 'guard', 'summarizer')
 TIERS = ('large', 'small', 'local')
 COSTS = ('higher', 'lower', 'free')
 _PATH = Path(__file__).with_name('model_catalogue.json')
+#: A tile's colour reaches a style attribute, and its key page a link: both are held to these.
+_COLOUR = re.compile(r'#[0-9a-f]{6}')
+_KEY_PAGE = re.compile(r'https://[a-z0-9.-]+(/[A-Za-z0-9._~/-]*)?')
 
 
 @dataclass(frozen=True)
@@ -72,6 +76,8 @@ def load_presets(path=_PATH):
                           colour=_text(item, 'colour'), format=_text(item, 'format', False),
                           base_url=_text(item, 'base_url', False), needs_key=item['needs_key'],
                           key_page=_text(item, 'key_page', False)))
+        if not _COLOUR.fullmatch(out[-1].colour) or not (out[-1].key_page == '' or _KEY_PAGE.fullmatch(out[-1].key_page)):
+            raise ValueError('Model catalogue: a colour is #rrggbb and a key page an https:// address')
     return tuple(out)
 
 

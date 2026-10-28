@@ -1219,8 +1219,7 @@ def test_the_audit_trail_shows_where_each_event_came_from(start, signed_in):
 
 def test_the_settings_page_describes_sign_in_as_it_is():
     from ui.settings_view import render_settings
-    body = render_settings(dict(local_settings.DEFAULTS), 'application', 'form-token',
-                           keys={}, overrides=False, scanner=None)
+    body = render_settings(dict(local_settings.DEFAULTS), 'application', 'form-token', scanner=None)
     assert 'No sign-in is provided yet' not in body and 'Do not expose this preview' not in body
     assert 'asks for sign-in' in body and 'authenticator' in body
 
