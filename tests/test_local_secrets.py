@@ -20,6 +20,15 @@ def test_put_get_hint_delete(tmp_path):
     assert s.get('conn-1') is None and s.hint('conn-1') is None
 
 
+def test_a_short_key_stores_no_hint(tmp_path):
+    s = SecretsFile(tmp_path / 'ws.secrets.json')
+    s.put('conn-1', 'sk-short-12')  # 11 characters: four would be a third of it
+    s.put('conn-2', 'sk-test-1234')  # 12 characters
+    assert s.get('conn-1') == 'sk-short-12' and s.hint('conn-1') == ''
+    assert s.hint('conn-2') == '1234'
+    assert Overlay(None, {'d': 'sk-short-12'}).hint('d') == ''
+
+
 def test_file_is_created_0600(tmp_path):
     path = tmp_path / 'ws.secrets.json'
     SecretsFile(path).put('conn-1', KEY)

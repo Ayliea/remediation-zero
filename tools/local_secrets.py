@@ -26,6 +26,14 @@ def secrets_path(database):
     return Path(database).resolve().with_suffix('.secrets.json')
 
 
+MIN_HINTED_KEY = 12
+
+
+def key_hint(key):
+    """The last four characters, or '' for a key short enough that four would give most of it away."""
+    return key[-4:] if len(key) >= MIN_HINTED_KEY else ''
+
+
 class SecretsFileUnsafe(Exception):
     def __init__(self, path):
         super().__init__(f'{path} must be readable only by its owner. Run: chmod 600 {path}')
@@ -98,7 +106,7 @@ class SecretsFile:
     def put(self, connection_id, key):
         key = check_key(key)
         keys = self._editable()
-        keys[connection_id] = {'key': key, 'hint': key[-4:]}
+        keys[connection_id] = {'key': key, 'hint': key_hint(key)}
         self._write(keys)
 
     def get(self, connection_id):
@@ -132,7 +140,7 @@ class Overlay:
 
     def hint(self, connection_id):
         if connection_id in self._pending:
-            return self._pending[connection_id][-4:]
+            return key_hint(self._pending[connection_id])
         return self._base.hint(connection_id) if self._base else None
 
     def put(self, connection_id, key):
