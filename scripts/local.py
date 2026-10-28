@@ -2051,8 +2051,25 @@ def _cycle(value):
     return number
 
 
+class _Parser(argparse.ArgumentParser):
+    """argparse echoes unrecognised arguments and rejected values in its errors; for the
+    `connection` commands one of those could be a key typed by mistake, so they get a fixed
+    sentence instead. Other commands are unchanged."""
+
+    def parse_args(self, args=None, namespace=None):
+        self._argv = list(sys.argv[1:] if args is None else args)
+        return super().parse_args(args, namespace)
+
+    def error(self, message):
+        in_connection = ' connection' in self.prog or 'connection' in getattr(self, '_argv', ())
+        if in_connection and not message.startswith(('the following arguments are required',
+                                                     'expected one argument')):
+            self.exit(2, local_connection_cli.BAD_ARGUMENTS + '\n')
+        super().error(message)
+
+
 def _parser():
-    parser = argparse.ArgumentParser(description='Remediation Zero local edition (no cloud setup required)')
+    parser = _Parser(description='Remediation Zero local edition (no cloud setup required)')
     parser.add_argument('--database', default=DEFAULT_DATABASE, metavar='DIR',
                         help='Workspace directory (default: %(default)s)')
     commands = parser.add_subparsers(dest='command', required=True)

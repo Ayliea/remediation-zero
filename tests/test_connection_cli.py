@@ -115,11 +115,17 @@ def test_add_tests_then_saves_the_connection_its_key_and_an_audit_event(db, peop
     assert json.loads(event['detail']) == {'connection': 'OpenAI', 'jobs': ['reviewer', 'summarizer']}
 
 
-def test_no_key_flag_exists(db, people, capsys, tester, typed):
-    for flag in (['--key', KEY], [f'--key={KEY}'], ['--api-key', KEY]):
+def test_no_key_flag_exists_and_a_mistyped_key_is_never_echoed(db, people, capsys, tester, typed):
+    for flag in (['--key', KEY], [f'--key={KEY}'], ['--api-key', KEY], [KEY]):
         code, out, err = add(capsys, db, *flag)
-        assert code == 2 and 'unrecognized arguments' in err
-        assert KEY not in out and settings(db)['connections'] == {}
+        assert code == 2 and KEY not in out + err and 'Unrecognised or invalid option' in err
+        assert settings(db)['connections'] == {}
+    for argv in (('connection', 'add', KEY, '--jobs', 'review', '--model', 'm', '--as', OWNER),
+                 ('connection', 'add', 'openai', '--jobs', 'review', '--model', 'm', '--timeout', KEY,
+                  '--as', OWNER),
+                 ('connection', KEY)):
+        code, out, err = cli(capsys, db, *argv)
+        assert code == 2 and KEY not in out + err
     code, out, err = add(capsys, db, '--key-env', KEY)       # a key typed where a name belongs
     assert code == 1 and KEY not in out + err and typed.prompts == []
 
@@ -356,3 +362,27 @@ def test_ctrl_c_at_the_key_prompt_changes_nothing(db, people, capsys, tester, mo
 
 def test_the_key_file_and_the_servers_agree_on_where_it_lives(db):
     assert local_connections.secrets_beside(local_settings.settings_path(db)) == secrets_path(db)
+
+
+def test_remove_refuses_when_settings_changed_during_the_prompt(db, people, capsys, tester, typed, monkeypatch):
+    add(capsys, db)
+    (conn_id,) = settings(db)['connections']
+
+    def answer(prompt=''):
+        changed = settings(db)
+        changed['roles']['reviewer'] = None
+        local_settings.save(local_settings.settings_path(db), changed)
+        return 'OpenAI'
+
+    monkeypatch.setattr('builtins.input', answer)
+    code, out, err = cli(capsys, db, 'connection', 'remove', 'OpenAI', '--as', OWNER)
+    assert code == 1 and 'Settings changed while testing' in err
+    assert conn_id in settings(db)['connections'] and SecretsFile(secrets_path(db)).get(conn_id) == KEY
+    assert [e['event'] for e in events(db)] == ['connection_added']
+
+
+def test_the_storage_page_names_the_key_file_in_the_backup_steps():
+    from ui.settings_view import render_settings
+    body = render_settings(dict(local_settings.DEFAULTS), 'storage', 'form-token')
+    assert '.secrets.json' in body and 'API keys you stored here' in body
+    assert 'API keys come from the environment or from the owner-only key file' in body

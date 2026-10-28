@@ -42,6 +42,10 @@ CHANGED = 'Settings changed while testing. Nothing was saved.'
 CANCELLED = 'Cancelled. Nothing was changed.'
 NOT_DELETED = 'Nothing was deleted.'
 NO_CONNECTIONS = 'No connections.'
+#: Printed in place of argparse's own error, which would repeat what was typed (maybe a key).
+BAD_ARGUMENTS = ('Unrecognised or invalid option. There is no key option: use the hidden prompt or '
+                 '--key-env VARIABLE. See connection --help.')
+AUDIT_MISSING = 'The change was saved, but no record of it was made in the audit trail.'
 ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}')
 
 
@@ -187,7 +191,7 @@ def _audit(accounts, person, event, name, jobs, log, conn_id):
     except Exception as exc:
         log('connection_audit_failed', connection=conn_id, change=event, error=type(exc).__name__,
             level=logging.ERROR)
-        print('The change was saved, but the audit event could not be written.', file=sys.stderr)
+        print(AUDIT_MISSING, file=sys.stderr)
         return False
     return True
 
@@ -297,6 +301,8 @@ def _remove(args, config_path, secrets, acting, log, out):
     out(connections.deletion_consequences(settings, conn_id))
     if not args.yes and input(NAME_PROMPT).strip() != conn['name']:
         raise Stop(NOT_DELETED)
+    if _settings(config_path) != settings:       # the prompt can wait as long as a person likes
+        raise Stop(CHANGED)
     try:
         local_settings.save(config_path, connections.without_connection(settings, conn_id))
     except (OSError, ValueError) as exc:

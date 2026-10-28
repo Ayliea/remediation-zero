@@ -433,8 +433,10 @@ python3 -S -m scripts.local connection remove NAME --as OWNER_EMAIL
   It tests every chosen job and saves only if all pass.
 - A key is never a command-line argument: it would reach shell history and the
   process list. The command asks at a hidden prompt, or reads the variable
-  named by `--key-env VARIABLE`. An empty answer stores no key and the
-  environment variables above are used.
+  named by `--key-env VARIABLE` (`add` and `replace-key` both take it). An empty answer stores no key and the
+  environment variables above are used. An argument the command does not
+  know, including a mistyped `--key`, is refused with a fixed sentence that
+  does not repeat what was typed.
 - `remove` prints what deleting would stop, then asks for the connection's name
   to be typed; `--yes` skips the question.
 - The command runs in its own process and cannot take the dashboard's settings
