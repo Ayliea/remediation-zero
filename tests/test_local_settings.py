@@ -328,9 +328,9 @@ def test_settings_never_renders_key_values(app, monkeypatch):
     config.save(path, place(with_proposer(), 'guard', proposer(model='guard-m')))
     body = request()[1]
     assert 'secret-x' not in body
-    # Both connections take their key from the environment; only Screening's is there.
-    assert body.count('Key: set on the server') == 2
-    assert 'Triage</strong> test <span class="rz-muted">(key missing)</span>' in body
+    # Both connections take their key from the environment; only Screening's is there, so only
+    # Screening's says "set on the server" and Triage's says its key is missing.
+    assert body.count('Key: set on the server') == 1 and body.count('Key: key missing') == 1
     assert 'Screening</strong> guard-m</li>' in body
 
 
