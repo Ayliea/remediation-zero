@@ -108,9 +108,9 @@ class NotAWorkspace(Exception):
     """--database names something that is not, and cannot become, a workspace."""
 
 
-def _log(event, cycle_id='-', finding_id='-', **fields):
-    logger.info(json.dumps({'event': event, 'cycle_id': cycle_id, 'finding_id': finding_id, **fields},
-                           sort_keys=True))
+def _log(event, cycle_id='-', finding_id='-', *, level=logging.INFO, **fields):
+    logger.log(level, json.dumps({'event': event, 'cycle_id': cycle_id, 'finding_id': finding_id, **fields},
+                                 sort_keys=True))
 
 
 def refuse_non_directory(database):

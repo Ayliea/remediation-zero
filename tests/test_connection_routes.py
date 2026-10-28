@@ -652,13 +652,14 @@ def test_recommend_refuses_an_unknown_provider_or_connection(server):
 
 # --- the key sweep -----------------------------------------------------------------
 
-def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, caplog):
+def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, caplog, capfd):
     """The spec's first test that matters: across add, edit, replace, test, delete, a failing
     test and refused bodies, the key is in no response, log, audit row, settings file,
     `settings show` or snapshot; it is in the key file only between add and delete."""
     caplog.set_level(logging.DEBUG)
     server = make_server(connection_limiter=RateLimiter(per_minute=1000))
     listed_keys = []
+    printed = []
 
     def listed(format, base_url, key, ca_file=None):
         listed_keys.append(key)
@@ -677,7 +678,9 @@ def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, cap
         for record in caplog.records:
             texts.append(record.getMessage())
             texts.append(repr(record.__dict__))
-        return texts
+        out, err = capfd.readouterr()       # anything written to stdout or stderr, by anyone
+        printed.extend([out, err])
+        return texts + printed
 
     def assert_absent(where):
         for text in everywhere_but_the_key_file():
@@ -734,6 +737,57 @@ def test_the_key_never_leaves_the_key_file(make_server, tester, monkeypatch, cap
     assert step('/connections/replace-key', {'connection': conn, 'key': KEY})['ok'] is True
     assert server.secrets.get(conn) == KEY
     assert_absent('after edit, test and replace')
+    # The failure paths, each with the key in the body: a revision race, a key file that cannot
+    # be written (settings put back), an oversized body, a busy session, the key as a password.
+
+    def race(roles, jobs):
+        values = server.settings()
+        values['same_family_policy'] = 'proceed' if values['same_family_policy'] == 'wait' else 'wait'
+        local_settings.save(server.config_path, values)
+        return connections.TestResult(True, None, '', 0.1)
+    tester.result = race
+    step('/connections/save', {'draft': draft(name='Raced')}, 409)
+    step('/connections/replace-key', {'connection': conn, 'key': KEY}, 409)
+    tester.result = None
+    real_put = SecretsFile.put
+
+    def put_fails(self, connection_id, key):
+        raise OSError(f'cannot write {key}')
+    monkeypatch.setattr(SecretsFile, 'put', put_fails)
+    step('/connections/save', {'draft': draft(name='Unstored')}, 503)
+    step('/connections/replace-key', {'connection': conn, 'key': KEY}, 503)
+    monkeypatch.setattr(SecretsFile, 'put', real_put)
+    step('/connections/save', {'draft': draft(name='Large ' + KEY * 700)}, 413)
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(roles, jobs):
+        entered.set()
+        assert release.wait(10)
+        return connections.TestResult(True, None, '', 0.1)
+    tester.result = slow
+    worker = threading.Thread(target=lambda: server.post('/connections/test', {'connection': conn}))
+    worker.start()
+    assert entered.wait(10)
+    try:
+        step('/connections/save', {'draft': draft(name='Busy')}, 409)
+    finally:
+        release.set()
+        worker.join(10)
+    tester.result = None
+    step('/connections/confirm', {'password': KEY}, 400)
+    assert server.secrets.get(conn) == KEY
+    assert_absent('after the failure paths')
+    # A key delete that fails (its exception text carries the key): 503, connection gone.
+    second = step('/connections/save', {'draft': draft(name='Second', jobs={'guard': job()})})['connection']
+    real_delete = SecretsFile.delete
+
+    def delete_fails(self, connection_id):
+        raise OSError(f'cannot delete {KEY}')
+    monkeypatch.setattr(SecretsFile, 'delete', delete_fails)
+    assert step('/connections/delete', {'connection': second}, 503)['error'] == local_connections.KEY_NOT_DELETED
+    monkeypatch.setattr(SecretsFile, 'delete', real_delete)
+    assert_absent('after a failed key delete')
+    server.secrets.delete(second)          # the owner's clean-up, by hand
     assert step('/connections/delete', {'connection': conn}) == {'ok': True}
     assert server.secrets.get(conn) is None
     assert KEY.encode() not in server.secrets.path.read_bytes()
@@ -756,3 +810,201 @@ def test_the_suggestion_fills_the_gaps_with_the_right_tier():
     assert local_connections.suggest(covered, 'openai', models) == 'gpt-x-mini'   # only small jobs are left
     assert local_connections.suggest(empty, 'openai', ['unknown-model']) is None
     assert local_connections.suggest(empty, 'ollama', ['llama3']) is None
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+def _demote(server):
+    owner = server.site.accounts.session(server.site.owner_token).account_id
+    with server.site.accounts.store.transaction() as cur:
+        cur.execute("UPDATE accounts SET role = 'tech' WHERE id = ?", (owner,))
+
+
+def _remove(server):
+    owner = server.site.accounts.session(server.site.owner_token).account_id
+    with server.site.accounts.store.transaction() as cur:
+        cur.execute("UPDATE accounts SET status = 'removed' WHERE id = ?", (owner,))
+
+
+def _sign_out(server):
+    server.site.accounts.sign_out(server.site.owner_token)
+
+
+@pytest.mark.parametrize('change', [_demote, _remove, _sign_out])
+def test_an_owner_who_stops_being_one_during_the_test_saves_nothing(server, tester, change):
+    csrf = server.csrf()
+
+    def meanwhile(roles, jobs):
+        change(server)
+        return connections.TestResult(True, None, '', 0.1)
+    tester.result = meanwhile
+    response, data, _ = server.post('/connections/save', {'draft': draft()}, token=csrf)
+    assert response.status == 403
+    assert tester.calls                      # the test did run; the save was refused after it
+    assert not server.config_path.exists() and not server.secrets.path.exists()
+    assert events(server, 'connection_added') == []
+
+
+def test_a_demotion_during_an_edit_test_saves_nothing(server, tester):
+    conn = added(server)
+    before = server.file_bytes()
+    tester.result = lambda roles, jobs: (_demote(server), connections.TestResult(True, None, '', 0.1))[1]
+    response, _, _ = server.post('/connections/edit', {'connection': conn, 'jobs': {'reviewer': job('gpt-y')}})
+    assert response.status == 403 and server.file_bytes() == before
+    assert events(server, 'connection_edited') == []
+
+
+def test_an_audit_that_cannot_be_written_is_an_error_and_the_reply_says_so(server, tester, monkeypatch, caplog):
+    import sqlite3
+
+    def refuse(*args, **kwargs):
+        raise sqlite3.OperationalError('disk I/O error')
+    monkeypatch.setattr(server.site.accounts, 'record_change', refuse)
+    with caplog.at_level(logging.INFO):
+        response, data, text = server.post('/connections/save', {'draft': draft()})
+    assert response.status == 200 and data['ok'] is True and data['audit'] is False
+    assert server.secrets.get(data['connection']) == KEY        # the change itself is saved
+    failed = [r for r in caplog.records if 'connection_audit_failed' in r.getMessage()]
+    assert failed and failed[0].levelno == logging.ERROR
+    assert json.loads(failed[0].getMessage())['error'] == 'OperationalError' and 'disk' not in text
+    response, data, _ = server.post('/connections/delete', {'connection': data['connection']})
+    assert response.status == 200 and data == {'ok': True, 'audit': False}
+
+
+def test_a_successful_change_does_not_say_audit(server, tester):
+    response, data, _ = server.post('/connections/save', {'draft': draft()})
+    assert 'audit' not in data
+
+
+ENV_KEY = 'sk-test-envtriage-0099'
+
+
+def _env_connection(server, monkeypatch):
+    monkeypatch.setenv('RZ_MODEL_API_KEY', ENV_KEY)
+    return added(server, key=None, jobs={'proposer': job()})
+
+
+def test_a_triage_environment_key_lists_models_at_its_own_address(server, tester, monkeypatch):
+    conn = _env_connection(server, monkeypatch)
+    seen = []
+    monkeypatch.setattr(model_endpoints, 'list_models',
+                        lambda format, base_url, key, ca_file=None: seen.append((base_url, key)) or ['gpt-x'])
+    response, data, _ = server.post('/connections/models', {'connection': conn})
+    assert response.status == 200 and data['models'] == ['gpt-x'] and seen == [(BASE, ENV_KEY)]
+
+
+def test_a_triage_environment_key_is_never_sent_to_the_connection_when_an_endpoint_override_is_set(
+        server, tester, monkeypatch):
+    conn = _env_connection(server, monkeypatch)
+    monkeypatch.setenv('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions')
+    monkeypatch.setattr(model_endpoints, 'list_models', lambda *a, **k: pytest.fail('the override key was sent'))
+    response, data, text = server.post('/connections/models', {'connection': conn})
+    assert response.status == 200 and data == {'error': local_connections.NO_ENV_LIST}
+    assert ENV_KEY not in text
+
+
+def test_with_an_override_a_stored_key_still_lists_its_own_models(server, tester, monkeypatch):
+    conn = added(server, jobs={'proposer': job()})
+    monkeypatch.setenv('RZ_MODEL_API_KEY', ENV_KEY)
+    monkeypatch.setenv('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions')
+    seen = []
+    monkeypatch.setattr(model_endpoints, 'list_models',
+                        lambda format, base_url, key, ca_file=None: seen.append(key) or ['gpt-x'])
+    assert server.post('/connections/models', {'connection': conn})[1]['models'] == ['gpt-x']
+    assert seen == [KEY]
+
+
+def test_another_jobs_environment_key_is_still_used_with_an_override(server, tester, monkeypatch):
+    monkeypatch.setenv('RZ_MODEL_API_KEY', ENV_KEY)
+    monkeypatch.setenv('RZ_REVIEWER_API_KEY', OTHER_KEY)
+    conn = added(server, key=None, jobs={'proposer': job(), 'reviewer': job()})
+    monkeypatch.setenv('RZ_MODEL_ENDPOINT', 'https://override.example.invalid/v1/chat/completions')
+    seen = []
+    monkeypatch.setattr(model_endpoints, 'list_models',
+                        lambda format, base_url, key, ca_file=None: seen.append(key) or ['gpt-x'])
+    assert server.post('/connections/models', {'connection': conn})[1]['models'] == ['gpt-x']
+    assert seen == [OTHER_KEY]
+
+
+@pytest.mark.parametrize('name', ['bad\\ud800name', 'bell\\u0007name', 'line\\nname', 'c1\\u0085name'])
+def test_a_name_with_a_surrogate_or_control_character_is_refused(server, tester, name):
+    body = json.dumps({'draft': draft()}).replace('"name": "OpenAI"', '"name": "%s"' % name)
+    body = body[:-1] + ', "token": "%s"}' % server.csrf()
+    response, data, _ = server.post('/connections/save', raw=body.encode())
+    assert response.status == 400 and set(data) == {'error'}
+    assert tester.calls == [] and not server.config_path.exists()
+
+
+def test_a_model_with_a_control_character_is_refused(server, tester):
+    response, _, _ = server.post('/connections/save', {'draft': draft(jobs={'reviewer': job('gpt\u0007x')})})
+    assert response.status == 400
+    response, _, _ = server.post('/connections/recommend', {'provider': 'openai', 'model': 'gpt\u0007x'})
+    assert response.status == 400
+
+
+def test_a_token_with_a_lone_surrogate_is_a_403(server, tester):
+    raw = b'{"token": "\\ud800", "connection": "conn-000000000000"}'
+    response, _, _ = server.post('/connections/test', raw=raw)
+    assert response.status == 403
+
+
+@pytest.mark.parametrize('field', ['password', 'code'])
+def test_confirm_refuses_a_value_that_is_not_text(server, field):
+    for value in (1, True, ['x'], {'a': 1}):
+        response, _, _ = server.post('/connections/confirm', {field: value}, who='unconfirmed')
+        assert response.status == 400
+    assert not server.site.accounts.session(server.site.unconfirmed_token).confirmed
+
+
+@pytest.mark.parametrize('field', ['base_url', 'ca_file', 'key'])
+def test_replace_key_refuses_a_value_that_is_not_text(server, tester, field):
+    conn = added(server)
+    tester.calls.clear()
+    body = {'connection': conn, 'key': OTHER_KEY, field: 5}
+    assert server.post('/connections/replace-key', body)[0].status == 400
+    assert tester.calls == [] and server.secrets.get(conn) == KEY
+
+
+@pytest.mark.parametrize('raw', [b'\xff\xfe{}', b'{"token": NaN}', b'[' * 5000, b'"\xed\xa0\x80"'],
+                         ids=['not-utf8', 'nan', 'deep-array', 'encoded-surrogate'])
+def test_bodies_that_cannot_be_read_are_a_400(server, tester, raw):
+    response, data, _ = server.post('/connections/test', raw=raw)
+    assert response.status == 400 and data == {'error': local_connections.INVALID}
+
+
+def test_a_deep_object_within_the_size_cap_is_read_and_refused_for_its_token(server, tester):
+    # As deep as 8 KB allows still parses (no RecursionError); it carries no token, so 403, not 503.
+    response, _, _ = server.post('/connections/test', raw=b'{"a": ' * 1100 + b'1' + b'}' * 1100)
+    assert response.status == 403
+
+
+def test_a_key_file_that_cannot_be_put_back_says_so(server, tester, monkeypatch, caplog):
+    import tempfile
+    added(server, name='Existing', jobs={'proposer': job()})
+
+    def put_fails(self, connection_id, key):
+        def no_temp(*args, **kwargs):
+            raise OSError('no space')
+        monkeypatch.setattr(tempfile, 'mkstemp', no_temp)
+        raise OSError('no space')
+    monkeypatch.setattr(SecretsFile, 'put', put_fails)
+    with caplog.at_level(logging.INFO):
+        response, data, _ = server.post('/connections/save', {'draft': draft(key=OTHER_KEY)})
+    assert response.status == 503 and data == {'error': local_connections.KEY_NOT_STORED_NOT_RESTORED}
+    failed = [r for r in caplog.records if 'connection_restore_failed' in r.getMessage()]
+    assert failed and failed[0].levelno == logging.ERROR and json.loads(failed[0].getMessage())['error'] == 'OSError'
+
+
+def test_a_key_delete_failure_is_logged_by_class_for_any_key_source(server, tester, monkeypatch, caplog):
+    monkeypatch.setenv('RZ_GUARD_API_KEY', ENV_KEY)
+    conn = added(server, key=None, jobs={'guard': job()})          # key_source environment
+
+    def delete_fails(self, connection_id):
+        raise ValueError('not a valid key file')
+    monkeypatch.setattr(SecretsFile, 'delete', delete_fails)
+    with caplog.at_level(logging.INFO):
+        response, data, _ = server.post('/connections/delete', {'connection': conn})
+    assert response.status == 200 and data == {'ok': True}       # it held no key
+    failed = [json.loads(r.getMessage()) for r in caplog.records if 'connection_key_delete_failed' in r.getMessage()]
+    assert failed == [{'event': 'connection_key_delete_failed', 'connection': conn, 'error': 'ValueError',
+                       'cycle_id': '-', 'finding_id': '-'}]

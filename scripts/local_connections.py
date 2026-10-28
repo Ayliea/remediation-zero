@@ -12,7 +12,14 @@ carrying the session's form token; a change needs a recent re-confirm (else 401
 A model list or test can take minutes, so it runs with `serial` released: the settings are read
 under `serial` and kept, the call is made, then `serial` is taken again and the settings read
 again; if they differ, 409 and nothing is saved. A key is stored only after its settings are
-saved, and the settings file is put back if the key cannot be stored.
+saved, and the settings file is put back if the key cannot be stored. Just before the save the
+session is resolved again: a session that ended, or an account demoted or removed while the
+test ran, gets 403 and nothing is saved. `confirmed` is not checked again there: the owner
+confirmed when the request arrived, and the test that follows is bounded by the server.
+
+The busy reply (another /connections/* request of this session is still in flight) is a 409
+with `Retry-After` and an empty body that is not JSON; scripts/local.py sends it before the
+body is read.
 
 No reply carries a key, or anything else the client sent: failures are fixed sentences, and
 a failed test names the job and the error class only. Log lines carry the connection id, the
@@ -20,6 +27,7 @@ job and the error class. Standard library only.
 """
 import copy
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -74,6 +82,11 @@ UNREADABLE = 'Settings could not be read. Nothing was changed.'
 NOT_SAVED = 'Settings could not be saved. Nothing was changed. Check local file permissions.'
 KEY_NOT_STORED = ('The key could not be stored, so nothing was saved. Check the key file beside the '
                   'settings file.')
+KEY_NOT_STORED_NOT_RESTORED = ('The key could not be stored, and the earlier settings could not be put back, '
+                               'so this connection may be saved without its key. Check the key file and the '
+                               'settings file beside the database, then replace the key or delete the connection.')
+NO_ENV_LIST = ("This connection's Triage key is set on the server for another address, so its model list "
+               "cannot be fetched here. Type a model name.")
 KEY_NOT_DELETED = ('The connection was removed, but its key could not be deleted from the key file. '
                    'Check the key file beside the settings file.')
 LIST_FAILED = 'The model list could not be fetched: {}'
@@ -118,10 +131,26 @@ def _fields(body, required, optional=()):
         raise _refused(INVALID)
 
 
-def _text(value, *, limit=_TEXT_LIMIT):
-    if not isinstance(value, str) or len(value) > limit:
+def _encodable(value):
+    try:
+        value.encode('utf-8')
+    except UnicodeEncodeError:  # a lone surrogate
+        return False
+    return True
+
+
+def _text(value, *, limit=_TEXT_LIMIT, plain=True):
+    """A string field. `plain` (every field that may reach a page) also refuses control
+    characters; a key, password or code is checked by its own rules instead."""
+    if not isinstance(value, str) or len(value) > limit or not _encodable(value):
+        raise _refused(INVALID)
+    if plain and any(ord(c) < 32 or 127 <= ord(c) < 160 for c in value):
         raise _refused(INVALID)
     return value
+
+
+def _optional_text(value, **kwargs):
+    return None if value is None else _text(value, **kwargs)
 
 
 def _sent(value):
@@ -201,7 +230,8 @@ class ConnectionRoutes:
             raise _refused(NOT_ALLOWED, 403)
         body = self._body(h)
         token = body.pop('token', None)
-        if not isinstance(token, str) or not secrets.compare_digest(token.encode(), session.csrf.encode()):
+        if (not isinstance(token, str) or not _encodable(token)
+                or not secrets.compare_digest(token.encode(), session.csrf.encode())):
             raise _refused(NOT_ALLOWED, 403)
         if path in RECONFIRM and not session.confirmed:
             # Nothing is done: the popup asks in place, then sends the same body again.
@@ -270,10 +300,19 @@ class ConnectionRoutes:
                 'error': FAILED.format(JOB_NAMES.get(result.failed_job, 'A job'), result.error),
                 'hint': PROBLEM_HINTS.get(result.error), 'seconds': result.seconds}
 
-    def _commit(self, before, after, conn_id, *, key=None):
-        """Save `after` if the settings are still `before`, then store `key`; a key that cannot
-        be stored puts the earlier settings file back. Takes `serial`."""
+    def _still_allowed(self, req):
+        """Under `serial`, just before a save: the session again, as it is now. `confirmed` is
+        not checked again on purpose: it was checked when the request arrived, and the test in
+        between is bounded by the server."""
+        live = self.accounts.session(req.token)
+        if live is None or not access.allowed(live.role, ACTION):
+            raise _refused(NOT_ALLOWED, 403)
+
+    def _commit(self, req, before, after, conn_id, *, key=None):
+        """Save `after` if the session may still and the settings are still `before`, then store
+        `key`; a key that cannot be stored puts the earlier settings file back. Takes `serial`."""
         with self.serial:
+            self._still_allowed(req)
             if self._read() != before:
                 raise _refused(CHANGED, 409)
             earlier = self.config_path.read_bytes() if self.config_path.exists() else None
@@ -288,14 +327,16 @@ class ConnectionRoutes:
                 self.secrets.put(conn_id, key)    # put is read-modify-write: only under `serial`
             except (SecretsFileUnsafe, OSError, ValueError) as exc:
                 self.log('connection_key_store_failed', connection=conn_id, error=type(exc).__name__)
-                self._restore(earlier, conn_id)
+                if not self._restore(earlier, conn_id):
+                    raise _refused(KEY_NOT_STORED_NOT_RESTORED, 503) from None
                 raise _refused(KEY_NOT_STORED, 503) from None
 
     def _restore(self, earlier, conn_id):
+        """Put the settings file back as it was; False (logged at error) if that failed too."""
         try:
             if earlier is None:
                 self.config_path.unlink(missing_ok=True)
-                return
+                return True
             fd, name = tempfile.mkstemp(prefix='.rz-settings-', dir=self.config_path.parent)
             try:
                 with os.fdopen(fd, 'wb') as stream:
@@ -307,15 +348,26 @@ class ConnectionRoutes:
                 if os.path.exists(name):
                     os.unlink(name)
         except OSError as exc:
-            self.log('connection_restore_failed', connection=conn_id, error=type(exc).__name__)
+            self.log('connection_restore_failed', connection=conn_id, error=type(exc).__name__, level=logging.ERROR)
+            return False
+        return True
 
     def _audit(self, req, session, event, conn_id, name, jobs):
+        """Write the audit row; False when it could not be (the change is saved by then, so this
+        is logged at error and the reply says `"audit": false`, rather than a failure)."""
         self.log('connection_changed', connection=conn_id, change=event, roles=list(jobs))
         try:
             self.accounts.record_change(session.account_id, event, detail={'connection': name, 'jobs': list(jobs)},
                                         via='dashboard', source=req.client)
-        except Exception as exc:  # the change is saved; say so in the log rather than answer a failure
-            self.log('connection_audit_failed', connection=conn_id, change=event, error=type(exc).__name__)
+        except Exception as exc:
+            self.log('connection_audit_failed', connection=conn_id, change=event, error=type(exc).__name__,
+                     level=logging.ERROR)
+            return False
+        return True
+
+    @staticmethod
+    def _done(payload, audited):
+        return payload if audited else dict(payload, audit=False)
 
     def _roles(self, settings, overlay):
         try:
@@ -342,8 +394,9 @@ class ConnectionRoutes:
             if family is None:
                 family = family_for(provider, model.strip())
             timeout = choice.get('timeout_seconds', 60)
-            if not isinstance(family, str) or type(timeout) is not int:
+            if type(timeout) is not int:
                 raise _refused(INVALID)
+            family = _text(family, limit=64)
             out[role] = JobChoice(model, family, timeout)
         return out
 
@@ -351,9 +404,8 @@ class ConnectionRoutes:
 
     def _confirm(self, req, session, body):
         _fields(body, (), ('password', 'code'))
-        password, code = body.get('password') or None, body.get('code') or None
-        if not all(v is None or isinstance(v, str) for v in (password, code)):
-            raise _refused(INVALID)
+        password = _optional_text(body.get('password'), limit=local_auth.PASSWORD_LIMIT + 1, plain=False) or None
+        code = _optional_text(body.get('code'), limit=64, plain=False) or None
         wait = self.sign_in_limiter.hit(req.client)
         if wait is not None:
             raise _Reply(429, {'error': TOO_MANY}, (('Retry-After', str(wait)),))
@@ -383,6 +435,8 @@ class ConnectionRoutes:
             provider, format, base_url, ca_file = conn['provider'], conn['format'], conn['base_url'], conn['ca_file']
             try:
                 key = self._saved_key(settings, conn_id, conn)
+            except _Reply:
+                raise
             except Exception as exc:  # an unreadable key file: class only
                 self.log('connection_models_failed', connection=conn_id, error=type(exc).__name__)
                 return {'error': LIST_FAILED.format(type(exc).__name__), 'hint': PROBLEM_HINTS.get(type(exc).__name__)}
@@ -398,12 +452,22 @@ class ConnectionRoutes:
 
     def _saved_key(self, settings, conn_id, conn):
         """The key a saved connection's model list is fetched with: a job's environment key
-        first, as its calls use, else the stored one."""
+        first, as its calls use, else the stored one. An environment key goes only where a cycle
+        sends it: with RZ_MODEL_ENDPOINT set, Triage's key belongs to that address, not to this
+        connection, so it is never used here. _Reply when no key may be used."""
+        skipped = False
         for role in _jobs_of(settings, conn_id):
+            if role == 'proposer' and self.environ.get('RZ_MODEL_ENDPOINT'):
+                skipped = skipped or key_present(role, self.environ)
+                continue
             if key_present(role, self.environ):
                 names = ['RZ_%s_API_KEY' % role.upper()] + (['RZ_MODEL_API_KEY'] if role == 'proposer' else [])
                 return next(self.environ[n] for n in names if self.environ.get(n))
-        return self.secrets.get(conn_id) if conn['key_source'] == 'stored' else None
+        if conn['key_source'] == 'stored':
+            return self.secrets.get(conn_id)
+        if skipped:
+            raise _Reply(200, {'error': NO_ENV_LIST})
+        return None
 
     def _typed_address(self, body):
         provider = _text(body['provider'], limit=64)
@@ -416,7 +480,7 @@ class ConnectionRoutes:
             raise _refused(UNKNOWN_FORMAT)
         base_url = _text(body['base_url'], limit=2048) or chosen.base_url
         ca_file = _text(body['ca_file'])
-        key = _text(body['key'])
+        key = _text(body['key'], plain=False)
         try:
             validate_endpoint(base_url)
             if ca_file:
@@ -464,9 +528,7 @@ class ConnectionRoutes:
             chosen = preset(provider)
         except KeyError:
             raise _refused(UNKNOWN_PROVIDER) from None
-        key = raw['key']
-        if key is not None:
-            key = _text(key) or None
+        key = _optional_text(raw['key'], plain=False) or None
         draft = Draft(provider, _text(raw['name'], limit=256), _text(raw['format'], limit=64) or chosen.format,
                       _text(raw['base_url'], limit=2048) or chosen.base_url, _text(raw['ca_file']), key,
                       self._choices(raw['jobs'], provider))
@@ -485,10 +547,10 @@ class ConnectionRoutes:
         if not result.ok:
             return self._failure(result)
         after = connections.record_test(pending, conn_id, result, jobs, self.accounts.clock.now())
-        self._commit(before, after, conn_id, key=draft.key)
-        self._audit(req, session, 'connection_added', conn_id, draft.name, jobs)
-        return {'ok': True, 'connection': conn_id, 'provider': chosen.name, 'name': draft.name,
-                'seconds': result.seconds, 'jobs': [JOB_NAMES[role] for role in jobs]}
+        self._commit(req, before, after, conn_id, key=draft.key)
+        audited = self._audit(req, session, 'connection_added', conn_id, draft.name, jobs)
+        return self._done({'ok': True, 'connection': conn_id, 'provider': chosen.name, 'name': draft.name,
+                           'seconds': result.seconds, 'jobs': [JOB_NAMES[role] for role in jobs]}, audited)
 
     def _edit(self, req, session, body):
         _fields(body, {'connection', 'jobs'})
@@ -524,16 +586,18 @@ class ConnectionRoutes:
             # Nothing was re-tested, so the last test still says what it said.
             after = copy.deepcopy(pending)
             after['connections'][conn_id]['last_test'] = conn['last_test']
-        self._commit(before, after, conn_id)
+        self._commit(req, before, after, conn_id)
         jobs = [role for role in JOB_ORDER if role in draft.jobs]
-        self._audit(req, session, 'connection_edited', conn_id, draft.name, jobs)
-        return {'ok': True, 'connection': conn_id, 'provider': preset(draft.provider).name, 'name': draft.name,
-                'seconds': seconds, 'jobs': [JOB_NAMES[role] for role in jobs]}
+        audited = self._audit(req, session, 'connection_edited', conn_id, draft.name, jobs)
+        return self._done({'ok': True, 'connection': conn_id, 'provider': preset(draft.provider).name,
+                           'name': draft.name, 'seconds': seconds, 'jobs': [JOB_NAMES[role] for role in jobs]},
+                          audited)
 
     def _replace_key(self, req, session, body):
         _fields(body, {'connection', 'key'}, {'base_url', 'ca_file'})
-        key = _text(body['key'])
-        base_url, ca_file = body.get('base_url'), body.get('ca_file')
+        key = _text(body['key'], plain=False)
+        base_url = _optional_text(body.get('base_url'), limit=2048)
+        ca_file = _optional_text(body.get('ca_file'))
         self._limit(session)
         with self.serial:
             settings = self._read()
@@ -550,8 +614,8 @@ class ConnectionRoutes:
             choices = {role: JobChoice(raw['model'], raw['family'], raw['timeout_seconds'])
                        for role, raw in current.items()}
             draft = Draft(conn['provider'], conn['name'], conn['format'],
-                          _text(base_url, limit=2048) if base_url else conn['base_url'],
-                          conn['ca_file'] if ca_file is None else _text(ca_file), key if key.strip() else None,
+                          base_url or conn['base_url'],
+                          conn['ca_file'] if ca_file is None else ca_file, key if key.strip() else None,
                           choices)
             draft = self._validate(settings, draft, body, replacing=conn_id)
             pending = connections.with_connection(settings, conn_id, draft)
@@ -565,12 +629,13 @@ class ConnectionRoutes:
             after = connections.record_test(pending, conn_id, result, jobs, self.accounts.clock.now())
         else:
             after = pending
-        self._commit(before, after, conn_id, key=draft.key)
+        self._commit(req, before, after, conn_id, key=draft.key)
         # A connection that needs no key only had its address changed.
         event = 'connection_key_replaced' if draft.key is not None else 'connection_edited'
-        self._audit(req, session, event, conn_id, draft.name, jobs)
-        return {'ok': True, 'connection': conn_id, 'provider': chosen.name, 'name': draft.name,
-                'seconds': result.seconds if result else 0.0, 'jobs': [JOB_NAMES[role] for role in jobs]}
+        audited = self._audit(req, session, event, conn_id, draft.name, jobs)
+        return self._done({'ok': True, 'connection': conn_id, 'provider': chosen.name, 'name': draft.name,
+                           'seconds': result.seconds if result else 0.0, 'jobs': [JOB_NAMES[role] for role in jobs]},
+                          audited)
 
     def _test_again(self, req, session, body):
         """Records the result in last_test and changes nothing else; needs no re-confirm."""
@@ -586,7 +651,7 @@ class ConnectionRoutes:
             roles = self._roles(settings, self.secrets)
         result = self._run(roles, jobs, conn_id)
         after = connections.record_test(settings, conn_id, result, jobs, self.accounts.clock.now())
-        self._commit(before, after, conn_id)
+        self._commit(req, before, after, conn_id)
         if not result.ok:
             return self._failure(result)
         return {'ok': True, 'connection': conn_id, 'seconds': result.seconds,
@@ -595,6 +660,7 @@ class ConnectionRoutes:
     def _delete(self, req, session, body):
         _fields(body, {'connection'})
         with self.serial:
+            self._still_allowed(req)
             settings = self._read()
             conn_id = self._connection(settings, body['connection'])
             conn = settings['connections'][conn_id]
@@ -608,13 +674,13 @@ class ConnectionRoutes:
             try:
                 self.secrets.delete(conn_id)       # after the settings save, and under `serial`
             except (SecretsFileUnsafe, OSError, ValueError) as exc:
-                if conn['key_source'] == 'stored':
-                    key_kept = True
-                    self.log('connection_key_delete_failed', connection=conn_id, error=type(exc).__name__)
-        self._audit(req, session, 'connection_removed', conn_id, conn['name'], jobs)
+                self.log('connection_key_delete_failed', connection=conn_id, error=type(exc).__name__,
+                         level=logging.ERROR if conn['key_source'] == 'stored' else logging.WARNING)
+                key_kept = conn['key_source'] == 'stored'
+        audited = self._audit(req, session, 'connection_removed', conn_id, conn['name'], jobs)
         if key_kept:
-            raise _refused(KEY_NOT_DELETED, 503)
-        return {'ok': True}
+            raise _Reply(503, self._done({'error': KEY_NOT_DELETED}, audited))
+        return self._done({'ok': True}, audited)
 
 
 def suggest(settings, provider, models):
