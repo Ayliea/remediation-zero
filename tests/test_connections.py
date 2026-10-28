@@ -368,6 +368,17 @@ def test_last_test_text():
     assert cx.rows(s, {}, None, now_real_ts=now)[0]['last_test_text'] == 'Failed: ModelTimedOut'
 
 
+@pytest.mark.parametrize('ago, text', [
+    (0, 'Tested just now'), (59, 'Tested just now'), (60, 'Tested 1 min ago'), (90 * 60, 'Tested 90 min ago'),
+    (90 * 60 + 1, 'Tested 1 hour ago'), (5 * 3600, 'Tested 5 hours ago'), (47 * 3600, 'Tested 47 hours ago'),
+    (48 * 3600, 'Tested 2 days ago'), (3 * 86400, 'Tested 3 days ago'), (-30, 'Tested just now')])
+def test_last_test_text_says_just_now_then_minutes_hours_and_days(ago, text):
+    s = settings()
+    s['connections'][AN]['last_test'] = {'ok': True, 'error': '', 'seconds': 1.0, 'jobs': [],
+                                         'real_ts': 1_000_000.0 - ago, 'sim_ts': 1.0}
+    assert cx.rows(s, {}, None, now_real_ts=1_000_000.0)[0]['last_test_text'] == text
+
+
 # ---- coverage ----------------------------------------------------------------------------
 
 def test_coverage_lists_every_job_in_order():

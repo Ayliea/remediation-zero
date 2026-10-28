@@ -245,12 +245,21 @@ def _last_test_text(test, now_real_ts):
         return 'Not tested'
     if not test['ok']:
         return f'Failed: {test["error"]}' if test['error'] else 'Failed'
-    return f'Tested {max(0, int((now_real_ts - test["real_ts"]) // 60))} min ago'
+    ago = max(0, int(now_real_ts - test['real_ts']))
+    if ago < 60:
+        return 'Tested just now'
+    if ago <= 90 * 60:
+        return f'Tested {ago // 60} min ago'
+    hours = ago // 3600
+    if hours < 48:
+        return f'Tested {hours} hour{"" if hours == 1 else "s"} ago'
+    return f'Tested {ago // 86400} days ago'
 
 
 def rows(settings, environ, secrets, *, now_real_ts):
     """One dict per connection for the list page. Names come back raw: the view escapes them.
-    `now_real_ts` (the caller's SimClock real_ts) only words "Tested n min ago" and is never stored."""
+    `now_real_ts` (the caller's SimClock real_ts) only words how long ago the last test was
+    ("Tested 5 min ago") and is never stored."""
     out = []
     for conn_id, conn in settings['connections'].items():
         look = preset(conn['provider'])

@@ -38,6 +38,8 @@ JOB_WORDS = {name.lower(): role for role, name in JOB_NAMES.items()}
 KEY_PROMPT = 'API key (not shown): '
 NAME_PROMPT = 'Type the name to delete: '
 CHANGED = 'Settings changed while testing. Nothing was saved.'
+#: remove tests nothing: what it waits on is the person typing the name.
+CHANGED_WHILE_ASKED = 'Settings changed while you were answering. Nothing was changed.'
 CANCELLED = 'Cancelled. Nothing was changed.'
 NOT_DELETED = 'Nothing was deleted.'
 NO_CONNECTIONS = 'No connections.'
@@ -305,7 +307,7 @@ def _remove(args, config_path, secrets, acting, log, out):
     if not args.yes and input(NAME_PROMPT).strip() != conn['name']:
         raise Stop(NOT_DELETED)
     if _settings(config_path) != settings:       # the prompt can wait as long as a person likes
-        raise Stop(CHANGED)
+        raise Stop(CHANGED_WHILE_ASKED)
     try:
         local_settings.save(config_path, connections.without_connection(settings, conn_id))
     except (OSError, ValueError) as exc:

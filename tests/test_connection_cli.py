@@ -376,7 +376,7 @@ def test_remove_refuses_when_settings_changed_during_the_prompt(db, people, caps
 
     monkeypatch.setattr('builtins.input', answer)
     code, out, err = cli(capsys, db, 'connection', 'remove', 'OpenAI', '--as', OWNER)
-    assert code == 1 and 'Settings changed while testing' in err
+    assert code == 1 and err.strip() == 'Settings changed while you were answering. Nothing was changed.'
     assert conn_id in settings(db)['connections'] and SecretsFile(secrets_path(db)).get(conn_id) == KEY
     assert [e['event'] for e in events(db)] == ['connection_added']
 
