@@ -281,6 +281,35 @@ def test_an_environment_connection_whose_variable_is_unset_says_key_missing_and_
     assert f'data-action="replace" data-connection="{OPENAI}"' in r.text
 
 
+@pytest.mark.parametrize('owner', [True, False])
+def test_each_row_shows_where_it_calls_and_each_job_its_family_and_timeout(owner):
+    settings = settings_with_connections()
+    settings['connections'][OPENAI]['ca_file'] = '/etc/rz/model-ca.pem'
+    text = section(rows=connections.rows(settings, {}, None, now_real_ts=0.0), owner=owner)
+    assert f'Address: {BASE} · CA file: /etc/rz/model-ca.pem' in text
+    assert 'Address: http://127.0.0.1:11434/v1</p>' in text          # no CA file, none shown
+    assert '<strong>Triage</strong> gpt-x <span class="rz-muted">(family gpt · timeout 60 s)</span>' in text
+    assert ('<strong>Screening</strong> llama3.1:8b <span class="rz-muted">(family llama · timeout 300 s)</span>'
+            in text)
+
+
+def test_the_address_and_ca_file_are_escaped():
+    settings = settings_with_connections()
+    settings['connections'][OPENAI]['base_url'] = 'https://x.example.invalid/<b>"v1'
+    settings['connections'][OPENAI]['ca_file'] = '/etc/<i>ca.pem'
+    settings['roles']['proposer']['family'] = '<u>'
+    text = section(rows=connections.rows(settings, {}, None, now_real_ts=0.0))
+    assert '<b>' not in text and '<i>' not in text and '<u>' not in text
+    assert 'https://x.example.invalid/&lt;b&gt;&quot;v1' in text and '/etc/&lt;i&gt;ca.pem' in text
+
+
+def test_replace_key_shows_the_address_it_keeps():
+    by_id = {c['id']: c for c in data_block(section())['connections']}
+    assert by_id[OPENAI]['base_url'] == BASE
+    prepare = SCRIPT[SCRIPT.index('function prepareKey()'):SCRIPT.index('function keyDone()')]
+    assert "'Leave blank to keep ' + (state.conn.base_url || 'the current address')" in prepare
+
+
 def test_coverage_shows_nobody_and_family_note():
     settings = settings_with_connections()
     text = section(coverage=connections.coverage(settings, {}))

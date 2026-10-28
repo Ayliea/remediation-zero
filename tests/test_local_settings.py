@@ -331,7 +331,7 @@ def test_settings_never_renders_key_values(app, monkeypatch):
     # Both connections take their key from the environment; only Screening's is there, so only
     # Screening's says "set on the server" and Triage's says its key is missing.
     assert body.count('Key: set on the server') == 1 and body.count('Key: key missing') == 1
-    assert 'Screening</strong> guard-m</li>' in body
+    assert 'Screening</strong> guard-m <span class="rz-muted">(family other · timeout 60 s)</span></li>' in body
 
 
 def test_endpoint_model_and_family_are_escaped(app):

@@ -95,12 +95,17 @@ def _json_block(value):
     return f'<script type="application/json" id="rz-connections">{text}</script>'
 
 
+def _job_line(job, key_hint):
+    """A job: its model, then its family and timeout, and its own key where that differs."""
+    notes = [f'family {job["family"]}', f'timeout {job["timeout_seconds"]} s']
+    if job['key'] in _JOB_KEY and job['key'] != key_hint:
+        notes.append(_JOB_KEY[job['key']])
+    return (f'<li><strong>{_e(job["job"])}</strong> {_e(job["model"])} '
+            f'<span class="rz-muted">({" · ".join(_e(note) for note in notes)})</span></li>')
+
+
 def _row(row, owner):
-    jobs = ''.join(
-        f'<li><strong>{_e(job["job"])}</strong> {_e(job["model"])}'
-        + (f' <span class="rz-muted">({_e(_JOB_KEY[job["key"]])})</span>'
-           if job['key'] in _JOB_KEY and job['key'] != row['key_hint'] else '')
-        + '</li>' for job in row['jobs'])
+    jobs = ''.join(_job_line(job, row['key_hint']) for job in row['jobs'])
     jobs = f'<ul class="rz-jobs">{jobs}</ul>' if jobs else '<p class="rz-muted">Does no jobs yet.</p>'
     actions = ''
     if owner:
@@ -117,6 +122,8 @@ def _row(row, owner):
             f'aria-label="{label} {name}">{label}</button>' for action, label in buttons) + '</div>'
     return (f'<article class="rz-row">{_mark(row["letter"], row["colour"])}<div class="rz-row-main">'
             f'<h3>{_e(row["name"])}</h3><p class="rz-muted">Key: {_e(row["key_hint"])} · {_e(row["last_test_text"])}</p>'
+            f'<p class="rz-muted">Address: {_e(row["base_url"])}'
+            + (f' · CA file: {_e(row["ca_file"])}' if row['ca_file'] else '') + '</p>'
             f'{jobs}</div>{actions}</article>')
 
 
@@ -249,7 +256,7 @@ def _data(rows, presets, token, confirmed, deletions):
         'presets': [{'id': p.id, 'name': p.name, 'letter': p.letter, 'colour': _colour(p.colour),
                      'format': p.format, 'base_url': p.base_url, 'needs_key': p.needs_key,
                      'key_page': _key_page(p.key_page)} for p in presets],
-        'connections': [{'id': r['id'], 'name': r['name'], 'provider': r['provider'],
+        'connections': [{'id': r['id'], 'name': r['name'], 'provider': r['provider'], 'base_url': r['base_url'],
                          'can_replace_key': r['can_replace_key'],
                          'jobs': [{'role': j['role'], 'job': j['job'], 'model': j['model'], 'family': j['family'],
                                    'timeout_seconds': j['timeout_seconds']} for j in r['jobs']]} for r in rows],

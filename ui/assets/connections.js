@@ -410,7 +410,8 @@
     showField('base', !(local || other));
     inCard('key', '[data-key-label]').textContent = other ? 'API key (if it needs one)' : 'API key';
     inCard('key', '[data-address-label]').textContent = replacing ? 'Address (leave blank to keep it)' : 'Address';
-    fields.base.placeholder = replacing ? 'Leave blank to keep the current address' : preset.base_url;
+    fields.base.placeholder = replacing ? 'Leave blank to keep ' + (state.conn.base_url || 'the current address')
+      : preset.base_url;
     if (local && !replacing && !fields.address.value) {
       fields.address.value = preset.base_url;
     }

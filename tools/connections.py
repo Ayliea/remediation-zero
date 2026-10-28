@@ -271,7 +271,8 @@ def rows(settings, environ, secrets, *, now_real_ts):
             ending = _stored_hint(secrets, conn_id)
             hint = 'key missing' if ending is None else (f'ends in …{ending}' if ending else 'key stored')
         out.append({'id': conn_id, 'name': conn['name'], 'provider': conn['provider'], 'letter': look.letter,
-                    'colour': look.colour, 'jobs': jobs, 'key_hint': hint,
+                    'colour': look.colour, 'base_url': conn['base_url'], 'ca_file': conn['ca_file'],
+                    'jobs': jobs, 'key_hint': hint,
                     'last_test_text': _last_test_text(conn['last_test'], now_real_ts),
                     'can_replace_key': conn['key_source'] != 'none' and not all_env})
     return out
