@@ -14,19 +14,27 @@ _MAX_ID_CHARS = 200
 
 
 def call_endpoint(format, base_url, model, style='base'):
-    """The URL a model call is sent to. 'exact' uses `base_url` as it is."""
+    """The URL a model call is sent to. 'exact' uses `base_url` as it is, character for character
+    once it passes the endpoint rules: the stored string feeds the inference fingerprint."""
     if style == 'exact':
-        return validate_endpoint(base_url)
+        validate_endpoint(base_url)
+        return base_url
     suffix = SUFFIXES[format].replace('{model}', quote(model, safe=''))
     return validate_endpoint(base_url.rstrip('/') + suffix)
 
 
 def split_endpoint(format, endpoint, model):
-    """(base_url, 'base') if `endpoint` ends with the format's suffix for this model,
-    else (endpoint, 'exact'): an address of another shape is kept as typed."""
+    """(base_url, 'base') if `endpoint` is exactly what call_endpoint builds from a base URL for
+    this model, else (endpoint, 'exact'): any other address (a trailing or doubled slash, another
+    path) is kept as typed, so the call string never changes."""
     suffix = SUFFIXES[format].replace('{model}', quote(model, safe=''))
     if endpoint.endswith(suffix) and len(endpoint) > len(suffix):
-        return endpoint[:-len(suffix)], 'base'
+        base = endpoint[:-len(suffix)]
+        try:
+            if call_endpoint(format, base, model, 'base') == endpoint:
+                return base, 'base'
+        except ValueError:
+            pass
     return endpoint, 'exact'
 
 

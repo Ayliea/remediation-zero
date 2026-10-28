@@ -159,3 +159,16 @@ def test_get_json_never_puts_the_key_in_an_exception_message(stub_open):
         with pytest.raises((ValueError, CapacityError)) as info:
             list_models('openai_chat', 'https://api.openai.com/v1', key)
         assert key not in str(info.value) and key not in repr(info.value)
+
+
+def test_an_exact_endpoint_is_kept_verbatim():
+    # A trailing slash stays: the stored call string feeds the inference fingerprint.
+    assert call_endpoint('openai_chat', 'https://h.example.invalid/v1/chat/completions/', 'm', 'exact') == \
+        'https://h.example.invalid/v1/chat/completions/'
+    with pytest.raises(ValueError):
+        call_endpoint('openai_chat', 'http://h.example.invalid/x', 'm', 'exact')
+
+
+def test_split_is_base_only_when_it_rebuilds_the_same_address():
+    for endpoint in ('https://a.example.invalid/v1//chat/completions', 'https://a.example.invalid/v1/chat/completions/'):
+        assert split_endpoint('openai_chat', endpoint, 'm') == (endpoint, 'exact')

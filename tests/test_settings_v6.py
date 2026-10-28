@@ -15,7 +15,7 @@ from tools.model_roles import ROLES, ModelRoles, key_source
 
 OLLAMA = 'http://127.0.0.1:11434/v1/chat/completions'
 ANTHROPIC = 'https://api.anthropic.com/v1/messages'
-CUSTOM = 'https://guard.example.invalid/screen/v2'
+CUSTOM = 'https://guard.example.invalid/screen/v2/'  # a trailing slash is kept as typed
 
 
 def v5_settings():
@@ -72,6 +72,30 @@ def test_v5_file_migrates_with_no_change_to_any_job(tmp_path):
     assert after.provenance() == before.provenance()
     guard = by_name(loaded)['Other (Screening)'][1]
     assert (guard['base_url'], guard['endpoint_style'], guard['ca_file']) == (CUSTOM, 'exact', '/etc/rz/guard-ca.pem')
+
+
+@pytest.mark.parametrize('format, endpoint, model', [
+    ('openai_chat', 'https://api.openai.com/v1/chat/completions', 'gpt-test'),
+    ('openai_chat', 'https://a.example.invalid/v1/chat/completions/', 'm'),             # trailing slash
+    ('openai_chat', 'https://a.example.invalid/v1//chat/completions', 'm'),             # double slash
+    ('anthropic_messages', 'https://a.example.invalid/v1/messages/', 'claude-test-1'),
+    ('gemini_api', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent', 'gemini-test'),
+    ('gemini_api', 'https://generativelanguage.googleapis.com/v1beta/models/other-model:generateContent', 'gemini-test'),
+    ('openai_chat', 'https://a.example.invalid/custom/path', 'm'),
+    ('openai_chat', 'http://localhost:8080/v1/chat/completions', 'm')])
+def test_every_endpoint_shape_migrates_to_the_same_string(tmp_path, format, endpoint, model):
+    value = v5_settings()
+    value['roles'] = dict.fromkeys(ROLES)
+    value['roles']['reviewer'] = {'format': format, 'endpoint': endpoint, 'model': model, 'family': 'other',
+                                  'ca_file': '', 'timeout_seconds': 60}
+    path = tmp_path / 'ws.settings.json'
+    path.write_text(json.dumps(value))
+    loaded = config.load(path)
+    assert ModelRoles.from_settings(loaded, {}).reviewer.endpoint == endpoint
+    assert ModelRoles.from_settings(value, {}).reviewer.endpoint == endpoint
+    assert config.role_settings(loaded, 'reviewer')['endpoint'] == endpoint
+    config.save(path, loaded)  # and it survives a save and a reload
+    assert ModelRoles.from_settings(config.load(path), {}).reviewer.endpoint == endpoint
 
 
 def test_migrated_names_and_key_sources(tmp_path):
