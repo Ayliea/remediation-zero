@@ -52,7 +52,7 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
-from scripts import local_accounts, local_auth
+from scripts import local_accounts, local_auth, local_connections
 from tools import access, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
@@ -1166,7 +1166,8 @@ def _read_upload_form(content_type, body):
 GET_ACTIONS = dict({view: 'view' for view in VIEWS}, settings='settings', accounts='manage_accounts')
 POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts',
                 '/accounts/revoke': 'manage_accounts', '/accounts/role': 'manage_accounts',
-                '/accounts/remove': 'manage_accounts', '/accounts/reset': 'manage_accounts'}
+                '/accounts/remove': 'manage_accounts', '/accounts/reset': 'manage_accounts',
+                **{path: local_connections.ACTION for path in local_connections.PATHS}}
 #: The fields each account form carries besides `token`: (required, optional). Anything else is a 400.
 ACCOUNT_FORMS = {'/accounts/invite': ({'email'}, {'role'}), '/accounts/revoke': ({'invite'}, set()),
                  '/accounts/role': ({'account', 'role'}, set()), '/accounts/remove': ({'account'}, set()),
@@ -1209,7 +1210,7 @@ class _BodyBudget:
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
             public_origin=None, *, accounts, settings_exposed=False, server_names=(), scheme='http',
-            limiter=None, workspace_root=None, hsts=False):
+            limiter=None, workspace_root=None, hsts=False, connection_limiter=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
     # accounts: tools.accounts.Accounts on the workspace's accounts file, opened by serve
@@ -1221,6 +1222,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # workspace_root: where serve keeps the self-signed certificate, for the Settings fingerprint.
     # hsts: send Strict-Transport-Security on every response (the TLS listener with your own
     # certificate only; see build_server for why not with the self-signed one).
+    # connection_limiter: for the /connections/* routes that call a provider (default 6 a minute).
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
     auth = local_auth.AuthRoutes(accounts, limiter)
@@ -1228,11 +1230,16 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # requests already authorised. At most one upload per session is in flight.
     form_budget = _BodyBudget(FORM_BUDGET_LIMIT)
     body_budget = _BodyBudget(INFLIGHT_BODY_LIMIT)
-    uploading, uploading_lock = set(), threading.Lock()
+    # At most one upload, and one /connections/* request, per session in flight (in memory only).
+    uploading, connecting, uploading_lock = set(), set(), threading.Lock()
     server_names = tuple(server_names)
     # Connections are threaded; requests are not. The scanner probe's deadline and the
     # settings read-modify-write both assume one request at a time.
     serial = threading.Lock()
+    # The Models page's JSON routes take `serial` themselves, and never across a model call.
+    connection_routes = (local_connections.ConnectionRoutes(accounts, config_path, serial, limiter, log=_log,
+                                                            limiter=connection_limiter)
+                         if config_path else None)
 
     class DashboardHandler(BaseHTTPRequestHandler):
         timeout = IDLE_TIMEOUT
@@ -1316,22 +1323,31 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             req = self._request()
             if req is None or self._refuse_post(req, path):
                 return
+            connection = path in local_connections.PATHS
             limit = (MAX_REPORT_BYTES + UPLOAD_OVERHEAD if path == '/upload' else
                      SETTINGS_BODY_LIMIT if path == '/settings' else
-                     local_auth.FORM_LIMIT if path.startswith('/accounts/') else 0)
+                     local_auth.FORM_LIMIT if path.startswith('/accounts/') or connection else 0)
             slot = None
-            if path == '/upload':
+            held = uploading if path == '/upload' else connecting if connection else None
+            if held is not None:
                 slot = req.session.csrf             # one per session; in memory only
                 with uploading_lock:
-                    busy = slot in uploading
+                    busy = slot in held
                     if not busy:
-                        uploading.add(slot)
+                        held.add(slot)
                 if busy:
                     slot = None
                     self._busy(409)
                     return
             try:
                 if not self._read_body(limit, body_budget):
+                    return
+                if connection:
+                    # Not under `serial`: a model list or test can take minutes, and the
+                    # routes take the lock only for the settings work around it.
+                    req = self._request()
+                    if req is not None:
+                        connection_routes.post(self, req, path)
                     return
                 with serial:
                     req = self._request()  # read again under the lock, just before it is used
@@ -1341,7 +1357,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 self._release_body()
                 if slot is not None:
                     with uploading_lock:
-                        uploading.discard(slot)
+                        held.discard(slot)
 
         def _guarded(self, route):
             """A read or write the server cannot complete is a 503, never a dropped connection.

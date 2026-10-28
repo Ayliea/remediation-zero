@@ -169,6 +169,8 @@ _EVENT_NAMES = {
     'reset_link_created': 'Reset link created', 'password_reset': 'Password reset',
     'mfa_reset': 'Authenticator reset', 'role_changed': 'Role changed', 'removed': 'Account removed',
     'recover_owner': 'Owner recovery link made on the server', 'owner_recovered': 'Owner recovery completed',
+    'connection_added': 'Model connection added', 'connection_edited': 'Model connection edited',
+    'connection_key_replaced': 'Model connection key replaced', 'connection_removed': 'Model connection removed',
 }
 #: The only part of an event's detail a page shows: a reason from this closed set. Nothing
 #: else in detail (never email_hmac) is read.

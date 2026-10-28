@@ -88,6 +88,9 @@ IDLE_SECONDS = 30 * 60
 ABSOLUTE_SECONDS = 12 * 3600
 CONFIRM_SECONDS = 5 * 60
 _VIA = "dashboard"
+#: The audit events Accounts.record_change writes for model connections.
+CONNECTION_EVENTS = ("connection_added", "connection_edited", "connection_key_replaced",
+                     "connection_removed")
 
 
 def _is_locked(row: sqlite3.Row, now: float) -> bool:
@@ -772,6 +775,28 @@ class Accounts:
         except _Failed:
             return False
         return True
+
+    def record_change(self, actor_id: str, event: str, *, detail: dict[str, Any],
+                      via: Optional[str], source: Optional[str]) -> None:
+        """The audit row for a change kept outside this file: a model connection added,
+        edited, given a new key or removed. `detail` is exactly the connection's display name
+        and the jobs (role names) it does; never a key or its hint. The actor must be an active
+        account allowed `manage_connections` when the row is written. The log line carries the
+        jobs only: a display name is typed text."""
+        if event not in CONNECTION_EVENTS:
+            raise ValueError("Unknown change event")
+        name, jobs = detail.get("connection"), detail.get("jobs")
+        if (set(detail) != {"connection", "jobs"} or not isinstance(name, str)
+                or not isinstance(jobs, list) or not all(isinstance(j, str) for j in jobs)):
+            raise ValueError("Unexpected change detail")
+        stamp = self.clock.now()
+        with self.store.transaction() as cur:
+            actor = self._actor(cur, actor_id)
+            if not access.allowed(actor["role"], "manage_connections"):
+                raise AccountRefused("not_allowed")
+            self._event(cur, event, actor["id"], None, via, source,
+                        {"connection": name, "jobs": list(jobs)}, stamp)
+        _log(event, actor["id"], None, via, {"jobs": list(jobs)})
 
     @staticmethod
     def actor_for(session: Session) -> dict[str, Any]:
