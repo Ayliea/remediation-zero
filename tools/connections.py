@@ -68,6 +68,11 @@ def validate_draft(settings, draft, *, replacing=None):
     for cid, other in settings['connections'].items():
         if cid != replacing and other['name'].casefold() == name.casefold():
             raise ConnectionRefused('Each connection needs its own name')
+    old = settings['connections'].get(replacing) if replacing else None
+    if (old and old['key_source'] == 'stored' and draft.key is None
+            and any(old[f] != getattr(draft, f) for f in ('base_url', 'ca_file', 'format', 'provider'))):
+        # A stored key goes only to the address it was entered for.
+        raise ConnectionRefused("Enter the key again to change this connection's address or certificate.")
     try:
         chosen = preset(draft.provider)
     except KeyError:
@@ -99,6 +104,8 @@ def validate_draft(settings, draft, *, replacing=None):
 
 def with_connection(settings, conn_id, draft):
     """The settings as they would be with this connection added (or edited) and its jobs assigned.
+    A key-needing provider with no key becomes key_source 'environment'. Callers save only after
+    test_jobs passes.
     Jobs the connection had before and the draft drops are unassigned. Editing clears last_test."""
     new = copy.deepcopy(settings)
     old = new['connections'].get(conn_id)
@@ -240,7 +247,7 @@ def coverage(settings, environ):
     roles = ModelRoles.from_settings(settings, environ)
     overridden = bool(environ.get('RZ_MODEL') or environ.get('RZ_MODEL_ENDPOINT'))
     note = None
-    if roles.reviewer is not None and roles.proposer is not None:
+    if roles.reviewer is not None:  # independence() counts no proposer, like family 'other', as same family
         note = 'different family' if roles.independence() == 'cross_family' else 'same family'
     out = []
     for role in JOB_ORDER:

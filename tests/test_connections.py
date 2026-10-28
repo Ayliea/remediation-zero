@@ -158,6 +158,24 @@ def test_editing_keeps_the_key_source_and_style_and_unassigns_dropped_jobs():
     validate(new)
 
 
+@pytest.mark.parametrize('field,value', [
+    ('base_url', 'https://proxy.example.invalid/v1'), ('ca_file', '/etc/ssl/certs/ca-certificates.crt'),
+    ('format', 'openai_chat'), ('provider', 'other')])
+def test_changing_the_address_of_a_stored_key_connection_needs_the_key_again(field, value):
+    s = settings(reviewer=job())
+    same = dict(name='Anthropic', provider='anthropic', format='anthropic_messages',
+                base_url='https://api.anthropic.com/v1', key=None,
+                jobs={'reviewer': JobChoice('claude-other-model', 'claude', 90)})
+    cx.validate_draft(s, draft(**same), replacing=AN)  # jobs and models alone may change
+    with pytest.raises(ConnectionRefused, match='Enter the key again'):
+        cx.validate_draft(s, draft(**{**same, field: value}), replacing=AN)
+
+
+def test_a_key_needing_provider_with_no_key_becomes_environment_sourced():
+    new = cx.with_connection(settings(), NEW, draft(key=None))
+    assert new['connections'][NEW]['key_source'] == 'environment'
+
+
 # ---- test_jobs ---------------------------------------------------------------------------
 
 class Fake:
@@ -341,6 +359,16 @@ def test_coverage_same_family_and_override():
     cov = cx.coverage(settings(), {'RZ_MODEL_ENDPOINT': 'http://127.0.0.1:1/v1/chat/completions',
                                    'RZ_MODEL': 'm'})
     assert cov[0]['overridden'] is True and cov[0]['connection'] is None and cov[0]['model'] == 'm'
+
+
+def test_coverage_other_family_and_no_proposer_count_as_same_family():
+    only_reviewer = settings(reviewer=job(model='r', family='claude'))
+    assert cx.coverage(only_reviewer, {})[1]['family_note'] == 'same family'
+    s = settings(proposer=job(model='p', family='other'), reviewer=job(model='r', family='claude'))
+    assert cx.coverage(s, {})[1]['family_note'] == 'same family'
+    s = settings(proposer=job(model='p', family='gemini'), reviewer=job(model='r', family='other'))
+    assert cx.coverage(s, {})[1]['family_note'] == 'same family'
+    assert cx.coverage(settings(), {})[1]['family_note'] is None
 
 
 # ---- find_by_name ------------------------------------------------------------------------
