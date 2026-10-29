@@ -44,7 +44,7 @@ def test_cloud_telemetry_module_satisfies_protocol():
 def test_ports_shape():
     fields = [f.name for f in dataclasses.fields(Ports)]
     assert fields == ["docs", "journal", "clock", "roles", "guard", "delivery",
-                      "memory", "telemetry", "record_failed_runs"]
+                      "memory", "telemetry", "record_failed_runs", "business_context"]
     p = Ports(None, None, None, None, None, NoDelivery(), None, NoTelemetry())
     assert p.record_failed_runs is False
     with pytest.raises(dataclasses.FrozenInstanceError):
