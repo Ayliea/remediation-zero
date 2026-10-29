@@ -727,12 +727,13 @@ class Accounts:
 
     def confirm(self, token: Optional[str], password: Optional[str] = None,
                 code: Optional[str] = None, *, source: Optional[str] = None) -> bool:
-        """Re-confirm a live session with its password or a fresh TOTP code
-        (exactly one); on success it is confirmed for CONFIRM_SECONDS.
+        """Re-confirm a live session with its password and, when the account has
+        an authenticator set up, a fresh TOTP code as well; on success it is
+        confirmed for CONFIRM_SECONDS.
 
         Each attempt is reserved against the account's lockout before it is
         verified, as sign-in's are; a locked account cannot confirm."""
-        if (password is None) == (code is None):
+        if password is None:
             return False
         live = self.session(token)
         if live is None:
@@ -741,16 +742,14 @@ class Accounts:
         row = self.store.account_by_id(live.account_id)
         if row is None or not self._reserve_attempt(row["id"], now, _VIA, source,
                                                     method="confirm"):
-            if password is not None:
-                passwords.verify(password if isinstance(password, str) else "", None)
+            passwords.verify(password if isinstance(password, str) else "", None)
             return False
         step = None
-        if password is not None:
-            ok = isinstance(password, str) and passwords.verify(password, row["password_hash"])
-        else:
+        ok = isinstance(password, str) and passwords.verify(password, row["password_hash"])
+        if row["totp_secret"]:
             step = (totp.match(row["totp_secret"], code, now, row["last_totp_step"])
-                    if row["totp_secret"] and isinstance(code, str) else None)
-            ok = step is not None
+                    if isinstance(code, str) else None)
+            ok = ok and step is not None
         if not ok:
             return False
         th = _token_hash(token)

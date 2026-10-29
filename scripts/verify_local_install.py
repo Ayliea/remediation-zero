@@ -62,6 +62,7 @@ class Browser:
         secret = re.search('name="secret" value="([A-Z2-7]+)"', text)[1]
         # The server's own Date header is the time its TOTP check uses, so no clock is read here.
         code = totp.code_at(secret, totp.step_for(now))
+        self.secret = secret
         status, _, text = self.request('POST', '/setup', urlencode(dict(
             pre=pre, secret=secret, email=email, role='owner', password=password, code=code)))
         assert status == 200, f'Setup answered {status}'
@@ -76,8 +77,11 @@ class Browser:
         assert status == 303 and headers['location'] == '/' and 'rz_session' in self.cookies, 'Sign-in failed'
 
     def confirm(self, location, password):
-        pre, _, _ = self.form(location)
-        status, _, _ = self.request('POST', location, urlencode(dict(pre=pre, password=password, code='')))
+        pre, _, now = self.form(location)
+        # Re-confirm takes the password and a code. The setup code spent the current step, so this
+        # uses the next one, which the server accepts within its one-step drift window.
+        code = totp.code_at(self.secret, totp.step_for(now) + 1)
+        status, _, _ = self.request('POST', location, urlencode(dict(pre=pre, password=password, code=code)))
         assert status == 303, 'Re-confirm failed'
 
 

@@ -16,7 +16,7 @@ import threading
 import pytest
 
 from scripts import local, local_connections
-from tests.test_accounts import PW_OWNER
+from tests.test_accounts import PW_OWNER, code_for
 from tools import access, connections, local_settings, model_endpoints
 from tools.accounts import CONNECTION_EVENTS, AccountRefused, RateLimiter
 from tools.local_secrets import SecretsFile, secrets_path
@@ -279,21 +279,28 @@ def test_an_unconfirmed_save_asks_in_place_then_the_same_body_saves(server, test
     response, data, _ = server.post('/connections/save', body, who='unconfirmed')
     assert response.status == 401 and data == {'confirm': True}
     assert tester.calls == [] and not server.config_path.exists() and not server.secrets.path.exists()
-    response, data, _ = server.post('/connections/confirm', {'password': PW_OWNER}, who='unconfirmed')
+    response, data, _ = server.post('/connections/confirm', fresh_confirm(server), who='unconfirmed')
     assert response.status == 200 and data == {'ok': True}
     response, data, _ = server.post('/connections/save', body, who='unconfirmed')
     assert response.status == 200 and data['ok'] is True
     assert server.secrets.get(data['connection']) == KEY
 
 
-def test_confirm_takes_one_box_and_refuses_a_wrong_password(server):
-    response, data, _ = server.post('/connections/confirm', {'password': PW_OWNER, 'code': '123456'},
-                                    who='unconfirmed')
-    assert response.status == 400 and data['error'] == local_auth_sentence('CONFIRM_ONE_ONLY')
-    response, data, text = server.post('/connections/confirm', {'password': 'not the password'}, who='unconfirmed')
-    assert response.status == 400 and data['error'] == local_auth_sentence('CONFIRM_FAILED')
-    assert 'not the password' not in text
+def fresh_confirm(server, password=PW_OWNER):
+    """The password and a code from a later step than any the account has used."""
+    server.site.now.tick()
+    return {'password': password, 'code': code_for(server.site.owner_secret, server.site.now)}
+
+
+def test_confirm_takes_the_password_and_a_code_and_refuses_either_alone(server):
+    both = fresh_confirm(server)
+    for body in ({'password': PW_OWNER}, {'code': both['code']}, fresh_confirm(server, 'not the password')):
+        response, data, text = server.post('/connections/confirm', body, who='unconfirmed')
+        assert response.status == 400 and data['error'] == local_auth_sentence('CONFIRM_FAILED')
+        assert 'not the password' not in text
     assert not server.site.accounts.session(server.site.unconfirmed_token).confirmed
+    response, data, _ = server.post('/connections/confirm', fresh_confirm(server), who='unconfirmed')
+    assert response.status == 200 and data == {'ok': True}
 
 
 def local_auth_sentence(name):

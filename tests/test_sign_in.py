@@ -421,29 +421,34 @@ def test_confirm_lasts_five_minutes(accounts, store, now, owner):
     account_id, secret, _ = owner
     token = sign_in(accounts, now, secret)
     assert accounts.session(token).confirmed is False
-    assert accounts.confirm(token, password="not the password at all") is False
+    now.tick(30)
+    code = code_for(secret, now)
+    # with an authenticator set up, re-confirm takes the password and a fresh code together
+    assert accounts.confirm(token, password="not the password at all", code=code) is False
+    assert accounts.confirm(token, password=PW_OWNER) is False
+    assert accounts.confirm(token, code=code) is False
     assert accounts.confirm(token) is False
-    assert accounts.confirm("never-issued", password=PW_OWNER) is False
-    assert accounts.confirm(token, password=PW_OWNER) is True
+    assert accounts.confirm("never-issued", password=PW_OWNER, code=code) is False
+    assert accounts.confirm(token, password=PW_OWNER, code=code) is True
     assert accounts.session(token).confirmed is True
     now.tick(accounts_mod.CONFIRM_SECONDS - 1)
     assert accounts.session(token).confirmed is True
     now.tick(1)
     assert accounts.session(token).confirmed is False
-    # a fresh TOTP code also confirms, and is then spent
+    # the code is spent: the same one cannot confirm again
+    assert accounts.confirm(token, password=PW_OWNER, code=code) is False
     now.tick(30)
-    code = code_for(secret, now)
-    assert accounts.confirm(token, code=code) is True
-    assert accounts.session(token).confirmed is True
-    assert accounts.confirm(token, code=code) is False
+    assert accounts.confirm(token, password=PW_OWNER, code=code_for(secret, now)) is True
     # confirming does not reach another session
     other = sign_in(accounts, now, secret)
     assert accounts.session(other).confirmed is False
     assert accounts_mod.CONFIRM_SECONDS == 300
     # wrong confirmations count towards the lockout
+    now.tick(30)
+    code = code_for(secret, now)
     for _ in range(5):
-        accounts.confirm(other, password="not the password at all")
-    assert accounts.confirm(other, password=PW_OWNER) is False
+        accounts.confirm(other, password="not the password at all", code=code)
+    assert accounts.confirm(other, password=PW_OWNER, code=code) is False
     assert json.loads(events(store, "locked")[0]["detail"])["method"] == "confirm"
 
 

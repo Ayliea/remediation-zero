@@ -386,10 +386,14 @@ def test_settings_save_requires_reconfirm(start, signed_in):
     assert not server.config_path.exists()
     pre, value, body = open_form(server, response.getheader('Location'), cookie=cookie)
     assert 'name="password"' in body
-    wrong = urlencode({'pre': value, 'password': 'not the password', 'code': ''})
+    assert 'name="code"' in body
     both = cookie + '; ' + pre
+    signed_in.now.tick()
+    wrong = urlencode({'pre': value, 'password': 'not the password',
+                       'code': code_for(signed_in.owner_secret, signed_in.now)})
     assert server.request('POST', '/confirm?next=' + quote(nxt, safe=''), cookie=both, body=wrong)[0].status == 400
-    right = urlencode({'pre': value, 'password': PW_OWNER, 'code': ''})
+    signed_in.now.tick()
+    right = urlencode({'pre': value, 'password': PW_OWNER, 'code': code_for(signed_in.owner_secret, signed_in.now)})
     response, _ = server.request('POST', '/confirm?next=' + quote(nxt, safe=''), cookie=both, body=right)
     assert response.status == 303 and response.getheader('Location') == nxt
     response, _ = server.request('POST', '/settings', cookie=cookie, body=scanner_save(token))
@@ -397,19 +401,23 @@ def test_settings_save_requires_reconfirm(start, signed_in):
     assert local_settings.load(server.config_path)['scanner']['socket_path'] == '/run/gvmd/gvmd.sock'
 
 
-def test_confirm_with_both_boxes_filled_says_to_use_one(start, signed_in):
-    # A browser can fill the code box by itself; the page must not call a right password wrong.
+def test_confirm_needs_the_password_and_a_code(start, signed_in):
+    # With an authenticator set up, re-confirm takes both: either one alone is refused.
     server = start(signed_in.accounts)
     cookie = signed_in.cookie('unconfirmed')
     nxt = '/?view=settings&section=scanner'
     path = '/confirm?next=' + quote(nxt, safe='')
     pre, value, _ = open_form(server, path, cookie=cookie)
-    body = urlencode({'pre': value, 'password': PW_OWNER, 'code': '123456'})
-    response, page = server.request('POST', path, cookie=cookie + '; ' + pre, body=body)
-    assert response.status == 400
-    assert local_auth.CONFIRM_ONE_ONLY in html.unescape(page) and local_auth.CONFIRM_FAILED not in html.unescape(page)
-    # Nothing was checked, so nothing is counted against the account.
-    assert signed_in.accounts.store.account_by_email(OWNER)['failed_count'] == 0
+    signed_in.now.tick()
+    code = code_for(signed_in.owner_secret, signed_in.now)
+    for fields in ({'password': PW_OWNER, 'code': ''}, {'password': '', 'code': code}):
+        response, page = server.request('POST', path, cookie=cookie + '; ' + pre,
+                                        body=urlencode({'pre': value, **fields}))
+        assert response.status == 400 and local_auth.CONFIRM_FAILED in html.unescape(page)
+    assert not signed_in.accounts.session(signed_in.unconfirmed_token).confirmed
+    response, _ = server.request('POST', path, cookie=cookie + '; ' + pre,
+                                 body=urlencode({'pre': value, 'password': PW_OWNER, 'code': code}))
+    assert response.status == 303 and response.getheader('Location') == nxt
 
 
 def test_an_upload_requires_reconfirm(start, signed_in):
@@ -439,7 +447,7 @@ def test_confirm_next_is_from_a_closed_set(start, signed_in, nxt, expected):
     path = '/confirm?next=' + quote(nxt, safe='')
     pre, value, _ = open_form(server, path, cookie=cookie)
     signed_in.now.tick()
-    fields = urlencode({'pre': value, 'password': '', 'code': code_for(signed_in.owner_secret, signed_in.now)})
+    fields = urlencode({'pre': value, 'password': PW_OWNER, 'code': code_for(signed_in.owner_secret, signed_in.now)})
     response, _ = server.request('POST', path, cookie=cookie + '; ' + pre, body=fields)
     assert response.status == 303 and response.getheader('Location') == expected
 
@@ -918,8 +926,10 @@ def test_invite_link_is_shown_once_and_works(start, signed_in, caplog):
     assert accounts.store.account_by_email('new@client.example') is None
     # After re-confirm the person lands back on the Accounts page (and submits again).
     pre, value, _ = open_form(server, confirm_at, cookie=unconfirmed)
+    signed_in.now.tick()
+    code = code_for(signed_in.owner_secret, signed_in.now)
     response, _ = server.request('POST', confirm_at, cookie=unconfirmed + '; ' + pre,
-                                 body=urlencode({'pre': value, 'password': PW_OWNER, 'code': ''}))
+                                 body=urlencode({'pre': value, 'password': PW_OWNER, 'code': code}))
     assert response.status == 303 and response.getheader('Location') == '/?view=accounts'
 
     cookie = signed_in.cookie()
@@ -1033,7 +1043,8 @@ def test_tech_can_invite_the_owner_only_while_no_owner_exists(start, tmp_path):
     response, _ = server.request('POST', '/accounts/invite', cookie=cookie, body=owner_invite)
     assert response.status == 303 and response.getheader('Location') == '/confirm?next=%2F'
     assert accounts.store.account_by_email('boss@client.example') is None
-    assert accounts.confirm(session, password=PW_TECH)
+    now.tick()
+    assert accounts.confirm(session, password=PW_TECH, code=code_for(secret, now))
     # A tech cannot invite another tech, even now: Accounts.invite refuses it.
     response, body = server.request('POST', '/accounts/invite', cookie=cookie,
                                     body=urlencode({'token': token, 'email': 'other@client.example', 'role': 'tech'}))

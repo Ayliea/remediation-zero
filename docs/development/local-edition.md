@@ -127,7 +127,7 @@ before it creates or writes anything.
   and authenticator code); with no account yet, a visit on the server itself
   (`http://127.0.0.1:PORT`, no `--public-url`) opens the first-account setup
   page, and any other visit shows only the setup command. Saving Settings or
-  uploading a report asks for the password or a fresh code again first. A
+  uploading a report asks for the password and a fresh code again first. A
   form or report must arrive within 15 seconds plus one second per 256 KiB
   (about 2 Mbit/s for a large report); a slower upload is cut off, so use
   `greenbone upload FILE` on the server for a large report over a slow link.

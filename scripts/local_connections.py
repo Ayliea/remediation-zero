@@ -422,10 +422,8 @@ class ConnectionRoutes:
         wait = self.sign_in_limiter.hit(req.client)
         if wait is not None:
             raise _Reply(429, {'error': TOO_MANY}, (('Retry-After', str(wait)),))
-        if password is not None and code is not None:
-            raise _refused(local_auth.CONFIRM_ONE_ONLY)
         ok = False
-        if (password is None) != (code is None) and (password is None or len(password) <= local_auth.PASSWORD_LIMIT):
+        if password is not None and len(password) <= local_auth.PASSWORD_LIMIT:
             ok = self.accounts.confirm(req.token, password=password, code=code, source=req.client)
         if not ok:
             raise _refused(local_auth.CONFIRM_FAILED)

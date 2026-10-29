@@ -60,8 +60,9 @@ def _build(path):
     now.tick()
     unconfirmed = accounts.sign_in(OWNER, PW_OWNER, code_for(owner_secret, now), SOURCE)
     assert owner_token and tech_token and unconfirmed
-    assert accounts.confirm(owner_token, password=PW_OWNER)
-    assert accounts.confirm(tech_token, password=PW_TECH)
+    now.tick()
+    assert accounts.confirm(owner_token, password=PW_OWNER, code=code_for(owner_secret, now))
+    assert accounts.confirm(tech_token, password=PW_TECH, code=code_for(tech_secret, now))
     return dict(end=now(), owner_token=owner_token, tech_token=tech_token, unconfirmed_token=unconfirmed,
                 owner_secret=owner_secret, tech_secret=tech_secret, owner_codes=owner_codes)
 

@@ -175,11 +175,10 @@ def _dialog(presets):
     plain = 'autocomplete="off" spellcheck="false" autocapitalize="off"'
     cards = [
         ('confirm', f'{ICONS["lock"]}<h2 id="rz-t-confirm">Confirm it\'s you</h2>'
-                    '<p>Before this change, enter your password, or a new code from your authenticator app. '
-                    'Fill in one box.</p>'
+                    '<p>Before this change, enter your password and a new code from your authenticator app.</p>'
                     '<label class="rz-label">Password<input id="rz-password" type="password" '
                     'autocomplete="current-password" maxlength="1024"></label>'
-                    '<label class="rz-label">Or a code from your authenticator app<input id="rz-code" '
+                    '<label class="rz-label">Code from your authenticator app<input id="rz-code" '
                     'autocomplete="one-time-code" inputmode="numeric" maxlength="6"></label>'
                     f'{_ERROR}{_buttons(("cancel", "Cancel", False), ("confirm", "Confirm", True))}'),
         ('provider', f'{_STEPS}{ICONS["add"]}<h2 id="rz-t-provider">Connect a model</h2>'

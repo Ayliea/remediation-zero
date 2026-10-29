@@ -83,9 +83,7 @@ NEXT_PATHS = frozenset({'/', '/?view=accounts'} | {f'/?view={view}' for view in 
                        | {f'/?view=settings&section={section}' for section in SECTIONS})
 
 SIGN_IN_FAILED = 'That did not work. Check your email, password and code, and try again.'
-CONFIRM_FAILED = 'That did not match. Enter your password, or a new code from your authenticator app.'
-#: Both boxes filled (a browser can fill the code box by itself): nothing was checked or counted.
-CONFIRM_ONE_ONLY = 'Fill in only one box: your password, or a code from your authenticator app. Leave the other empty.'
+CONFIRM_FAILED = 'That did not match. Enter your password and a new code from your authenticator app.'
 _REFUSALS = {
     'too_short': 'Use a password of at least 12 characters.',
     'too_long': 'Use a password of at most 128 characters.',
@@ -449,11 +447,8 @@ class AuthRoutes:
     def _confirm(self, h, req, fields, pre, query):
         nxt = safe_next(query)
         password, code = fields.get('password') or None, fields.get('code') or None
-        if password is not None and code is not None:
-            h.send_page(account_views.confirm_page(pre, nxt, message=CONFIRM_ONE_ONLY), 400)
-            return
         ok = False
-        if (password is None) != (code is None) and (password is None or self._capped(password) is not None):
+        if password is not None and self._capped(password) is not None:
             ok = self.accounts.confirm(req.token, password=password, code=code, source=req.client)
         if not ok:
             h.send_page(account_views.confirm_page(pre, nxt, message=CONFIRM_FAILED), 400)

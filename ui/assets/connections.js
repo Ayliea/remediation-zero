@@ -312,17 +312,11 @@
   async function confirm() {
     const password = fields.password.value;
     const code = fields.code.value.trim();
-    if (!password && !code) {
-      say('confirm', 'Enter your password, or a code from your authenticator app.');
+    if (!password || !code) {
+      say('confirm', 'Enter your password and a code from your authenticator app.');
       return;
     }
-    const body = {};
-    if (password) {
-      body.password = password;
-    }
-    if (code) {
-      body.code = code;
-    }
+    const body = { password: password, code: code };
     const mine = state;
     busy(true);
     const result = await post('/connections/confirm', body);
