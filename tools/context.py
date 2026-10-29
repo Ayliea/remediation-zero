@@ -32,6 +32,10 @@ BUILTIN_LABELS = {"crown_jewels": ("criticality", "high"),
                   "sensitive_data": ("sensitive_data", True),
                   "development": ("environment", "development"),
                   "not_internet_facing": ("internet_facing", False)}
+#: How each built-in label is shown, in the order the dashboard lists them.
+BUILTIN_NAMES = {"crown_jewels": "Crown jewels", "internet_facing": "Internet-facing",
+                 "production": "Production", "sensitive_data": "Sensitive data",
+                 "development": "Development", "not_internet_facing": "Not internet-facing"}
 #: What a custom label may do: act as one of two built-in labels, or only group hosts.
 EFFECTS = ("crown_jewels", "sensitive_data", "grouping")
 SOURCES = ("questions", "spreadsheet", "rule", "direct")
@@ -65,6 +69,15 @@ def _set_facts(asset: Mapping[str, Any]) -> dict:
              if asset.get(f) is not None}
     facts.update({f: v for f, v in (asset.get("context_facts") or {}).items() if v is not None})
     return facts
+
+
+def display_labels(asset: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """The names of the asset's labels: each built-in one its effective facts carry, then its
+    custom labels by name. `labels`: label id -> {"name", "effect"}."""
+    facts = effective_facts(asset, {k: v.get("effect") for k, v in labels.items()})
+    names = [BUILTIN_NAMES[key] for key, (fact, value) in BUILTIN_LABELS.items() if facts[fact] == value]
+    return names + [labels[x]["name"] for x in asset.get("context_labels") or ()
+                    if x in labels and labels[x].get("name")]
 
 
 def effective_facts(asset: Mapping[str, Any], custom_labels: Mapping[str, str]) -> dict:

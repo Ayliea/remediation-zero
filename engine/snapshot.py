@@ -16,6 +16,7 @@ Two local additions ride on existing keys rather than new ones:
 
 Standard library only: nothing here imports FastAPI or a cloud SDK.
 """
+from tools import context
 from tools.docstore import DESCENDING, DocStore, FieldFilter
 from tools.ownership import owner_found_cycle
 
@@ -74,6 +75,8 @@ def snapshot(docs: DocStore) -> dict:
                 # no actor, and the dashboard says so rather than guess.
                 row["person_approval"]["actor"] = approval["actor"]
 
+    business = _business_context(docs, decisions)
+
     sim_now = max(
         0.0,
         newest_value("tickets", "last_contact_sim_ts"),
@@ -111,4 +114,30 @@ def snapshot(docs: DocStore) -> dict:
         "sim_now": sim_now,
         "failed_runs": failed_runs,
         "scanner_state": scanner_state,
+        **business,
     }
+
+
+def _business_context(docs: DocStore, decisions: list) -> dict:
+    """`context_unknown_hosts`, and on each decision row its `host`, `labels` and
+    `deadline_moves`. Nothing for a store without the business-context files."""
+    try:
+        labels = {s.id: s.to_dict() or {} for s in docs.collection("context_labels").stream()}
+        moves = [s.to_dict() or {} for s in docs.collection("deadline_moves").stream()]
+    except KeyError:
+        return {}
+    custom = {k: v.get("effect") for k, v in labels.items()}
+    assets = {s.id: s.to_dict() or {} for s in docs.collection("assets").stream()}
+    unknown = sum(1 for a in assets.values()
+                  if all(v is None for v in context.effective_facts(a, custom).values()))
+    findings = docs.collection("findings")
+    for row in decisions:
+        found = findings.document(row.get("finding_id") or "-").get().to_dict() or {}
+        asset = assets.get(found.get("asset_id"))
+        if asset is not None:
+            row["host"] = asset.get("hostname") or asset.get("ip") or found["asset_id"]
+            row["labels"] = context.display_labels(asset, labels)
+        row["deadline_moves"] = sorted((m for m in moves if m.get("finding_id") == row.get("finding_id")
+                                        and (m.get("cycle") or 0) <= (row.get("cycle") or 0)),
+                                       key=lambda m: m.get("sim_ts") or 0)
+    return {"context_unknown_hosts": unknown}

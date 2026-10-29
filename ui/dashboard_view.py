@@ -10,6 +10,7 @@ from pathlib import Path
 from html import escape
 from datetime import datetime, timezone
 
+from tools import access
 from tools.decisions import effective_severity
 
 
@@ -104,6 +105,43 @@ def screening_text(row):
     return "Scanner notes were checked for unsafe content before any model read them."
 
 
+def _day(sim_ts):
+    return datetime.fromtimestamp(sim_ts, tz=timezone.utc).strftime("%Y-%m-%d") if sim_ts else "Not recorded"
+
+
+def business_lines(row):
+    """The local edition's business context for one finding: why it matters, the floor, and
+    each moved deadline, in plain words. Empty for a row without them (the cloud's)."""
+    out = ""
+    if row.get("labels"):
+        out += f'<p><strong>This is {text(row.get("host"))}, labeled {text(", ".join(row["labels"]))}.</strong></p>'
+    floor = row.get("floor") or {}
+    if floor.get("applied") and floor.get("reason"):
+        reason = str(floor["reason"])
+        out += f'<p>{text(reason[:1].upper() + reason[1:])}.</p>'
+    for move in row.get("deadline_moves") or ():
+        why = ", ".join(str(x) for x in move.get("change_summary") or ()) or "a business-context change"
+        who = f' ({text(move.get("changed_by"))})' if move.get("changed_by") else ""
+        if move.get("outcome") == "moved":
+            out += (f'<p>Deadline moved from {_day(move.get("old_due_sim_ts"))} to '
+                    f'{_day(move.get("new_due_sim_ts"))} after {text(why)}{who}.</p>')
+        else:
+            out += f'<p>Already overdue, so the deadline was not moved, after {text(why)}{who}.</p>'
+    return out
+
+
+def context_nudge(data, account, base="/"):
+    """Hosts with no business context: the owner is linked to label them, a tech told to ask."""
+    unknown = data.get("context_unknown_hosts") or 0
+    if not unknown or account is None:
+        return ""
+    hosts = f'{unknown} host{"s have" if unknown != 1 else " has"} no business context'
+    if access.allowed(account.get("role"), "manage_context"):
+        return (f'<section class="notice" role="status"><p><a href="{base}?view=settings&amp;section=context">'
+                f'{hosts} — label them</a></p></section>')
+    return f'<section class="notice" role="status"><p>{hosts}. Ask the owner to label them.</p></section>'
+
+
 def decision_card(row, approve_command=None):
     outcome = row.get("outcome")
     approved = outcome == "ratified"
@@ -127,7 +165,7 @@ def decision_card(row, approve_command=None):
 <span class="badge{' badge--reviewed' if approved else ''}">{text(label)}</span></div>
 <p class="muted">Recorded priority: {text(effective_severity(row))} · Cycle {text(row.get('cycle'))}</p>
 <p>{text(row.get('rationale') or row.get('note') or 'Business impact has not been recorded. Ask your IT provider to assess this finding.')}</p>
-<h4>Your next step</h4><p>{text(next_step)}</p>{approve_hint(row, approve_command)}
+{business_lines(row)}<h4>Your next step</h4><p>{text(next_step)}</p>{approve_hint(row, approve_command)}
 <details><summary>Technical evidence and review history</summary><ul>{evidence or '<li>No supporting evidence recorded.</li>'}</ul>
 <ul>{verdicts}</ul><p>{text(row.get('note'))}</p><p>{text(screening_text(row))}</p>
 {('<h4>Unreviewed model suggestion</h4><p>' + text(row.get('proposed_remediation')) + '</p>') if outcome == 'unreviewed' else ''}
@@ -428,6 +466,8 @@ def render(data, view="overview", demo=False, unavailable=False, settings_html=N
                       '<label>Invite the owner: their email <input name="email" type="email" required maxlength="254"></label> '
                       '<button type="submit">Invite the owner</button></form>')
         signed += f'<section class="notice" role="status"><p>{OWNER_MISSING}</p>{invite}</section>'
+    if view == "overview":
+        signed += context_nudge(data, account, base)
     theme, logo = branding()
     title = 'Your next security step' if view == 'overview' else views[view]
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

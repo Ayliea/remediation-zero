@@ -661,6 +661,51 @@ Stop every process before copying a workspace and its settings. Do not delete
 storage to retry a failed request: rerunning a cycle reuses its checkpoints,
 and a new cycle starts a new request budget. There is no global spending cap.
 
+## Business context
+
+Settings → Context is where the owner says which hosts matter: Crown jewels
+(the business stops if it goes down), Internet-facing, Production, Sensitive
+data, Development, or a custom label that acts as Crown jewels, as Sensitive
+data, or only groups hosts. Only an owner can change it (`manage_context`);
+a tech sees the same page without forms. Every change needs a recent
+re-confirm, records who made it and how (questions, spreadsheet, rule or a
+direct edit), and writes an audit row (`account events`).
+
+There are three ways in, and none of them applies anything on its own:
+
+- **Questions**: four, one per fact. Ticked hosts are set; unticked hosts stay
+  as they are, so a host never answered stays "not known".
+- **Spreadsheet**: any CSV up to 5 MB and 10,000 rows. You match its columns,
+  see every change, every row that was not used and why, and the rows that
+  match no scanned host yet, then apply. Unmatched rows wait 90 days and are
+  suggested when a scan reports the host. The file is held in memory for ten
+  minutes, for this session only.
+- **Rules**: an IP range or a host-name ending. A rule suggests; each host it
+  covers waits for the owner to approve or deny it.
+
+A new custom label's name is checked by the guard model when one is
+configured; without one, the strict name rule (up to 40 letters, digits,
+spaces, `-`, `_` or `.`) applies alone.
+
+Triage reads the host's effective facts and label names. A fact that was never
+set is shown to the models as "not known", never assumed low. On top of the
+model's ranking there is one fixed floor: a Crown jewels host with any CVE on
+CISA's actively-exploited list is never ranked below High, and its deadline is
+at most 14 days (or the list's own due date when that is sooner and still in
+the future). When the cached list is not available the floor is not applied
+and the decision says so.
+
+Changing a host's facts re-ranks its open findings on the next cycle, once,
+however many changes were made: findings whose newest decision was ratified
+or approved by a person. Held, queued and rejected findings take the new
+context at their next ordinary triage. A re-rank moves the deadline rather
+than restarting the clock: the new due date is the original start plus the
+new SLA, never sooner than a day away, and it can move later as well as
+sooner. An overdue clock is not moved. Each move is recorded in
+`deadline_moves` and shown on the finding as "Deadline moved from … to …
+after …". The overview reminds the owner how many hosts have no business
+context yet.
+
 ## Not yet built
 
 There are no real scanner connectors, no import workflow and no in-place

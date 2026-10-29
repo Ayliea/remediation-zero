@@ -237,8 +237,10 @@ pending suggestion for that fact. Editing a rule clears its pending
 suggestions; approvals already made stay, because they are facts now.
 
 **Who.** Owner only, as decided. In an MSP install the tech who set it up is
-normally the first account, which is an owner. The account recorded on every
-change and deadline move is the signed-in account's identity.
+the first account and a tech; they invite the business owner, who labels the
+hosts. (Corrected while building: an earlier draft said the installing tech
+was an owner, which the sign-in design does not do.) The account recorded on
+every change and deadline move is the signed-in account's identity.
 
 **Custom label names and the guardrail.** A name is checked when it is saved;
 one the guardrail blocks is refused at entry with a plain message, not saved
