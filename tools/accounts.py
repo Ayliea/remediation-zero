@@ -66,7 +66,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from tools import access, passwords, totp
+from tools import access, context, passwords, totp
 from tools.account_store import AccountStore
 from tools.clock import SimClock, Stamp
 
@@ -91,6 +91,10 @@ _VIA = "dashboard"
 #: The audit events Accounts.record_change writes for model connections.
 CONNECTION_EVENTS = ("connection_added", "connection_edited", "connection_key_replaced",
                      "connection_removed")
+#: The audit events Accounts.record_context_change writes for business context.
+CONTEXT_EVENTS = ("context_facts_set", "context_label_added", "context_label_removed",
+                  "context_rule_saved", "context_rule_removed", "context_suggestion_decided",
+                  "context_upload_applied")
 
 
 def _is_locked(row: sqlite3.Row, now: float) -> bool:
@@ -796,6 +800,31 @@ class Accounts:
             self._event(cur, event, actor["id"], None, via, source,
                         {"connection": name, "jobs": list(jobs)}, stamp)
         _log(event, actor["id"], None, via, {"jobs": list(jobs)})
+
+    def record_context_change(self, actor_id: str, event: str, *, detail: dict[str, Any],
+                              via: Optional[str], source: Optional[str]) -> None:
+        """The audit row for a business-context change (kept in the workspace, not this file).
+        `detail` may carry only: `assets` (a count), `facts` (fact names), `label` (a label
+        name, already held to tools.context's strict rule), `rule` (a rule id) and `decision`
+        (approved or denied). Never a host name or spreadsheet text. The actor must be an
+        active account allowed `manage_context`. The log line leaves out the label name."""
+        if event not in CONTEXT_EVENTS:
+            raise ValueError("Unknown change event")
+        checks = {"assets": lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0,
+                  "facts": lambda v: isinstance(v, list) and all(f in context.FACTS for f in v),
+                  "label": lambda v: isinstance(v, str) and v == context.validate_label_name(v),
+                  "rule": lambda v: isinstance(v, str) and len(v) <= 64,
+                  "decision": lambda v: v in ("approved", "denied")}
+        for key, value in detail.items():
+            if key not in checks or not checks[key](value):
+                raise ValueError("Unexpected change detail")
+        stamp = self.clock.now()
+        with self.store.transaction() as cur:
+            actor = self._actor(cur, actor_id)
+            if not access.allowed(actor["role"], "manage_context"):
+                raise AccountRefused("not_allowed")
+            self._event(cur, event, actor["id"], None, via, source, dict(detail), stamp)
+        _log(event, actor["id"], None, via, {k: v for k, v in detail.items() if k != "label"})
 
     @staticmethod
     def actor_for(session: Session) -> dict[str, Any]:

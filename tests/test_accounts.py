@@ -106,7 +106,7 @@ def refused(code):
 
 SPEC_TABLE = {
     "owner": {"view", "settings", "upload", "approve", "accept_risk", "manage_accounts",
-              "view_audit", "manage_connections"},
+              "view_audit", "manage_connections", "manage_context"},
     "tech": {"view", "settings", "upload", "approve"},
     None: set(),
 }

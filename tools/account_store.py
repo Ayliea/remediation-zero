@@ -89,6 +89,7 @@ _PAD_KEY = "write_pad"
 ALLOWED_DETAIL_KEYS = frozenset({
     "from", "to", "role", "kind", "reason", "email", "count", "outcome",
     "locked_until", "invite_kind", "mfa", "method", "email_hmac", "connection", "jobs",
+    "assets", "facts", "label", "rule", "decision",
 })
 _SECRET_WORDS = ("password", "code", "token", "secret", "totp", "session", "csrf", "hash",
                  "sha", "hmac")

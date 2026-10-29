@@ -267,7 +267,10 @@ def test_assets_keep_first_seen_and_never_lose_owner(ws, ports):
     try:
         person.collection("assets").document(WEB).update({
             "owner_id": "OWN-1", "criticality": "high", "environment": "production",
-            "internet_facing": True, "notes": "set by a person"})
+            "internet_facing": True, "notes": "set by a person",
+            "context_facts": {"sensitive_data": True}, "context_labels": ["lbl-1"],
+            "context_provenance": {"sensitive_data": {"source": "direct"}},
+            "context_changed_sim_ts": 5.0})
     finally:
         person.close()
     moved = tuple(dataclasses.replace(h, hostname="web2.example.invalid", os_cpe="cpe:/o:debian:debian_linux:13",
@@ -286,6 +289,8 @@ def test_assets_keep_first_seen_and_never_lose_owner(ws, ports):
     assert (asset["owner_id"], asset["criticality"], asset["environment"],
             asset["internet_facing"], asset["notes"]) == (
         "OWN-1", "high", "production", True, "set by a person")
+    assert (asset["context_facts"], asset["context_labels"], asset["context_changed_sim_ts"]) == (
+        {"sensitive_data": True}, ["lbl-1"], 5.0)
 
 
 def test_failed_pull_records_failure_only(ws, ports):

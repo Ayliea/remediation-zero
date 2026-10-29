@@ -11,12 +11,13 @@ only.
 """
 
 ACTIONS = frozenset({'view', 'settings', 'upload', 'approve', 'accept_risk',
-                     'manage_accounts', 'view_audit', 'manage_connections'})
+                     'manage_accounts', 'view_audit', 'manage_connections', 'manage_context'})
 
 # The spec's table: an owner may do everything; a tech works the findings and
 # configures the install, but cannot accept a risk, manage accounts, read the
 # account audit trail, or add, change, test or delete a model connection (its
-# key spends the owner's provider credit).
+# key spends the owner's provider credit), or set the business context that ranks
+# findings and moves their deadlines (the owner is accountable for it).
 _TABLE = {
     'owner': ACTIONS,
     'tech': frozenset({'view', 'settings', 'upload', 'approve'}),

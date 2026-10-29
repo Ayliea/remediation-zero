@@ -37,7 +37,7 @@ from tools.sqlite_store import SQLiteStore
 AGENT_FILES = {
     "orchestrator": ("cycles", "memories", "failed_runs"),
     "decisions": ("decisions",),
-    "ownership": ("assignments",),
+    "ownership": ("assignments", "deadline_moves"),
     "chase": ("tickets",),
     "exception": ("exceptions",),
     "reporting": ("reports",),
@@ -47,12 +47,16 @@ AGENT_FILES = {
     "approvals": ("approvals",),
     # Scanner bookkeeping: per-task pull state and the enrichment-refresh status.
     "scanner": ("scanner_state",),
+    # Business context the owner set: custom labels, rules, suggestion decisions and the
+    # saved spreadsheet mapping. The per-host facts live on the asset documents.
+    "context": ("context_labels", "context_rules", "context_suggestions", "context_mappings"),
 }
 SHARED = ("human_queue", "sla_clocks")
 # The triage cycle writes `assignments` because scripts/cycle.py runs the
 # assignment step today; the ownership agent's own file still holds it.
 STAGE_WRITES = {
-    "triage_cycle": {"decisions", "assignments", "cycles", "memories", "failed_runs"} | set(SHARED),
+    "triage_cycle": {"decisions", "assignments", "deadline_moves", "cycles", "memories",
+                     "failed_runs"} | set(SHARED),
     "chase": {"tickets"} | set(SHARED),
     "sweep": {"exceptions"} | set(SHARED),
     "report": {"reports"},
@@ -64,6 +68,9 @@ STAGE_WRITES = {
     # per-task pull state, all in one transaction per report.
     "scanner_import": {"assets", "findings", "scans", "scanner_state"},
     "exception_accept": {"exceptions"} | set(SHARED),
+    # The owner's business context: facts on the assets, and the context collections.
+    "context": {"assets", "context_labels", "context_rules", "context_suggestions",
+                "context_mappings"},
     # The served dashboard reads everything and writes nothing (Ruling 43).
     "dashboard": set(),
 }
