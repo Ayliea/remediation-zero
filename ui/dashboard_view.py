@@ -10,6 +10,8 @@ from pathlib import Path
 from html import escape
 from datetime import datetime, timezone
 
+from tools.decisions import effective_severity
+
 
 @lru_cache(maxsize=1)
 def branding():
@@ -67,7 +69,7 @@ def recent_decisions(data):
     for row in data.get("decisions", []):
         found.setdefault(row.get("finding_id", "Unknown finding"), row)
     rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    return sorted(found.values(), key=lambda r: rank.get(r.get("proposed_severity"), 4))
+    return sorted(found.values(), key=lambda r: rank.get(effective_severity(r), 4))
 
 
 PERSON_APPROVABLE = {"unreviewed": "Not reviewed", "held_for_approval": "Reviewed by the same model family"}
@@ -123,7 +125,7 @@ def decision_card(row, approve_command=None):
     verdicts = "".join(f"<li>{text(v.get('reason'))}</li>" for v in row.get("verdicts", []))
     return f'''<article class="card"><div class="row"><h3>{text(row.get('finding_id'))}</h3>
 <span class="badge{' badge--reviewed' if approved else ''}">{text(label)}</span></div>
-<p class="muted">Recorded priority: {text(row.get('proposed_severity'))} · Cycle {text(row.get('cycle'))}</p>
+<p class="muted">Recorded priority: {text(effective_severity(row))} · Cycle {text(row.get('cycle'))}</p>
 <p>{text(row.get('rationale') or row.get('note') or 'Business impact has not been recorded. Ask your IT provider to assess this finding.')}</p>
 <h4>Your next step</h4><p>{text(next_step)}</p>{approve_hint(row, approve_command)}
 <details><summary>Technical evidence and review history</summary><ul>{evidence or '<li>No supporting evidence recorded.</li>'}</ul>

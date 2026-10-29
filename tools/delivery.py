@@ -29,6 +29,7 @@ import logging
 from typing import Any, Optional
 
 from tools.chase import MAX_NUDGES
+from tools.decisions import effective_severity, effective_sla_days
 from tools.docstore import FieldFilter, as_docstore
 from tools.github_tickets import (
     MANAGED_LABEL, GitHubTickets, issue_body, issue_title,
@@ -169,9 +170,9 @@ class GitHubDelivery:
             # cross-family, as DecisionWriter.restore assumes.
             "review_independence": chosen.get("review_independence") or "cross_family",
             "approved_by": approved_by,
-            "severity": chosen.get("proposed_severity") or "unrated",
+            "severity": effective_severity(chosen) or "unrated",
             "remediation": chosen.get("proposed_remediation") or "",
-            "sla_days": chosen.get("proposed_sla_days"),
+            "sla_days": effective_sla_days(chosen),
             "rationale": chosen.get("rationale") or "",
             "evidence": chosen.get("cited_evidence") or "",
             "reviewer": (ratifying[-1].get("reason") if ratifying else ""),

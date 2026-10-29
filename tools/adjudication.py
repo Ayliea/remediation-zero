@@ -127,6 +127,8 @@ class Adjudication:
     models: Mapping[str, Any] = field(default_factory=dict)
     #: What was to happen to a same-family ratification: wait or proceed.
     same_family_policy: str = "wait"
+    #: The business-context floor (tools.context_floor), when it was considered; None otherwise.
+    floor: Optional[Mapping[str, Any]] = None
 
 
 #: One retry after a rejection, then a person. Not configurable by accident.

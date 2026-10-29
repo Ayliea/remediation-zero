@@ -23,6 +23,7 @@ from engine.ports import Ports
 from tools import inference
 from tools.adjudication import Adjudication
 from tools.assignments import AssignmentWriter
+from tools.context_floor import apply_floor
 from tools.cycles import merge_cycle_record
 from tools.decisions import DecisionWriter
 from tools.docstore import AlreadyExists, FieldFilter
@@ -212,7 +213,7 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
         return
 
     finding = snapshot.to_dict()
-    asset = assets.get(finding["asset_id"], {})
+    asset = inference.with_context(assets.get(finding["asset_id"], {}), _labels(ports))
     finding, enriched, verdict = screen_finding(
         ports, finding, cycle, enrich_finding(enrichment, finding))
     if verdict.blocked or not verdict.screened:
@@ -234,6 +235,8 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
              error=f"{type(exc).__name__}: {exc}"[:300])
         raise
 
+    if adjudication.floor is not None:
+        _log("floor_considered", cycle_id, finding_id, **adjudication.floor)
     document_id = writer.record(adjudication, cycle=cycle)
     adjudication = writer.restore(finding_id, cycle)
     outcomes[adjudication.outcome.value] = outcomes.get(
@@ -380,6 +383,7 @@ def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enri
             rendered, ports.roles, legacy=legacy),
         roles=ports.roles,
         screening=screening,
+        finalize=lambda result: apply_floor(result, asset, enrichment, ports.clock.now().sim_ts),
     )
 
 
@@ -414,6 +418,21 @@ def assign_if_ratified(ports: Ports, adjudication: Adjudication, cycle: int, *,
     return None
 
 
+def _labels(ports) -> dict:
+    """Custom business-context labels by id; none where the edition keeps no context."""
+    try:
+        return {s.id: s.to_dict() or {} for s in ports.docs.collection("context_labels").stream()}
+    except KeyError:  # a store without the context collections (the cloud edition today)
+        return {}
+
+
+def _sla_days(adjudication: Adjudication) -> Optional[int]:
+    floor = adjudication.floor
+    if floor and floor.get("applied") is True:
+        return floor["sla_days"]
+    return adjudication.proposal.sla_days if adjudication.proposal else None
+
+
 def _assign(ports, adjudication, cycle, finding, assets, owners, assigner):
     if owners is None:
         owners = {o["owner_id"]: o for o in
@@ -430,7 +449,7 @@ def _assign(ports, adjudication, cycle, finding, assets, owners, assigner):
     assignment = resolve_owner(finding, assets, owners)
     assignment_id = assigner.record(
         assignment, cycle=cycle,
-        sla_days=adjudication.proposal.sla_days if adjudication.proposal else None)
+        sla_days=_sla_days(adjudication))
     return assignment_id, assignment
 
 

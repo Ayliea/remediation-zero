@@ -76,6 +76,8 @@ def to_decision_document(
         "real_ts": stamp.real_ts,
         "sim_ts": stamp.sim_ts,
     }
+    if adjudication.floor is not None:
+        document["floor"] = dict(adjudication.floor)
     if screening is not None:
         document["screening"] = {"screened": bool(screening.screened),
                                  "blocked": bool(screening.blocked)}
@@ -84,6 +86,23 @@ def to_decision_document(
             # plain-text rule. Absent everywhere else, so other records are unchanged.
             document["screening"]["nvt_name_unscreened_strict"] = True
     return document
+
+
+def _applied_floor(doc: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    floor = doc.get("floor")
+    return floor if isinstance(floor, Mapping) and floor.get("applied") is True else None
+
+
+def effective_severity(doc: Mapping[str, Any]) -> Optional[str]:
+    """A decision's severity: the floor's when it was applied, else the proposal's."""
+    floor = _applied_floor(doc)
+    return floor["severity"] if floor else doc.get("proposed_severity")
+
+
+def effective_sla_days(doc: Mapping[str, Any]) -> Optional[int]:
+    """A decision's SLA in days: the floor's when it was applied, else the proposal's."""
+    floor = _applied_floor(doc)
+    return floor["sla_days"] if floor else doc.get("proposed_sla_days")
 
 
 class DecisionWriter:
@@ -122,7 +141,8 @@ class DecisionWriter:
                               # all reviewed by one family against another.
                               doc.get("review_independence", "cross_family"),
                               dict(doc.get("models") or {}),
-                              doc.get("same_family_policy", "wait"))
+                              doc.get("same_family_policy", "wait"),
+                              doc.get("floor"))
         if result.outcome is not AdjudicationOutcome.RATIFIED:
             @self._guard.protects(action="decision_queue_repair")
             def repair(*, finding_id: str, cycle: int):
@@ -135,8 +155,12 @@ class DecisionWriter:
         return result
 
     def adjudicate_once(self, finding, triage, review, *, cycle: int, context: str = "",
-                        roles=None, screening=None) -> Adjudication:
+                        roles=None, screening=None, finalize=None) -> Adjudication:
         """Adjudicate once. `roles` supplies independence, provenance and policy.
+
+        `finalize`, when given, maps the finished adjudication just before it is recorded:
+        the business-context floor (tools.context_floor) is applied here, so the record that
+        is written is the one the cycle acts on.
 
         `roles` is required: a record must never claim an independence nobody
         established (hard constraint 3), so there is no default to fall back to.
@@ -171,6 +195,8 @@ class DecisionWriter:
             result = exc.adjudication
         result = _replace(result, review_independence=independence,
                           models=provenance, same_family_policy=policy)
+        if finalize is not None:
+            result = finalize(result)
         self.record(result, cycle, screening=screening)
         return self.restore(finding_id, cycle)
 

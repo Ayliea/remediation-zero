@@ -26,12 +26,13 @@ FILES = ('LICENSE', 'NOTICE', 'THIRD_PARTY_NOTICES.md', 'start-remediation-zero.
          'tools/metrics.py', 'tools/reports.py', 'tools/rescan.py', 'tools/scan_store.py', 'tools/ingest.py',
          'tools/decisions.py', 'tools/assignments.py', 'tools/ownership.py', 'tools/cycles.py', 'tools/model_endpoint.py', 'tools/model_transport.py', 'tools/model_endpoints.py', 'tools/model_roles.py', 'tools/model_catalogue.py', 'tools/model_catalogue.json',
          'tools/secrets_port.py', 'tools/local_secrets.py', 'tools/connections.py', 'tools/connection_advice.py',
+         'tools/context.py', 'tools/context_store.py', 'tools/context_import.py', 'tools/context_rules.py', 'tools/context_floor.py',
          'tools/guardrail.py', 'tools/model_armor.py', 'tools/inference.py', 'tools/enrichment.py', 'tools/enrichment_fetch.py', 'tools/greenbone_report.py', 'tools/gmp.py',
          'tools/models/__init__.py', 'tools/models/_common.py', 'tools/models/openai_chat.py',
          'tools/models/anthropic_messages.py', 'tools/models/gemini_api.py',
          'tools/local_settings.py', 'tools/server_tls.py', 'tools/model_check.py', 'ui/settings_view.py', 'ui/connections_view.py', 'ui/assets/connections.js', 'ui/assets/connections.css', 'ui/dashboard_view.py', 'ui/theme.css', 'ui/assets/remediation-zero-logo.png',
          'prompts/guard_v1.md',
-         'prompts/triage.md', 'prompts/triage_no_cve.md', 'prompts/reviewer.md', 'prompts/reporting.md')
+         'prompts/triage.md', 'prompts/triage_no_cve.md', 'prompts/triage_context.md', 'prompts/reviewer.md', 'prompts/reporting.md')
 
 
 def build(destination):

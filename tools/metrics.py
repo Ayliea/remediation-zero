@@ -28,6 +28,7 @@ there being nothing here that could describe.
 from collections import Counter
 from typing import Any, Mapping, Sequence
 
+from tools.decisions import effective_severity
 from tools.ownership import owner_found_cycle
 
 
@@ -83,7 +84,7 @@ def compute_metrics(
     rejections = [v for v in verdicts if not v.get("ratified")]
 
     severities = Counter(
-        d.get("proposed_severity") for d in decisions if d.get("proposed_severity")
+        effective_severity(d) for d in decisions if effective_severity(d)
     )
     # An "unassigned" entry a later cycle found an owner for stays as history,
     # and is no longer waiting on anyone.

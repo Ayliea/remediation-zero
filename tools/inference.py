@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Any, Mapping
 
+from tools import context
 from tools.adjudication import CapacityError, Proposal, Verdict
 from tools.model_transport import CertificateProblem
 from tools.enrichment import Enrichment, finding_cves
@@ -73,6 +74,7 @@ def inference_fingerprint(rendered, roles, *, legacy):
         # Only a finding that gets the no-CVE guidance fingerprints it; a
         # legacy finding's list is unchanged, so its fingerprint is too.
         parts.append(_load("triage_no_cve.md"))
+        parts.append(_load("triage_context.md"))
     return hashlib.sha256(json.dumps(
         parts, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -176,7 +178,24 @@ def triage_instruction(legacy: bool) -> str:
     byte for byte, so the cloud's model input does not change."""
     if legacy:
         return _load("triage.md")
-    return _load("triage.md") + "\n" + _load("triage_no_cve.md")
+    return (_load("triage.md") + "\n" + _load("triage_no_cve.md") + "\n"
+            + _load("triage_context.md"))
+
+
+def with_context(asset: Mapping[str, Any], labels: Mapping[str, Mapping[str, Any]]) -> dict:
+    """The asset as triage sees it: the owner's effective business-context facts in place of
+    the stored fields, and `business_labels`, the names of its custom labels. `labels`: label
+    id -> {"name", "effect"}. A name that fails the strict label rule is left out."""
+    facts = context.effective_facts(asset, {k: v.get("effect") for k, v in labels.items()})
+    names = []
+    for label in asset.get("context_labels") or ():
+        name = (labels.get(label) or {}).get("name")
+        try:
+            if isinstance(name, str) and context.validate_label_name(name) == name:
+                names.append(name)
+        except ValueError:
+            pass
+    return {**asset, **facts, "business_labels": names}
 
 
 NVT_NAME_LIMIT = 200
@@ -270,6 +289,12 @@ def render_finding(
         f"  environment: {asset_value('environment')}",
         f"  criticality: {asset_value('criticality')}",
         f"  internet_facing: {asset_value('internet_facing')}",
+    ]
+    if not is_legacy_finding(finding):
+        # The new render only: a legacy (cloud) render stays byte for byte.
+        lines += [f"  sensitive_data: {asset_value('sensitive_data')}",
+                  f"  business_labels: {', '.join(asset.get('business_labels') or ()) or 'none'}"]
+    lines += [
         "",
         "ENRICHMENT",
     ]

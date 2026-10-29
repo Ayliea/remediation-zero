@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from engine.ports import Ports
 from tools.enrichment import EnrichmentCache, enrich_finding, finding_cves
+from tools.decisions import effective_severity
 from tools.docstore import FieldFilter
 from tools.exception_store import ExceptionWriter
 from tools.idempotency import fold_finding_id
@@ -98,7 +99,7 @@ def _decided_severity(ports: Ports, finding_id: str) -> str:
     reviewed = outcome == "ratified" or (
         outcome in _PERSON_APPROVABLE
         and ports.docs.collection("approvals").document(doc_id).get().exists)
-    value = newest.get("proposed_severity")
+    value = effective_severity(newest)
     value = value.strip().lower() if isinstance(value, str) else ""
     return value if reviewed and value in _SEVERITIES else "critical"
 
