@@ -138,3 +138,17 @@ def test_cycle_floors_and_assigns_with_the_floored_sla(ws):
     assert decision["floor"]["applied"] is True and decision["proposed_severity"] == "medium"
     assert state["sla_clocks"][FINDING_ID][0]["sla_days"] == 14
     assert "criticality: high" in proposer.calls[0]
+
+
+def test_cloud_cycle_records_no_floor(ws):
+    """The cloud's seeded assets carry criticality: high at the top level. Without business
+    context (the cloud's ports), the decision is recorded exactly as before: no floor."""
+    ws.docs_for("seed").collection("assets").document("ast-01").update({"criticality": "high"})
+    proposal = json.dumps({"severity": "medium", "sla_days": 60, "remediation": "Apply the vendor patch.",
+                           "evidence": ["in CISA KEV"], "rationale": "Exploited."})
+    from engine.triage_cycle import run_triage_cycle
+    run_triage_cycle(ports_for(ws, roles_with(FakeAdapter(proposal), FakeAdapter(RATIFY)), business_context=False),
+                     1, finding_ids=[FINDING_ID], enrichment=KevCache())
+    state = everything(ws)
+    assert "floor" not in state["decisions"]["RZ-0001-c001"][0]
+    assert state["sla_clocks"][FINDING_ID][0]["sla_days"] == 60

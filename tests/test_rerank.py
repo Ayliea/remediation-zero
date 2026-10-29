@@ -52,8 +52,9 @@ def cycle(ws, clock, n, sla, reviewer=RATIFY):
     ports = Ports(docs=docs, journal=ws.journal(), clock=clock,
                   roles=roles_with(FakeAdapter(proposal(sla)), FakeAdapter(reviewer)),
                   guard=RecordingGuard(), delivery=ForbiddenDelivery(), memory=LocalMemory(docs),
-                  telemetry=NoTelemetry(), record_failed_runs=True)
-    return run_triage_cycle(ports, n, finding_ids=pending_findings(docs), enrichment=FakeCache())
+                  telemetry=NoTelemetry(), record_failed_runs=True, business_context=True)
+    return run_triage_cycle(ports, n, finding_ids=pending_findings(docs, business_context=True),
+                            enrichment=FakeCache())
 
 
 def label(ws, clock, **facts):
@@ -71,7 +72,7 @@ def moves(ws):
 
 def test_unchanged_host_not_rerun(ws, clock):
     cycle(ws, clock, 1, 30)
-    assert pending_findings(ws.docs_for("dashboard")) == []
+    assert pending_findings(ws.docs_for("dashboard"), business_context=True) == []
 
 
 def test_label_change_reranks_open_findings_once(ws, clock):
@@ -80,9 +81,9 @@ def test_label_change_reranks_open_findings_once(ws, clock):
     label(ws, clock, criticality="high")
     clock.advance(60)
     label(ws, clock, environment="production")
-    assert pending_findings(ws.docs_for("dashboard")) == [FINDING_ID]
+    assert pending_findings(ws.docs_for("dashboard"), business_context=True) == [FINDING_ID]
     cycle(ws, clock, 2, 30)
-    assert pending_findings(ws.docs_for("dashboard")) == []
+    assert pending_findings(ws.docs_for("dashboard"), business_context=True) == []
     assert read(ws, "decisions", "RZ-0001-c002") is not None
 
 
@@ -150,7 +151,8 @@ def test_resumed_cycle_moves_once(ws, clock):
     run_triage_cycle(Ports(docs=docs, journal=ws.journal(), clock=clock,
                            roles=roles_with(FakeAdapter(proposal(3)), FakeAdapter(RATIFY)),
                            guard=RecordingGuard(), delivery=ForbiddenDelivery(),
-                           memory=LocalMemory(docs), telemetry=NoTelemetry(), record_failed_runs=True),
+                           memory=LocalMemory(docs), telemetry=NoTelemetry(), record_failed_runs=True,
+                           business_context=True),
                      2, finding_ids=[FINDING_ID], enrichment=FakeCache())
     assert read(ws, "sla_clocks", FINDING_ID) == first and list(moves(ws)) == ["RZ-0001-c002"]
 
@@ -160,4 +162,35 @@ def test_held_finding_is_not_reranked(ws, clock):
     assert read(ws, "decisions", "RZ-0001-c001")["outcome"] == "human_queue"
     clock.advance(60)
     label(ws, clock, criticality="high")
+    assert pending_findings(ws.docs_for("dashboard"), business_context=True) == []
+
+
+def test_cloud_selection_ignores_context(ws, clock):
+    cycle(ws, clock, 1, 30)
+    clock.advance(60)
+    label(ws, clock, criticality="high")
     assert pending_findings(ws.docs_for("dashboard")) == []
+
+
+def test_overdue_open_clock_is_not_moved(ws, clock):
+    """Chase marks a clock breached only when it escalates; an open clock past its due time is
+    overdue all the same, and a re-rank must not give it more time."""
+    cycle(ws, clock, 1, 7)
+    before = read(ws, "sla_clocks", FINDING_ID)
+    clock.advance(9 * DAY)
+    label(ws, clock, criticality="high")
+    cycle(ws, clock, 2, 14)
+    assert read(ws, "sla_clocks", FINDING_ID) == before
+    assert moves(ws)["RZ-0001-c002"]["outcome"] == "already overdue, not moved"
+
+
+def test_tightening_never_lengthens(ws, clock):
+    """A shorter SLA whose start + days has passed lands a day from now, but never later than
+    the deadline it already had."""
+    cycle(ws, clock, 1, 30)
+    old_due = read(ws, "sla_clocks", FINDING_ID)["due_sim_ts"]
+    clock.advance(29.5 * DAY)
+    label(ws, clock, criticality="high")
+    cycle(ws, clock, 2, 14)
+    assert read(ws, "sla_clocks", FINDING_ID)["due_sim_ts"] == old_due
+    assert moves(ws) == {}

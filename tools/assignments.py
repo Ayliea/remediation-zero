@@ -115,14 +115,18 @@ class AssignmentWriter:
         """Move an open clock's deadline after a business-context change.
 
         The clock keeps its original start: new due = start + new SLA days, but never sooner
-        than a day from now, so a raised finding is not born overdue. A breached clock is not
+        than a day from now, so a raised finding is not born overdue, and a shorter SLA never
+        lands later than the deadline it already had. A clock that is overdue (breached, or
+        open past its due time: chase marks it breached only when it escalates) is not
         moved. An unchanged due time writes nothing.
         """
         old_due = clock["due_sim_ts"]
-        if clock.get("status") == "breached":
+        if clock.get("status") == "breached" or old_due <= stamp.sim_ts:
             new_due, outcome = old_due, "already overdue, not moved"
         else:
             new_due = max(clock["started_sim_ts"] + sla_days * 86400, stamp.sim_ts + 86400)
+            if sla_days < (clock.get("sla_days") or sla_days + 1):
+                new_due = min(new_due, old_due)
             if new_due == old_due:
                 return
             outcome = "moved"

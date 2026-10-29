@@ -146,7 +146,7 @@ def _ports(docs, journal, clock, *, roles=None, delivery=None, memory=None, guar
            record_failed_runs=False):
     return Ports(docs=docs, journal=journal, clock=clock, roles=roles, guard=guard or NoGuard(),
                  delivery=delivery or NoDelivery(), memory=memory, telemetry=NoTelemetry(),
-                 record_failed_runs=record_failed_runs)
+                 record_failed_runs=record_failed_runs, business_context=True)
 
 
 def chase_delivery(docs, environ):
@@ -222,7 +222,7 @@ def run_local_cycle(ws, cycle, *, roles=None, clock=None, environ=None):
         # and the triage error is raised afterwards (exit 1, class only).
         triage_error = None
         try:
-            record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs),
+            record = run_triage_cycle(triage, cycle, finding_ids=pending_findings(triage_docs, business_context=True),
                                       enrichment=enrichment)
         except Exception as exc:  # noqa: BLE001 - re-raised below, after the other stages
             triage_error = exc

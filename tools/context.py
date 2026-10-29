@@ -80,6 +80,12 @@ def display_labels(asset: Mapping[str, Any], labels: Mapping[str, Mapping[str, A
                     if x in labels and labels[x].get("name")]
 
 
+def direct_facts(asset: Mapping[str, Any]) -> dict:
+    """The facts set on the asset itself (seeded fields and context_facts), without any that
+    come only from a custom label."""
+    return _set_facts(asset)
+
+
 def effective_facts(asset: Mapping[str, Any], custom_labels: Mapping[str, str]) -> dict:
     """Each fact's value for triage, `None` when not known. `custom_labels`: label id -> effect."""
     facts = dict.fromkeys(FACTS)

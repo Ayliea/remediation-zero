@@ -54,7 +54,7 @@ def _log(event: str, cycle_id: str, finding_id: str, **fields) -> None:
     )
 
 
-def pending_findings(docs) -> list:
+def pending_findings(docs, *, business_context: bool = False) -> list:
     """Finding ids awaiting triage, sorted: the local edition's cycle scope.
 
     Pending means status "open" and either no decision in any cycle, or an
@@ -101,8 +101,8 @@ def pending_findings(docs) -> list:
 
     open_findings = {s.id: s.to_dict() or {} for s in docs.collection("findings").where(
         filter=FieldFilter("status", "==", "open")).stream()}
-    changed_at = {s.id: (s.to_dict() or {}).get("context_changed_sim_ts")
-                  for s in docs.collection("assets").stream()}
+    changed_at = ({s.id: (s.to_dict() or {}).get("context_changed_sim_ts")
+                   for s in docs.collection("assets").stream()} if business_context else {})
 
     def context_changed(finding_id) -> bool:
         at = changed_at.get(open_findings[finding_id].get("asset_id"))
@@ -233,7 +233,9 @@ def _one_finding(ports, cycle, cycle_id, finding_id, enrichment, adapters,
         return
 
     finding = snapshot.to_dict()
-    asset = inference.with_context(assets.get(finding["asset_id"], {}), _labels(ports))
+    asset = assets.get(finding["asset_id"], {})
+    if ports.business_context:
+        asset = inference.with_context(asset, _labels(ports))
     finding, enriched, verdict = screen_finding(
         ports, finding, cycle, enrich_finding(enrichment, finding))
     if verdict.blocked or not verdict.screened:
@@ -403,7 +405,8 @@ def triage_and_review(ports: Ports, finding: dict, asset: dict, enrichment: Enri
             rendered, ports.roles, legacy=legacy),
         roles=ports.roles,
         screening=screening,
-        finalize=lambda result: apply_floor(result, asset, enrichment, ports.clock.now().sim_ts),
+        finalize=(None if not ports.business_context else
+                  lambda result: apply_floor(result, asset, enrichment, ports.clock.now().sim_ts)),
     )
 
 
@@ -470,7 +473,8 @@ def _assign(ports, adjudication, cycle, finding, assets, owners, assigner):
     assignment_id = assigner.record(
         assignment, cycle=cycle,
         sla_days=_sla_days(adjudication),
-        context_change=(assets.get(finding.get("asset_id")) or {}).get("context_last_change"))
+        context_change=((assets.get(finding.get("asset_id")) or {}).get("context_last_change")
+                        if ports.business_context else None))
     return assignment_id, assignment
 
 

@@ -275,3 +275,15 @@ def test_rule_suggests_and_owner_approves(server):
                                                   ("decision", "approve")])
     assert response.status == 303 and server.asset("ast-01")["context_facts"]["internet_facing"] is True
     assert "Suggested" not in server.page()[1]
+
+
+def test_questions_pre_tick_only_facts_set_directly(server):
+    """A host that is Crown jewels only through a custom label is not pre-ticked, so saving the
+    answer does not turn the label's effect into a fact that outlives the label."""
+    assert server.post("/context/label", {"name": "Payroll", "effect": "crown_jewels"})[0].status == 303
+    _, text = server.page()
+    label_id = re.search(r'<option value="(lbl-[0-9a-f]+)">Payroll', text).group(1)
+    assert server.post("/context/tag", [("asset", "ast-01"), ("label", label_id), ("action", "add")])[0].status == 303
+    _, text = server.page()
+    first = text.split("Which of these would stop the business if they went down?")[1].split("</fieldset>")[0]
+    assert 'value="ast-01" checked' not in first

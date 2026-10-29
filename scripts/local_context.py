@@ -92,6 +92,7 @@ class ContextRoutes:
             for a in assets:
                 facts = context.effective_facts(a, custom)
                 hosts.append({'asset_id': a['asset_id'], 'name': names[a['asset_id']], 'facts': facts,
+                          'direct': context.direct_facts(a),
                               'labels': [labels[x]['name'] for x in a.get('context_labels') or () if x in labels],
                               'provenance': dict(a.get('context_provenance') or {}),
                               'unknown': all(v is None for v in facts.values())})

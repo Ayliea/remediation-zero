@@ -97,7 +97,7 @@ def _owner_tools(state: dict, token: str) -> str:
     questions = []
     for number, (question, fact, value) in enumerate(QUESTIONS, start=1):
         ticks = "".join(f'<label class="check"><input type="checkbox" name="asset" value="{e(h["asset_id"])}"'
-                        f'{" checked" if h["facts"].get(fact) == value else ""}> {e(h["name"])}</label>'
+                        f'{" checked" if h["direct"].get(fact) == value else ""}> {e(h["name"])}</label>'
                         for h in hosts)
         questions.append(f'<fieldset class="role-block"><legend>{e(question)}</legend>'
                          + _form("/context/questions", token,

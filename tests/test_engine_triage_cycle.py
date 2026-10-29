@@ -102,12 +102,13 @@ def ws(tmp_path):
     return workspace
 
 
-def ports_for(ws, roles, *, guard=None, record_failed_runs=True, docs=None):
+def ports_for(ws, roles, *, guard=None, record_failed_runs=True, docs=None, business_context=True):
     docs = docs or ws.docs_for("triage_cycle")
     return Ports(docs=docs, journal=ws.journal(), clock=SimClock(ClockMode.REAL),
                  roles=roles, guard=guard or RecordingGuard(),
                  delivery=ForbiddenDelivery(), memory=LocalMemory(docs),
-                 telemetry=NoTelemetry(), record_failed_runs=record_failed_runs)
+                 telemetry=NoTelemetry(), record_failed_runs=record_failed_runs,
+                 business_context=business_context)
 
 
 def everything(ws):

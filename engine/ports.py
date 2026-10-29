@@ -100,3 +100,7 @@ class Ports:
     telemetry: Telemetry
     #: Local wiring sets this; the engine checks it rather than the store type.
     record_failed_runs: bool = False
+    #: The local edition's business context (design 2026-10-29): the owner's facts and labels
+    #: reach triage, the Crown-jewels floor applies, and a change re-ranks. Off for the cloud,
+    #: whose decisions and SLA clocks are recorded exactly as before.
+    business_context: bool = False
