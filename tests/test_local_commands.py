@@ -797,7 +797,7 @@ def test_snapshot_has_cloud_keys(ws, monkeypatch):
     store = ws.docs_for("report")
     local = snapshot(store)
     store.close()
-    assert set(local) == cloud_keys | {"failed_runs", "scanner_state"}
+    assert set(local) == cloud_keys | {"failed_runs", "scanner_state", "context_unknown_hosts"}
     assert local["counts"]["findings"] == 1
     assert local["failed_runs"] == []
 
