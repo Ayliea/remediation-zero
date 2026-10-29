@@ -7,14 +7,16 @@ from html import escape
 from tools.model_catalogue import presets
 from ui.connections_view import models_section
 
-SECTIONS = {'model': 'Models', 'storage': 'Data & storage',
+SECTIONS = {'model': 'Models', 'context': 'Context', 'storage': 'Data & storage',
             'scanner': 'Scanner', 'application': 'Application', 'safety': 'Safety & limits', 'updates': 'Updates'}
 #: Shown on the Scanner page and by `greenbone tasks` when the account lists nothing.
 NO_VISIBLE_TASKS = ('This account can see no tasks. In Greenbone, add it as an observer on each task '
                     'to import, or give its role access to them.')
 
 
-def render_settings(values, section, token, *, message='', models=None, scanner=None, fingerprint=None):
+def render_settings(values, section, token, *, message='', models=None, scanner=None, fingerprint=None,
+                    context=None):
+    # context: the Context section's body, drawn by scripts/local_context.py (ui/context_view.py).
     e = lambda v: escape(str(v), quote=True)
     tabs = '<nav class="settings-tabs" aria-label="Settings sections">' + ''.join(
         f'<a href="/?view=settings&amp;section={k}" aria-current="{"page" if k == section else "false"}">{v}</a>'
@@ -27,6 +29,8 @@ def render_settings(values, section, token, *, message='', models=None, scanner=
         models = models or {'rows': [], 'coverage': [], 'owner': False, 'confirmed': False, 'deletions': {}}
         body = models_section(models['rows'], models['coverage'], presets(), values['same_family_policy'], token,
                               owner=models['owner'], confirmed=models['confirmed'], deletions=models['deletions'])
+    elif section == 'context':
+        body = context or ''
     elif section == 'scanner':
         body = _scanner_body(values['scanner'], scanner or {}, form, token, e)
     elif section == 'application':

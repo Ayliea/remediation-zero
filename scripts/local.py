@@ -54,7 +54,7 @@ from engine.seed import SeedRefused, seed
 from engine.snapshot import snapshot
 from engine.sweep import NoSuchFinding, accept, run_sweep
 from engine.triage_cycle import NO_PROPOSER, build_adapters, pending_findings, run_triage_cycle
-from scripts import local_accounts, local_auth, local_connection_cli, local_connections
+from scripts import local_accounts, local_auth, local_connection_cli, local_connections, local_context
 from tools import access, connections, local_settings, server_tls
 from tools.account_store import AccountStore
 from tools.accounts import RESET_KINDS, AccountRefused, Accounts, RateLimiter
@@ -66,6 +66,7 @@ from tools.enrichment_fetch import refresh, urllib_get, workspace_cache_dir
 from tools.github_tickets import GitHubTickets, GitHubUnavailable
 from tools.gmp import GmpAuthError, GmpClient, GmpError, credentials_from_env
 from tools.greenbone_report import MAX_REPORT_BYTES, parse_report
+from tools.context_import import MAX_CSV_BYTES
 from tools.guardrail import NoGuard, guard_for
 from tools.local_layout import Workspace
 from tools.local_memory import LocalMemory
@@ -74,7 +75,7 @@ from tools.model_check import check_models
 from tools.model_endpoints import call_endpoint
 from tools.model_roles import ModelRoles, ROLES, suggest_family
 from tools.models import FORMATS
-from ui import account_views
+from ui import account_views, context_view
 from ui.dashboard_view import REFUSAL_WORDS, UPLOAD_MESSAGES, VIEWS, demo_snapshot, render
 from ui.connections_view import SCRIPT_HASH
 from ui.settings_view import NO_VISIBLE_TASKS, SECTIONS, render_settings
@@ -1177,7 +1178,8 @@ GET_ACTIONS = dict({view: 'view' for view in VIEWS}, settings='settings', accoun
 POST_ACTIONS = {'/settings': 'settings', '/upload': 'upload', '/accounts/invite': 'manage_accounts',
                 '/accounts/revoke': 'manage_accounts', '/accounts/role': 'manage_accounts',
                 '/accounts/remove': 'manage_accounts', '/accounts/reset': 'manage_accounts',
-                **{path: local_connections.ACTION for path in local_connections.PATHS}}
+                **{path: local_connections.ACTION for path in local_connections.PATHS},
+                **{path: local_context.ACTION for path in local_context.PATHS}}
 #: The fields each account form carries besides `token`: (required, optional). Anything else is a 400.
 ACCOUNT_FORMS = {'/accounts/invite': ({'email'}, {'role'}), '/accounts/revoke': ({'invite'}, set()),
                  '/accounts/role': ({'account', 'role'}, set()), '/accounts/remove': ({'account'}, set()),
@@ -1220,7 +1222,7 @@ class _BodyBudget:
 
 def handler(store, demo, config_path=None, approve_command=None, upload=None, records=None,
             public_origin=None, *, accounts, settings_exposed=False, server_names=(), scheme='http',
-            limiter=None, workspace_root=None, hsts=False, connection_limiter=None):
+            limiter=None, workspace_root=None, hsts=False, connection_limiter=None, workspace=None):
     # records: returns 'saved' or 'synthetic' for the page banner; None keeps 'synthetic'.
     # public_origin: from public_origin(); the one name an HTTPS proxy in front may forward.
     # accounts: tools.accounts.Accounts on the workspace's accounts file, opened by serve
@@ -1233,6 +1235,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     # hsts: send Strict-Transport-Security on every response (the TLS listener with your own
     # certificate only; see build_server for why not with the self-signed one).
     # connection_limiter: for the /connections/* routes that call a provider (default 6 a minute).
+    # workspace: the Workspace, for Settings -> Context (writes through docs_for('context') only).
     public_host = public_origin.split('://', 1)[1] if public_origin else None
     limiter = limiter if limiter is not None else RateLimiter()
     auth = local_auth.AuthRoutes(accounts, limiter)
@@ -1250,6 +1253,14 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
     connection_routes = (local_connections.ConnectionRoutes(accounts, config_path, serial, limiter, log=_log,
                                                             limiter=connection_limiter)
                          if config_path else None)
+
+    def context_guard():
+        guard = guard_for(load_roles(workspace.root, os.environ))
+        return None if isinstance(guard, NoGuard) else guard
+
+    context_routes = (local_context.ContextRoutes(workspace, accounts, serial, guard=context_guard,
+                                                  read_upload=_read_upload_form, log=_log)
+                      if config_path and workspace is not None else None)
 
     class DashboardHandler(BaseHTTPRequestHandler):
         timeout = IDLE_TIMEOUT
@@ -1335,10 +1346,13 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 return
             connection = path in local_connections.PATHS
             limit = (MAX_REPORT_BYTES + UPLOAD_OVERHEAD if path == '/upload' else
+                     MAX_CSV_BYTES + UPLOAD_OVERHEAD if path == '/context/upload' else
+                     local_context.FORM_LIMIT if path in local_context.PATHS else
                      SETTINGS_BODY_LIMIT if path == '/settings' else
                      local_auth.FORM_LIMIT if path.startswith('/accounts/') or connection else 0)
             slot = None
-            held = uploading if path == '/upload' else connecting if connection else None
+            held = (uploading if path in ('/upload', '/context/upload')
+                    else connecting if connection else None)
             if held is not None:
                 slot = req.session.csrf             # one per session; in memory only
                 with uploading_lock:
@@ -1358,6 +1372,13 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     req = self._request()
                     if req is not None:
                         connection_routes.post(self, req, path)
+                    return
+                if path in local_context.UNSERIAL:
+                    # The guard check can take as long as a model call: the route takes `serial`
+                    # itself, before and after it, and resolves the session again each time.
+                    req = self._request()
+                    if req is not None:
+                        context_routes.post_label(self, req)
                     return
                 with serial:
                     req = self._request()  # read again under the lock, just before it is used
@@ -1390,7 +1411,7 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
             """Answer and return True when a dashboard POST may not proceed; nothing is read.
             The same checks run again in _post, under `serial`."""
             action = POST_ACTIONS.get(path)
-            if action is None:
+            if action is None or (path in local_context.PATHS and context_routes is None):
                 self.send_error(404)
                 return True
             session = req.session
@@ -1542,7 +1563,9 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                     # Only the Settings view shows it (others need only its nav link), so only that view
                     # reads the key file and builds the Models data.
                     settings_html = self._settings_html(saved, section if section in SECTIONS else 'model',
-                        message='Preferences saved. No model calls were made.' if query.get('saved') == ['1'] else '',
+                        message=('Preferences saved. No model calls were made.' if query.get('saved') == ['1']
+                                 else context_view.MESSAGES.get(query.get('done', [''])[0], '')
+                                 if section == 'context' else ''),
                         scanner=scanner_probe(saved) if view == 'settings' and section == 'scanner' else None,
                         session=session) if view == 'settings' else ''
                 body = render(demo_snapshot() if demo else store.snapshot(), view, demo=demo, settings_html=settings_html,
@@ -1663,11 +1686,27 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 return
             self.redirect('/?view=accounts')
 
-        def _settings_html(self, values, section, *, message='', scanner=None, session=None):
+        def _settings_html(self, values, section, *, message='', scanner=None, session=None, context=None):
+            # context: a body for the Context section in place of its page (a mapping or a preview).
+            if section == 'context' and context is None:
+                context = (context_routes.section(session, message) if context_routes and session
+                           else '<p>Business context is not available here.</p>')
+                message = ''
             return render_settings(values, section, self.csrf, message=message,
                                    fingerprint=_certificate_fingerprint(values, workspace_root),
                                    models=self._models(values, session) if section == 'model' else None,
-                                   scanner=scanner)
+                                   scanner=scanner, context=context)
+
+        def _context_page(self, session, body):
+            """The whole Settings page with `body` as its Context section (local_context)."""
+            self.csrf = session.csrf
+            owner_missing = not accounts.owner_exists()
+            return render(demo_snapshot() if demo else store.snapshot(), 'settings', demo=demo,
+                          settings_html=self._settings_html(local_settings.load(config_path), 'context',
+                                                            session=session, context=body),
+                          approve_command=None if demo else approve_command,
+                          records=records() if records and not demo else 'synthetic',
+                          account=self._account(session, owner_missing), owner_missing=owner_missing)
 
         @staticmethod
         def _models(values, session):
@@ -1761,6 +1800,9 @@ def handler(store, demo, config_path=None, approve_command=None, upload=None, re
                 return
             if path in ACCOUNT_FORMS:
                 self._accounts_post(req, session, path)
+                return
+            if path in local_context.PATHS:
+                context_routes.post(self, req, session, path)
                 return
             if path == '/upload':
                 self._upload(session)
@@ -2021,7 +2063,7 @@ def build_server(ws, preferences, config_path, *, demo=False, public_url=None, p
     handler_class = handler(view, demo, config_path, command, upload, records=view.records,
                             public_origin=public_url, accounts=accounts, settings_exposed=exposed,
                             server_names=tuple(names), scheme='https' if exposed else 'http',
-                            workspace_root=ws.root, hsts=hsts)
+                            workspace_root=ws.root, hsts=hsts, workspace=None if demo else ws)
     try:
         server = DashboardServer((address, port), handler_class, tls_context=context)
     except OSError as error:
