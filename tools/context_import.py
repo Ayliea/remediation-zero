@@ -17,6 +17,7 @@ surface when a later scan reports the host.
 Nothing is written here. Standard library only.
 """
 import csv
+import hashlib
 import io
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
@@ -63,6 +64,11 @@ def normalise_host(name: str) -> str:
     """Lower case, one trailing dot dropped, surrounding space stripped."""
     name = name.strip().lower()
     return name[:-1] if name.endswith(".") else name
+
+
+def row_id(key: str) -> str:
+    """The stored id of a waiting row, from its normalised host key."""
+    return "row-" + hashlib.sha256(key.encode()).hexdigest()[:24]
 
 
 def _ip(host: Mapping[str, Any]) -> Optional[str]:

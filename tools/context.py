@@ -89,7 +89,7 @@ def change_summary(before: Mapping[str, Any], after: Mapping[str, Any]) -> list[
             for f in FACTS if before.get(f) != after.get(f)]
 
 
-def _check(fact: str, value: Any) -> None:
+def check_fact(fact: str, value: Any) -> None:
     if fact not in _VALUES:
         raise ValueError(f"unknown context fact {fact!r}")
     if value is not None and (value not in _VALUES[fact] or type(value) is not type(next(iter(_VALUES[fact])))):
@@ -104,7 +104,7 @@ def apply_facts(asset: Mapping[str, Any], changes: Mapping[str, Any], prov: Prov
     do not, the facts and provenance are returned without the changed-marker fields.
     """
     for fact, value in changes.items():
-        _check(fact, value)
+        check_fact(fact, value)
     stored = dict(asset.get("context_facts") or {})
     current = _set_facts(asset)
     if all(current.get(f) == v for f, v in changes.items()):

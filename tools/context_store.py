@@ -11,15 +11,16 @@ write of several assets is one batch, so a request changes all of them or none.
 Business time comes from SimClock: each stored fact carries a Provenance stamped here.
 Standard library only.
 """
-import hashlib
 import secrets
 from typing import Any, Iterable, Optional
 
 from tools import context
 from tools.clock import SimClock
-from tools.context_import import MAX_PENDING_ROWS, ROW_TTL_SECONDS, ColumnMapping, Preview
+from tools.context_import import MAX_PENDING_ROWS, ROW_TTL_SECONDS, ColumnMapping, Preview, row_id
+from tools.context_rules import Rule, Suggestion, suggestions, validate_rule
 
 LABELS = "context_labels"
+RULES = "context_rules"
 SUGGESTIONS = "context_suggestions"
 MAPPINGS = "context_mappings"
 ASSETS = "assets"
@@ -154,8 +155,7 @@ class ContextWriter:
                 batch.update(ref, fields)
             changed += bool(summary)
         for key, facts in preview.unmatched:
-            doc_id = "row-" + hashlib.sha256(key.encode()).hexdigest()[:24]
-            batch.set(self._docs.collection(SUGGESTIONS).document(doc_id),
+            batch.set(self._docs.collection(SUGGESTIONS).document(row_id(key)),
                       {"kind": "row", "key": key, "facts": dict(facts), "created_by": account,
                        "real_ts": prov.real_ts, "sim_ts": prov.sim_ts,
                        "expires_sim_ts": prov.sim_ts + ROW_TTL_SECONDS})
@@ -167,6 +167,79 @@ class ContextWriter:
         """The column mapping the last upload used, if any."""
         row = self._docs.collection(MAPPINGS).document("default").get().to_dict()
         return ColumnMapping(row["host_column"], dict(row["fact_columns"])) if row else None
+
+    def rules(self) -> list[Rule]:
+        """Saved rules, oldest first."""
+        rows = sorted((s.to_dict() or {} for s in self._docs.collection(RULES).stream()),
+                      key=lambda r: (r.get("sim_ts", 0), r.get("rule_id")))
+        return [Rule(r["rule_id"], r["kind"], r["pattern"], dict(r["facts"])) for r in rows]
+
+    def save_rule(self, kind: str, pattern: str, facts: dict, *, account: str,
+                  rule_id: Optional[str] = None) -> str:
+        """Save a new rule, or replace `rule_id`'s matcher and facts; its decisions stay."""
+        kind, pattern, facts = validate_rule(kind, pattern, facts)
+        prov = self._prov("direct", account)
+        if rule_id is None:
+            rule_id = f"rule-{secrets.token_hex(6)}"
+            created = prov.sim_ts
+        else:
+            existing = self._docs.collection(RULES).document(rule_id).get()
+            if not existing.exists:
+                raise KeyError(f"unknown rule: {rule_id}")
+            created = (existing.to_dict() or {}).get("sim_ts", prov.sim_ts)
+        self._docs.collection(RULES).document(rule_id).set(
+            {"rule_id": rule_id, "kind": kind, "pattern": pattern, "facts": facts,
+             "saved_by": account, "real_ts": prov.real_ts, "sim_ts": created})
+        return rule_id
+
+    def remove_rule(self, rule_id: str, *, account: str) -> None:
+        """Delete a rule and its decisions in one batch. Facts it set when approved stay."""
+        batch = self._docs.batch()
+        for s in self._docs.collection(SUGGESTIONS).stream():
+            if (s.to_dict() or {}).get("rule_id") == rule_id:
+                batch.delete(self._docs.collection(SUGGESTIONS).document(s.id))
+        batch.delete(self._docs.collection(RULES).document(rule_id))
+        batch.commit()
+
+    def _decided(self) -> dict:
+        return {(r["rule_id"], r["asset_id"]): r["decision"]
+                for r in (s.to_dict() or {} for s in self._docs.collection(SUGGESTIONS).stream())
+                if r.get("kind") == "decision"}
+
+    def _hosts(self) -> list[dict]:
+        return [{**(s.to_dict() or {}), "asset_id": s.id} for s in self._docs.collection(ASSETS).stream()]
+
+    def suggestions(self, now_sim_ts: float) -> list[Suggestion]:
+        """Every pending suggestion: rule matches, then waiting spreadsheet rows."""
+        rows = [{**row, "id": row_id(row["key"])}
+                for row in self.pending_rows(now_sim_ts)]
+        return suggestions(self._hosts(), self.rules(), self._decided(), rows, self.custom_labels())
+
+    def decide(self, source_id: str, asset_id: str, approve: bool, *, account: str) -> list[str]:
+        """Approve or deny one suggestion for one host; the ids whose effective facts changed.
+        A rule's decision is kept; a waiting row is used up either way."""
+        prov = self._prov("rule", account)
+        found = next((s for s in self.suggestions(prov.sim_ts)
+                      if s.source_id == source_id and s.asset_id == asset_id), None)
+        if found is None:
+            raise ValueError("That suggestion is no longer waiting.")
+        ((ref, row),) = self._assets([asset_id])
+        batch, changed = self._docs.batch(), []
+        if approve:
+            fields, summary = context.apply_facts(row, found.facts, prov, self.custom_labels())
+            if fields:
+                batch.update(ref, fields)
+            changed = [asset_id] if summary else []
+        suggestions_ = self._docs.collection(SUGGESTIONS)
+        if source_id.startswith("row-"):
+            batch.delete(suggestions_.document(source_id))
+        else:
+            batch.set(suggestions_.document(f"dec-{source_id}-{asset_id}"),
+                      {"kind": "decision", "rule_id": source_id, "asset_id": asset_id,
+                       "decision": "approved" if approve else "denied", "by": account,
+                       "real_ts": prov.real_ts, "sim_ts": prov.sim_ts})
+        batch.commit()
+        return changed
 
     def asset_facts(self, asset_id: str) -> Optional[dict]:
         """The effective facts of one asset, or None when there is no such asset."""
