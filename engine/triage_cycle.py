@@ -68,6 +68,12 @@ def pending_findings(docs) -> list:
     An outage is not an answer (Ruling 39): a finding whose newest decision
     is `unavailable`, or `human_queue` because triage hit a CapacityError,
     is pending again in every later cycle until a model answers.
+
+    A business-context change re-ranks (design 2026-10-29): an open finding whose newest
+    decision was ratified, or approved by a person, is pending again when its asset's
+    `context_changed_sim_ts` is newer than that decision. Several changes before a cycle
+    make one re-rank. Held, queued and rejected findings take the new context at their next
+    ordinary triage.
     """
     latest: dict = {}  # finding_id -> newest decision sim_ts
     newest: dict = {}  # finding_id -> (sim_ts, cycle, row) of the newest decision
@@ -93,11 +99,25 @@ def pending_findings(docs) -> list:
         reopened_at = exception.get("reopened_sim_ts")
         return reopened_at is None or latest[finding_id] <= reopened_at
 
-    open_ids = {s.id for s in docs.collection("findings").where(
+    open_findings = {s.id: s.to_dict() or {} for s in docs.collection("findings").where(
         filter=FieldFilter("status", "==", "open")).stream()}
-    return sorted(f for f in open_ids
+    changed_at = {s.id: (s.to_dict() or {}).get("context_changed_sim_ts")
+                  for s in docs.collection("assets").stream()}
+
+    def context_changed(finding_id) -> bool:
+        at = changed_at.get(open_findings[finding_id].get("asset_id"))
+        if at is None or at <= latest[finding_id]:
+            return False
+        _, cycle, row = newest[finding_id]
+        return (row.get("outcome") == "ratified"
+                or (row.get("outcome") in ("unreviewed", "held_for_approval")
+                    and docs.collection("approvals").document(
+                        f"{finding_id}-c{cycle:03d}").get().exists))
+
+    return sorted(f for f in open_findings
                   if f not in latest or outage(f)
-                  or (f in reopened and awaits_retriage(f)))
+                  or (f in reopened and awaits_retriage(f))
+                  or context_changed(f))
 
 
 def run_triage_cycle(ports: Ports, cycle: int, *, finding_ids: Optional[list] = None,
@@ -449,7 +469,8 @@ def _assign(ports, adjudication, cycle, finding, assets, owners, assigner):
     assignment = resolve_owner(finding, assets, owners)
     assignment_id = assigner.record(
         assignment, cycle=cycle,
-        sla_days=_sla_days(adjudication))
+        sla_days=_sla_days(adjudication),
+        context_change=(assets.get(finding.get("asset_id")) or {}).get("context_last_change"))
     return assignment_id, assignment
 
 
