@@ -51,10 +51,17 @@ def certs(tmp_path_factory):
     # older openssl builds add no key identifiers unless asked.
     (d / 'san').write_text('subjectAltName=DNS:localhost\nsubjectKeyIdentifier=hash\n'
                            'authorityKeyIdentifier=keyid\n')
-    for name, days in (('good', '2'), ('expired', '-1')):
+    sign = ['x509', '-req', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-extfile', 'san']
+    for name in ('good', 'expired'):
         _openssl('req', *key, '-keyout', f'{name}.key', '-out', f'{name}.csr', '-subj', '/CN=localhost', cwd=d)
-        _openssl('x509', '-req', '-in', f'{name}.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial',
-                 '-out', f'{name}.pem', '-days', days, '-extfile', 'san', cwd=d)
+    _openssl(*sign, '-in', 'good.csr', '-out', 'good.pem', '-days', '2', cwd=d)
+    # OpenSSL 3.5 refuses `-days -1` ("end date before start date") and takes explicit dates,
+    # which 3.0 does not have; 3.0 still accepts the negative day count.
+    try:
+        _openssl(*sign, '-in', 'expired.csr', '-out', 'expired.pem',
+                 '-not_before', '20200101000000Z', '-not_after', '20200102000000Z', cwd=d)
+    except subprocess.CalledProcessError:
+        _openssl(*sign, '-in', 'expired.csr', '-out', 'expired.pem', '-days', '-1', cwd=d)
     _openssl('req', '-x509', *key, '-keyout', 'self.key', '-out', 'self.pem', '-days', '2', '-subj', '/CN=localhost',
              '-addext', 'subjectAltName=DNS:localhost', '-addext', 'subjectKeyIdentifier=hash', cwd=d)
     (d / 'not-a-cert.pem').write_text('this is not a certificate\n')
