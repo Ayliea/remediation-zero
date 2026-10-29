@@ -11,13 +11,17 @@ write of several assets is one batch, so a request changes all of them or none.
 Business time comes from SimClock: each stored fact carries a Provenance stamped here.
 Standard library only.
 """
+import hashlib
 import secrets
 from typing import Any, Iterable, Optional
 
 from tools import context
 from tools.clock import SimClock
+from tools.context_import import MAX_PENDING_ROWS, ROW_TTL_SECONDS, ColumnMapping, Preview
 
 LABELS = "context_labels"
+SUGGESTIONS = "context_suggestions"
+MAPPINGS = "context_mappings"
 ASSETS = "assets"
 
 
@@ -128,6 +132,41 @@ class ContextWriter:
                                        for r, d in rows}, before, after, account)
         self._docs.collection(LABELS).document(label_id).delete()
         return changed
+
+    def pending_rows(self, now_sim_ts: float) -> list[dict]:
+        """Unmatched spreadsheet rows that have not expired."""
+        return [row for row in (s.to_dict() or {} for s in self._docs.collection(SUGGESTIONS).stream())
+                if row.get("kind") == "row" and row.get("expires_sim_ts", 0) > now_sim_ts]
+
+    def apply_upload(self, preview: Preview, mapping: ColumnMapping, *, account: str) -> int:
+        """Apply a preview's changes, keep its unmatched rows as suggestions and remember the
+        mapping, in one batch; the number of assets whose effective facts changed. ValueError,
+        and nothing written, when the rows would take pending suggestions over MAX_PENDING_ROWS."""
+        prov, custom = self._prov("spreadsheet", account), self.custom_labels()
+        pending = {row["key"] for row in self.pending_rows(prov.sim_ts)}
+        if len(pending | {key for key, _ in preview.unmatched}) > MAX_PENDING_ROWS:
+            raise ValueError(f"At most {MAX_PENDING_ROWS} rows can wait for a host the scanner has not "
+                             "reported. Remove rows for hosts you no longer have and upload again.")
+        batch, changed = self._docs.batch(), 0
+        for ref, row in self._assets(preview.changes):
+            fields, summary = context.apply_facts(row, preview.changes[ref.id], prov, custom)
+            if fields:
+                batch.update(ref, fields)
+            changed += bool(summary)
+        for key, facts in preview.unmatched:
+            doc_id = "row-" + hashlib.sha256(key.encode()).hexdigest()[:24]
+            batch.set(self._docs.collection(SUGGESTIONS).document(doc_id),
+                      {"kind": "row", "key": key, "facts": dict(facts), "created_by": account,
+                       "real_ts": prov.real_ts, "sim_ts": prov.sim_ts,
+                       "expires_sim_ts": prov.sim_ts + ROW_TTL_SECONDS})
+        batch.set(self._docs.collection(MAPPINGS).document("default"), mapping.to_dict())
+        batch.commit()
+        return changed
+
+    def saved_mapping(self) -> Optional[ColumnMapping]:
+        """The column mapping the last upload used, if any."""
+        row = self._docs.collection(MAPPINGS).document("default").get().to_dict()
+        return ColumnMapping(row["host_column"], dict(row["fact_columns"])) if row else None
 
     def asset_facts(self, asset_id: str) -> Optional[dict]:
         """The effective facts of one asset, or None when there is no such asset."""
