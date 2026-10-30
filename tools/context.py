@@ -149,4 +149,3 @@ def changed_marker(prov: Provenance, summary: list[str]) -> dict:
     return {"context_changed_real_ts": prov.real_ts, "context_changed_sim_ts": prov.sim_ts,
             "context_last_change": {"by": prov.account, "summary": list(summary),
                                     "real_ts": prov.real_ts, "sim_ts": prov.sim_ts}}
-
